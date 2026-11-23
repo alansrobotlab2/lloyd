@@ -72,14 +72,123 @@ What it holds, and what it cannot yet measure:
   rounds of the previous 14 days with 40–450 inserted lines and at least one
   code file. Three are `provisional` (a clause a reader could not settle
   without running something).
-- **It measures false refusal only.** There is no `retry` case, so false met —
-  the costly error — is reported `unmeasured`, not zero. The ledger cannot
-  supply one: of 41 owed-check reopens, one follows a landing, and every
-  rollback on record was a false positive. `retry` cases have to be made, by
-  the route `544-stripped-tests` already uses (`strip_tests`) and by labelling
-  the refused heads kept at `refs/automod/rounds/<round>`.
+- **On its own it measures false refusal only.** It holds no `retry` case, so
+  alone it reports false met — the costly error — `unmeasured`, not zero. The
+  ledger cannot supply one: of 41 owed-check reopens, one follows a landing, and
+  every rollback on record was a false positive. The `retry` cases are made, and
+  live in `negative/` (next section).
 - **A label here is never re-marked to match a grader.** It changes only on a
-  named re-read, recorded in the case's `note`.
+  named re-read, and since 2026-11-22 the lock below enforces that.
+
+## The known-bad set (`negative/`) — 2026-11-22
+
+21 cases whose correct verdict is `retry`, none labelled by asking the grader.
+`scripts/automod/calibration_cases.py` is the generator and the reader; each
+fixture says which of two routes its label came by (`label_source`).
+
+**`constructed` (15) — true by construction.** A landed round with one thing a
+clause demands taken back out. All three transforms are the same operation,
+"restore these paths to the parent's version", and differ in what is restored:
+
+| `transform.kind` | what is restored | cases |
+|---|---|---|
+| `strip_tests` | the round's test files | 6 |
+| `revert_source` | one changed source file, tests and claims kept | 5 |
+| `drop_doc` | the doc a clause names | 4 |
+
+Each fixture records the clause it breaks with that clause's words at the time
+(`violates`), a `proof` — a fixed string that must or must not be in one file of
+the built tree, checkable with `git show` and no model — and `tests_rung`: what
+the round's own test files did on the defect, measured by running them
+(2026-11-22). **10 are `red` and 5 are `green`.** A red case cannot land on a
+false `met`, because the `tests` rung stops it first; a green one can, so
+`calibrate` counts those five apart (`tests rung green, review alone: k/n`).
+Every red failure was read and is a node of the round's own that the removed
+change was there to satisfy.
+
+A constructed commit exists nowhere until it is asked for. `materialize` rebuilds
+it with git plumbing — a private index, `write-tree`, `commit-tree` under a fixed
+identity and date — so its sha is a pure function of `(source_commit, parent,
+transform)`, the fixture pins it, and a rebuild that hashes to anything else is
+refused rather than graded. No ref is written and nothing is checked out; the
+object is loose in the repo `calibrate` runs in. This is why a case here carries
+`strip_tests: false` where `544-stripped-tests` carries `true`: that one applies
+its transform at grading time, these have it in the commit.
+
+**`refused_then_fixed` (6) — a refused head a reader confirmed.** A round whose
+earlier head the rung refused and whose later head landed, kept only where a
+reader who is not the grader read `git diff <refused head> <landed head>` and
+found the refusal named a real defect that the later head repaired (`refusal`,
+`evidence`, `fixed_by`). 200 such rounds have both heads still in the repo; eight
+were read, six kept, and two set aside because the diff alone did not settle
+them (one needs the live vault, one a mutation run). The rest were not read.
+They are the only cases whose commits are not on `main`: each is reachable from
+`refs/automod/rounds/<round>` in `~/lloyd` and nowhere else.
+
+**These six cannot give an unbiased false-met rate**: each was selected *because*
+the grader refused it once, so re-grading it measures run-to-run consistency on
+defects it has already caught. `calibrate` prints false met per label source for
+that reason; the constructed 15 are the rate, the six are a floor on agreement.
+
+One case per round, and no round is also in `independent/`. Add one with
+
+```bash
+.venvs/lloyd/bin/python -m scripts.automod.review_tools defect --name 4999-dropped-doc \
+    --round SM_… --kind drop_doc --path architecture/x.md --violates 3 --why "…"
+.venvs/lloyd/bin/python -m scripts.automod.review_tools lock-labels
+```
+
+## The lock (`labels.lock`)
+
+One line per case of `independent/` and `negative/`: its label and a hash of
+`(name, label, parent, commit, source_commit, transform)`.
+`tests/test_calibration_cases.py::test_the_shipped_labels_are_the_locked_ones`
+fails when a fixture stops matching its line. To change a label, add to the
+fixture
+
+```json
+"relabel": {"from": "pass", "to": "retry", "by": "<who re-read the diff>",
+            "on": "<date>", "reason": "<what the re-read found>"}
+```
+
+and run `lock-labels`, which refuses the change without that record, refuses a
+`by` that names the grader, refuses a new diff under an old name (that is a new
+case), and refuses to drop a locked case (retire one by editing the lock by hand
+in a reviewed commit). **The grader's answer is never a valid reason** — these
+cases exist to measure it. The four top-level cases are not locked: two of them
+are the re-marks this rule was written against.
+
+## Both rates in one run, and the trend
+
+```bash
+.venvs/lloyd/bin/python -m scripts.automod.review_tools calibrate \
+    --set negative --set independent --record
+```
+
+`--set` repeats; the run ends with one combined line,
+
+    false met k/N (95% Wilson lo–hi); false refusal k/N (95% Wilson lo–hi) [false met by label source: constructed k/n, refused_then_fixed k/n] [tests rung green, review alone: k/n]
+
+(intervals from `eval/stats.py::wilson_ci`). `--record` appends one dated row to
+`review_calibration.jsonl` in the automod state dir, so the two rates become a
+series; an `--only` run is written `partial` and stays out of it.
+`calibration_cases.scorecard_reading()` returns the newest full run and the one
+before it for a scorecard row (`render_scorecard_reading` formats it), and says
+`measured: False` when there is none. Run it from `~/lloyd` only — it needs the
+live backend, the engine, and for six cases the round refs. 33 cases at the
+ledger's review durations (median 233 s, p90 481 s over the last 14 days) is
+about 2.1 h of engine time, 4.4 h if every case ran at p90; a case is cut at 600 s.
+
+What is measured is the rung, not the bare model: `calibrate` runs the grader and
+then the same deterministic rails and `decide` the gate runs, so a `met` the
+rails downgrade counts as the refusal it would have been. No precheck fires on a
+`strip_tests` case (there is no changed test file for one to read), so those are
+decided by the grader's clause verdicts and the evidence rail alone.
+
+A constructed case is graded with `tests_passed=True` — as if the `tests` rung
+were green — whether or not it would be. That is the condition under which the
+review is the only thing between the defect and a landing, and it is the lenient
+direction: it can only make a false `met` easier.
 
 ## The cause corpus (`cause_corpus.jsonl`) — #4026
 

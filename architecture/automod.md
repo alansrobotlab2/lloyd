@@ -2422,6 +2422,47 @@ must never read it as a verdict on the round. Items confirmed before clauses
 existed mostly wrote `(a) … (b) …` inline; `acceptance_clauses_of` splits
 those, so #544's prose reads as the five clauses its reviewer graded.
 
+**The two errors, measured apart (2026-11-22).** Those four cases were confirmed
+by the loop that runs the grader, and two were re-marked toward its answer, so
+they cannot say how often it is wrong. Two further sets can, and
+`eval/review_calibration/README.md` is their long account:
+
+- `eval/review_calibration/independent/` — 12 landed rounds labelled `pass` by a reader that is not the
+  grader. It measures **false refusal** (good work sent back).
+- `eval/review_calibration/negative/` — 21 cases labelled `retry`, none by asking the grader. 15 are
+  **constructed** (`scripts/automod/calibration_cases.py`): a landed round with
+  the paths a clause depends on restored to the parent — its tests
+  (`strip_tests`, 6), one source file (`revert_source`, 5), the doc a clause
+  names (`drop_doc`, 4) — so the label is true by construction, and each carries
+  a string `proof` checkable with `git show`. 6 are **refused heads** kept at
+  `refs/automod/rounds/<round>` whose refusal a reader confirmed against the
+  diff to the head that landed. It measures **false met** (a bad change lands).
+
+A constructed commit is not stored: `materialize` rebuilds it by git plumbing
+under a fixed identity, the fixture pins the resulting sha, and a rebuild that
+hashes differently is refused. Each constructed case also records what the
+round's own tests did on the defect (`tests_rung`; 10 red, 5 green, measured). A
+red one would be stopped by the `tests` rung whatever the grader said, so the
+five green ones are the cases the review alone stands in front of and are counted
+apart; the refused heads are counted apart too, because they were selected on
+the grader having refused them once.
+
+`eval/review_calibration/labels.lock` freezes every label in both sets
+(`tests/test_calibration_cases.py`). A label moves only through a `relabel`
+record in its fixture naming who re-read the diff and what they found, then
+`review_tools lock-labels`; **the grader's answer is never a reason**.
+
+```bash
+python -m scripts.automod.review_tools calibrate --set negative --set independent --record
+```
+
+prints one combined line — false met and false refusal as `k/N` with a 95 %
+Wilson interval each — and `--record` appends the run to
+`review_calibration.jsonl` in the state dir (§11), read back by
+`calibration_cases.scorecard_reading()`. No scorecard row renders it yet. It
+runs from `~/lloyd` against the live grader, about 2 h of engine time for the
+33 cases, so it is a hand step in an idle window, never CI.
+
 ### 4.5b The verdict has to reach the author: transport, attempts, snapshots
 
 The rung shipped on 2026-09-10 at 18:32 PT. In the eighteen hours after,
@@ -4306,6 +4347,7 @@ ruled out when it was gitignored but still inside the tree; it has lived in
 | `cluster_judgments.jsonl` | cluster pass | the pair-judge's verdicts, cached by body hash so a re-run costs no LLM calls |
 | `dedupe.jsonl` | `backlog_write_task` | every write-time merge decision, for tuning the threshold from data rather than from the three points measured when it landed |
 | `review_backfill.jsonl` | `review_tools backfill` | the grader's verdict beside the author's. **Its own file on purpose**: a backfilled verdict measures the grader, and `implement_outcomes` must never read it as a verdict on the round |
+| `review_calibration.jsonl` | `review_tools calibrate --set … --record` | one row per calibration run: false met and false refusal as `k/N` with Wilson intervals, per label source, and each case's verdict. A measurement of the grader like the backfill, and its own file for the same reason; `calibration_cases.scorecard_reading()` reads it (§4.5) |
 | `scorecard.jsonl` | `round scorecard --record` | the trend, so a row survives the terminal it was printed in |
 | `eval-noise.json` | regression worker | the measured noise floor (§8.1) |
 | `arch_review.json` | `arch-review` worker | per-unit review cursor: verdict, `reviewed_commit`, attempts, the ids each unit filed (`workers/sources/arch_review.py:243`) |

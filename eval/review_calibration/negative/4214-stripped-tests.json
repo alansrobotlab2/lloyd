@@ -1,0 +1,46 @@
+{
+  "name": "4214-stripped-tests",
+  "item_id": 4214,
+  "round_id": "SM_20261117_143559",
+  "parent": "f6224694ca4317534764c0996b2fe67eab493a49",
+  "commit": "fb9a95940d322650c484ec1e840d37ccb3f27013",
+  "source_commit": "4420d662995fc6752b225602f7660874bb0315dc",
+  "transform": {
+    "kind": "strip_tests",
+    "paths": [
+      "tests/test_iv_measurement.py"
+    ]
+  },
+  "changed_paths": [
+    "architecture/inner-voice.md",
+    "scripts/iv_ab_report.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      1,
+      2,
+      4
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "constructed",
+  "violates": [
+    {
+      "clause": 1,
+      "text": "A mission-control session stored only as <id>.json.gz inside the experiment window is counted by enrollment_gap(): a store holding one live and one archived unstamped window session prints ENROLLMENT-GAP: 2 mission-control sessions in window ... 2 unstamped, and --json reports platform_sessions: 2 \u2014 tests/test_iv_measurement.py"
+    },
+    {
+      "clause": 2,
+      "text": "load_sessions() counts a session stamped for the experiment that is stored only as <id>.json.gz, so the report's arm sessions/turns figures for an aged window are non-zero where an archived stamped session exists \u2014 tests/test_iv_measurement.py"
+    },
+    {
+      "clause": 4,
+      "text": "A truncated or unparseable archive is added to the existing unreadable count and named in the gap line's parenthetical, never silently dropped as though it were stamped or absent \u2014 tests/test_iv_measurement.py"
+    }
+  ],
+  "tests_rung": "red",
+  "provisional": false,
+  "note": "Label by construction, not by any reader or grader: tests/test_iv_measurement.py is restored to its parent, taking the 230 added lines that pinned the .json.gz reads. Clauses 1, 2 and 4 describe new behaviour of scripts/iv_ab_report.py and name that file as evidence; nothing left in the tree exercises an archived session. Never re-mark this case to match a grader's answer."
+}

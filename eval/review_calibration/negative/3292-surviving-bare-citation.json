@@ -1,0 +1,62 @@
+{
+  "name": "3292-surviving-bare-citation",
+  "item_id": 3292,
+  "round_id": "SM_20261025_084622",
+  "parent": "69dab4c6eca7c00181aa470e91e8755871340477",
+  "commit": "f5bf5e7a797c48ca4a3f4912e8892f03a8789b7b",
+  "fixed_by": "eb34607376006b7c3c8443c0ef8504a4cf87f3a3",
+  "changed_paths": [
+    "architecture/ambient-context-injection.md",
+    "architecture/arch-review.md",
+    "architecture/authority-surfaces.md",
+    "architecture/automod.md",
+    "architecture/autonomy.md",
+    "architecture/background-runs.md",
+    "architecture/backlog.md",
+    "architecture/context-window.md",
+    "architecture/djev.md",
+    "architecture/guard-coverage.md",
+    "architecture/harness.md",
+    "architecture/infrastructure.md",
+    "architecture/inner-voice.md",
+    "architecture/memory.md",
+    "architecture/qmd.md",
+    "architecture/retrieval.md",
+    "architecture/skills.md",
+    "architecture/testing.md",
+    "architecture/threat-model.md",
+    "architecture/tools.md",
+    "architecture/vault-protection.md",
+    "architecture/vllm.md",
+    "architecture/workers-jobs.md",
+    "tests/test_architecture_coverage_doc_claims.py",
+    "tests/test_iv_measurement.py",
+    "tests/test_task_depth_cap.py",
+    "tests/test_vllm_doc_claims.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      4
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "refused_then_fixed",
+  "violates": [
+    {
+      "clause": 4,
+      "text": "No architecture doc retains a numeric citation whose path contains no / (the 9 bare-basename spans, e.g. tools.md's mcp_pool.py:606-620, arch-review.md's _common.py:592-600), so every surviving numeric anchor is one cited_citations returns \u2014 tests/test_architecture_coverage_doc_claims.py"
+    }
+  ],
+  "refusal": "clause 4 partial: All 9 named bare-basename spans are gone and `baz.py:9` is seeded, but architecture/harness.md:2201 still writes `chat_template.jinja:91` \u2014 a numeric citation whose path contains no `/`, invisible to the node because `.jinja` is not in _EXT, so it is graded by no rail at all including the resolution one. Closable in round by widening the basename rule's extension alternation past _EXT, or by giving that span its directory; a satisfiable clause, not an unmet one.; advisory tests/test_architecture_coverage_doc_claims.py:8073: _line_citation_gaps docstrings itself as returning 'Every citation in this text that no rail reads', and the new comment at :1697 says the range spellings are precisely the ones 'the corpus no longer writes'. But 10 `:N-M` continuation ranges survive (architecture/skills.md:235, architecture/infraud; advisory tests/test_architecture_coverage_doc_claims.py:2075: assert cont_probe >= len(continued) (106 spellings against 20 graded) is redundant: every continued item is by construction a `:N` code span lifted from the doc text, and the mislabeled classification assert two lines earlier owns its only failure mode. The py leg (196 against 189) is th",
+  "evidence": "Clause 4 says no architecture doc retains a numeric citation whose path contains no `/`. At the refused head architecture/harness.md still writes `chat_template.jinja:91` (grep, no judgment). The fix diff retypes it to `chat_template.jinja` with no line number, and re-points two continuation ranges in djev.md and skills.md the same review named.",
+  "provisional": false,
+  "note": "Label by a diff read on 2026-11-22 (Claude Fable 5.2, a different model from the grader; given the refusal text and `git diff <refused head> <landed head>`). The case was SELECTED on the grader having refused it once, so it cannot count toward an unbiased false-met rate; it is reported apart. Never re-mark this case to match a grader's answer.",
+  "proof": {
+    "path": "architecture/harness.md",
+    "text": "`chat_template.jinja:91`",
+    "present": true
+  },
+  "ref": "refs/automod/rounds/SM_20261025_084622"
+}

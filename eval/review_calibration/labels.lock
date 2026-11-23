@@ -1,0 +1,35 @@
+# Frozen labels of the review-calibration sets. Generated: python -m scripts.automod.review_tools lock-labels
+# <set>/<case> <label> <sha256[:24] of name, label, parent, commit, source, transform>
+independent/3981-gh-token-fallback pass 18b5f5ad7bdc3856970c64c7
+independent/3988-mixed-surface-demotion pass 3ead0ca5d22ffc8765c96aba
+independent/3991-steward-prose-fit pass 0f5f2d629e93103ec18eee0e
+independent/4053-ambient-ttl-description pass 65d26bbbdd77f1ffd5aaec38
+independent/4056-arch-review-prose pass f1cc3aca7bea71f91949e1f3
+independent/4117-llm-call-cap pass 30e6637888be7fed352b5925
+independent/4136-red-nodes pass 622788886c3d8f8e68c9c685
+independent/4156-readme-scope-grant pass d6cc67b483ead1f5e2c04e0d
+independent/4200-link-footer-residue pass 3be5e5122dbafaeaff90ee28
+independent/4215-ab-report-void pass 7cc746b2cec5f529c54cc92f
+independent/4293-bash-record-armed pass 782cb890f898a6d1ba4a61b7
+independent/4347-gate-reuse-guard pass 6a74b853a1ba38aa488b8e3d
+negative/3292-surviving-bare-citation retry a4ba09684fc51fcc9c41c68d
+negative/3531-misnamed-suffix-test retry a3465d0f85754639ac2d60f8
+negative/3734-one-path-twice retry f7f2998ede6affe83937246b
+negative/3870-dead-table-path retry b608544861e83e890b6f954a
+negative/3952-reverted-parser retry d107a8b30bad8a1ba69eff56
+negative/4094-dropped-doc retry 29f1020ef8edfaa88cf7232c
+negative/4105-stripped-tests retry 4495453e37985084162e7a45
+negative/4131-reverted-config retry 2a19febbc577b5473b66f0f4
+negative/4148-reverted-prompt retry 282278809c4db30bc57201a5
+negative/4173-reverted-script retry dd0c49aaca05f7c18daa9eee
+negative/4180-stripped-tests retry 9175ae454d4a0255f8990c3e
+negative/4187-guarded-vacuous-read retry 1cf63359724faa7fa687cef2
+negative/4214-stripped-tests retry 51cbaab3143211dd4e11dcce
+negative/4216-dropped-doc retry 6d14d02b3dece813ad588273
+negative/4274-stripped-tests retry 1c8af36ea9df0245594e04ad
+negative/4343-stripped-tests retry ce1c7fdf5a5951135d61e6d9
+negative/4363-stripped-tests retry 282f758288f9b85a89414498
+negative/4393-dropped-doc retry 790029649e03cba4adc0cc34
+negative/4410-dropped-doc retry ae6d7cd351160245f63dff9d
+negative/4433-reverted-annotations retry 1a289d14ca5de40da4307740
+negative/4472-deleted-assertion retry cd8bb0367e80a5658ce0f25d

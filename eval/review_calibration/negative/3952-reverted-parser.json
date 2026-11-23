@@ -1,0 +1,46 @@
+{
+  "name": "3952-reverted-parser",
+  "item_id": 3952,
+  "round_id": "SM_20261108_160742",
+  "parent": "abc21b2f3bac308007ef71d8a4bde062cea8f0a3",
+  "commit": "f54d9b8d73d3a46b0cfa2800583eff90791f0a4d",
+  "source_commit": "542f8c408973f133d886ff12ba513030c0f85689",
+  "transform": {
+    "kind": "revert_source",
+    "paths": [
+      "scripts/memory/knowledge-health-report.py"
+    ]
+  },
+  "changed_paths": [
+    "architecture/autonomy-jobs.md",
+    "tests/test_knowledge_health_hygiene.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      1,
+      3
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "constructed",
+  "violates": [
+    {
+      "clause": 1,
+      "text": "A front matter whose record list holds N records and one record whose value text contains `---` mid-line parses to all N records with no parsed record carrying `id: None` \u2014 tests/test_knowledge_health_hygiene.py"
+    },
+    {
+      "clause": 3,
+      "text": "For such a file the walk's record count equals the number of records written in the file, so the index-vs-walk reconciliation's parsed-short count is 0 for it and its fact-side total excludes it \u2014 tests/test_knowledge_health_hygiene.py"
+    }
+  ],
+  "tests_rung": "red",
+  "provisional": false,
+  "note": "Label by construction, not by any reader or grader: scripts/memory/knowledge-health-report.py is restored to its parent while the new tests stay: parse_frontmatter again cuts at the first `---` at any column, which is the exact defect clauses 1 and 3 exist to remove. Never re-mark this case to match a grader's answer.",
+  "proof": {
+    "path": "scripts/memory/knowledge-health-report.py",
+    "text": "end = text.find(\"---\", 3)",
+    "present": true
+  }
+}

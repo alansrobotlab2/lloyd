@@ -1,0 +1,41 @@
+{
+  "name": "4173-reverted-script",
+  "item_id": 4173,
+  "round_id": "SM_20261116_111344",
+  "parent": "42364fdf0d8bd1abf9c003140717f19b00fda4da",
+  "commit": "6755ca838623b20d525121103b6987ef49ca6422",
+  "source_commit": "e4a7c91d7bc649d35a7ee2e99304e4bcb2407800",
+  "transform": {
+    "kind": "revert_source",
+    "paths": [
+      "scripts/memory/knowledge-health-report.py"
+    ]
+  },
+  "changed_paths": [
+    "architecture/autonomy-jobs.md",
+    "tests/test_knowledge_health_referential_integrity.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      1
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "constructed",
+  "violates": [
+    {
+      "clause": 1,
+      "text": "The section the script emits contains no hard-coded dangling population count: git grep -n 12 to 23 scripts/memory/knowledge-health-report.py returns no match, and for the measured-ledger fixture whose - dangling: line is rewritten from 23 to 31, every integer appearing in the printed sentence that contains BASELINE is 31 (or the sentence carries no integer at all) \u2014 tests/test_knowledge_health_referential_integrity.py"
+    }
+  ],
+  "tests_rung": "red",
+  "provisional": false,
+  "note": "Label by construction, not by any reader or grader: scripts/memory/knowledge-health-report.py is restored to its parent while the new test file and the doc line stay. Clause 1 requires that `git grep -n '12 to 23'` over that script returns no match; the string is back in it. Never re-mark this case to match a grader's answer.",
+  "proof": {
+    "path": "scripts/memory/knowledge-health-report.py",
+    "text": "12 to 23",
+    "present": true
+  }
+}

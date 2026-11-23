@@ -1,0 +1,42 @@
+{
+  "name": "4180-stripped-tests",
+  "item_id": 4180,
+  "round_id": "SM_20261116_133536",
+  "parent": "26c4948407539a5bc6412322d20d344ea386a7ca",
+  "commit": "1d73e6341370108f9404d36a97c0773443f2e6f1",
+  "source_commit": "3544f0d6b41ab11b2b9d48d209e944e63c4b97ab",
+  "transform": {
+    "kind": "strip_tests",
+    "paths": [
+      "tests/test_knowledge_health_retention.py"
+    ]
+  },
+  "changed_paths": [
+    "architecture/autonomy-jobs.md",
+    "scripts/memory/knowledge-health-report.py",
+    "scripts/reflection_archive.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      1,
+      2
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "constructed",
+  "violates": [
+    {
+      "clause": 1,
+      "text": "With a fixture reflection directory in which two of the seven UTC days preceding the report's own day have no knowledge-health-YYYY-MM-DD.md and the rest do, the '## Reflection Retention' section prints one line naming exactly those two dates (e.g. 'Knowledge-health reports expected and absent in the previous 7 UTC days: 2026-11-13, 2026-11-14') \u2014 tests/test_knowledge_health_retention.py"
+    },
+    {
+      "clause": 2,
+      "text": "With every one of the seven UTC days present, the section prints one line saying none is absent and names no date; a day equal to the report's own UTC day is never named, even when its file is not on disk at render time \u2014 tests/test_knowledge_health_retention.py"
+    }
+  ],
+  "tests_rung": "green",
+  "provisional": false,
+  "note": "Label by construction, not by any reader or grader: tests/test_knowledge_health_retention.py is restored to its parent, taking the 292 added lines. Clauses 1 and 2 describe a new line the Reflection Retention section prints for absent report days, against a fixture directory; nothing left in the tree builds that fixture or reads that line. Never re-mark this case to match a grader's answer."
+}

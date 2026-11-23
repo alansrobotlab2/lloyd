@@ -1,0 +1,47 @@
+{
+  "name": "4216-dropped-doc",
+  "item_id": 4216,
+  "round_id": "SM_20261117_154148",
+  "parent": "630123f1f442f5bb7e6754094659bfca56ac11e9",
+  "commit": "73c7d6825cff495145cb8151a00f8038d9c2824e",
+  "source_commit": "281e96748e71f1e226b5b46806442fd5e9a6b6a4",
+  "transform": {
+    "kind": "drop_doc",
+    "paths": [
+      "architecture/inner-voice.md"
+    ]
+  },
+  "changed_paths": [
+    "scripts/iv_grade.py",
+    "tests/test_iv_grade_latency.py",
+    "tests/test_iv_metrics_series.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      3,
+      4
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "constructed",
+  "violates": [
+    {
+      "clause": 3,
+      "text": "architecture/inner-voice.md's ## Verification states the measured post-R2 per-turn band with its dates (median 23,440 across the 49 rows 2026-09-26\u21922026-11-17; newest three 26,339 / 32,740 / 33,135) beside the ~62k pre-R2 band read from the same field (median 63,356, rows \u2264 2026-09-23), instead of leaving the prediction unpaid \u2014 tests/test_iv_metrics_series.py"
+    },
+    {
+      "clause": 4,
+      "text": "That same section carries the per-review figure (~10.4k tokens a review post-R2 against ~26k pre-R2) and states that the per-turn field tracks reviews-per-turn, so the 2026-11-15\u2192-17 rise is not a prompt-cost regression \u2014 tests/test_iv_metrics_series.py"
+    }
+  ],
+  "tests_rung": "red",
+  "provisional": false,
+  "note": "Label by construction, not by any reader or grader: architecture/inner-voice.md is restored to its parent while scripts/iv_grade.py and both test files stay. Clauses 3 and 4 require ## Verification to state the measured post-R2 band (median 23,440) and the per-review figure; the section carries neither. Never re-mark this case to match a grader's answer.",
+  "proof": {
+    "path": "architecture/inner-voice.md",
+    "text": "23,440",
+    "present": false
+  }
+}

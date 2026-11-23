@@ -1,0 +1,42 @@
+{
+  "name": "4393-dropped-doc",
+  "item_id": 4393,
+  "round_id": "SM_20261120_045606",
+  "parent": "7ec93dd1b5c79a2f606c4202188b1e995895faab",
+  "commit": "966987bf91a49694d8683e2211ca584c7c8e03b9",
+  "source_commit": "4062d8a6eaddd51ff8196de049abaddc953bbe34",
+  "transform": {
+    "kind": "drop_doc",
+    "paths": [
+      "architecture/subliminal.md"
+    ]
+  },
+  "changed_paths": [
+    "app/prefetch.py",
+    "architecture/ambient-context-injection.md",
+    "tests/test_prefetch.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      5
+    ],
+    "honesty_finding": false
+  },
+  "label_source": "constructed",
+  "violates": [
+    {
+      "clause": 5,
+      "text": "The Worker 5 Method bullet in architecture/subliminal.md quotes a # arm carrying a right boundary, no longer states that '#20260421' or '#10000' render an unrelated task, and says in one sentence that the bare arm is deliberately left capped at 3-4 digits \u2014 architecture/subliminal.md"
+    }
+  ],
+  "tests_rung": "green",
+  "provisional": false,
+  "note": "Label by construction, not by any reader or grader: architecture/subliminal.md is restored to its parent while app/prefetch.py, the other doc and the tests stay. Clause 5 requires the Worker 5 Method bullet to stop stating that '#20260421' or '#10000' render an unrelated task; the bullet states it, in the present tense. Never re-mark this case to match a grader's answer.",
+  "proof": {
+    "path": "architecture/subliminal.md",
+    "text": "each render a real but unrelated task (#4393)",
+    "present": true
+  }
+}

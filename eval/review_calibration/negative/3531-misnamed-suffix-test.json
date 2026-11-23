@@ -1,0 +1,33 @@
+{
+  "name": "3531-misnamed-suffix-test",
+  "item_id": 3531,
+  "round_id": "SM_20261029_235414",
+  "parent": "db7f458fa0b1ae25783646e315b64a33e47b4dc7",
+  "commit": "f7fea4fa05f81e6ff37092907cf6b9fbddac8b28",
+  "fixed_by": "0c09d9fa8ab7f68d6bd3b2453379e12747fb3143",
+  "changed_paths": [
+    "architecture/workers-jobs.md",
+    "tests/test_bench_mine_id_minting.py",
+    "tests/test_bench_mine_source.py",
+    "tests/test_workers_sources.py",
+    "workers/sources/bench_mine.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [],
+    "honesty_finding": true
+  },
+  "label_source": "refused_then_fixed",
+  "violates": [],
+  "refusal": "test honesty tests/test_bench_mine_id_minting.py:221: test_a_letter_suffixed_live_id_holds_its_number_but_not_its_shape names a letter-suffixed LIVE id, but the fixture at :229 seeds a plainly-numbered pile id (bench_029_zz) and no suffix appears anywhere in the node, so it asserts nothing about the case it names and duplicates test_the_number_advances; advisory seam unverified (advisory under seams_block=never): A note produced by _stage_and_calibrate being promoted through POST /api/workers/pending/promote in the backend, where _bench_default_filename and the four-lane write rail act on the minted id.; advisory seam unverified (advisory under seams_block=never): The bench corpus directory is now spelled in three places with no test binding them: BENCH_CORPUS_REL (workers/sources/bench_mine.py:964), _DEFAULT_DEST[bench-mine] (app/routers/workers.py:49), autoresearch.bench_dir (config.yaml:304). grep names no test containing BENCH_CORPUS_REL; all three agree; advisory post-landing seam (not refusing): The calibration GPU seam: _bench_composites pairs each real bench trace back by task_id, and the minted id is what it pairs on. The sequence is pinned only through a faked _bench_comp",
+  "evidence": "At the refused head test_a_letter_suffixed_live_id_holds_its_number_but_not_its_shape seeds `pile_ids=(\"bench_029_zz\",)` \u2014 a plainly numbered id, no letter suffix anywhere in the node \u2014 so it asserts nothing about the case it names. The same head's `_bench_id_number` docstring states that `bench_006b_extra` 'is deliberately None', which the fix diff replaces with the measured opposite ('`bench_006b_x` yields 6'). The landed head renames the node, seeds `bench_029b_zz`, and asserts `_bench_id_number(\"bench_029b_zz\") == 29`. The refused test was vacuous for its stated property and the code comment beside it was false.",
+  "provisional": false,
+  "note": "Label by a diff read on 2026-11-22 (Claude Fable 5.2, a different model from the grader; given the refusal text and `git diff <refused head> <landed head>`). The case was SELECTED on the grader having refused it once, so it cannot count toward an unbiased false-met rate; it is reported apart. Never re-mark this case to match a grader's answer.",
+  "proof": {
+    "path": "tests/test_bench_mine_id_minting.py",
+    "text": "async def test_a_letter_suffixed_live_id_holds_its_number_but_not_its_shape(",
+    "present": true
+  },
+  "ref": "refs/automod/rounds/SM_20261029_235414"
+}

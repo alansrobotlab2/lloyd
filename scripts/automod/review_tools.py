@@ -672,8 +672,12 @@ def main(argv=None) -> int:
     f.add_argument("--provisional", action="store_true", help="expectation not yet confirmed by a human")
     f.add_argument("--note", default="")
     c = sub.add_parser("calibrate", help="run every case and compare")
-    c.add_argument("--set", dest="case_set", default=None,
-                   help="grade the cases in eval/review_calibration/<set>/ instead of the four shipped ones")
+    c.add_argument("--set", dest="case_set", action="append", default=None,
+                   help="grade the cases in eval/review_calibration/<set>/ instead of the four "
+                        "shipped ones; repeat it to grade several sets and print one combined line")
+    c.add_argument("--record", action="store_true",
+                   help="append this run's two error rates to review_calibration.jsonl in the "
+                        "automod state dir (needs --set)")
     c.add_argument("--only", default=None)
     c.add_argument("--seams-policy", default=None, choices=["first", "always", "never"],
                    help="decide under this seams_block instead of automod.review.seams_block")
@@ -709,7 +713,24 @@ def main(argv=None) -> int:
     g.add_argument("--audit-only", action="store_true",
                    help="publish the artifact from the corpus already on disk, rewriting "
                         "no corpus file")
+    sub.add_parser("lock-labels", help="re-pin eval/review_calibration/labels.lock; refuses a "
+                                       "changed label with no `relabel` record in its fixture")
+    d = sub.add_parser("defect", help="write a known-bad case into negative/: a landed round "
+                                      "with some of its paths restored to the parent")
+    d.add_argument("--name", required=True); d.add_argument("--round", required=True)
+    d.add_argument("--kind", required=True, choices=["strip_tests", "revert_source", "drop_doc"])
+    d.add_argument("--path", action="append", default=[],
+                   help="a path to restore; strip_tests defaults to every test file changed")
+    d.add_argument("--violates", type=int, action="append", required=True,
+                   help="1-based clause the restored tree cannot meet")
+    d.add_argument("--why", required=True, help="why that clause is unmeetable, in one sentence")
     args = ap.parse_args(argv)
+
+    if args.cmd == "calibrate" and args.record and not args.case_set:
+        ap.error("--record needs --set: the four shipped cases are not a labelled set")
+    if args.cmd in ("lock-labels", "defect") or (args.cmd == "calibrate" and args.case_set):
+        from scripts.automod import calibration_cases as CC
+        return CC.cli(args)
 
     if args.cmd == "build-cause-corpus":
         # The generator the owed-check runs in an idle window: it re-reads the ledgers,
@@ -729,8 +750,7 @@ def main(argv=None) -> int:
         print(p)
         return 0
     if args.cmd == "calibrate":
-        rows = calibrate(only=args.only, seams_policy=args.seams_policy,
-                         fixture_dir=(FIXTURE_DIR / args.case_set) if args.case_set else None)
+        rows = calibrate(only=args.only, seams_policy=args.seams_policy)
         for r in rows:
             mark = "PASS" if r["ok"] else "FAIL"
             print(f"[{mark}] {r['name']}{' (provisional)' if r['provisional'] else ''}: {r['why']}"
@@ -742,8 +762,7 @@ def main(argv=None) -> int:
         # the one it has always returned — 0 only when there are cases and all of them
         # agree. This instrument may describe the grader; it may not soften it.
         print("\n" + RC.render_agreement(RC.agreement_by_cause(rows, rows)))
-        print(error_rates_line(rows, load_fixtures((FIXTURE_DIR / args.case_set)
-                                                   if args.case_set else None)))
+        print(error_rates_line(rows, load_fixtures()))
         print(f"{sum(r['ok'] for r in rows)}/{len(rows)} agree")
         return 0 if rows and all(r["ok"] for r in rows) else 1
     if args.cmd == "backfill":
