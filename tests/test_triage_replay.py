@@ -179,3 +179,31 @@ def test_the_endpoint_model_sends_one_message_and_no_tools(monkeypatch):
     assert sent["url"] == "http://engine.invalid:1/v1/chat/completions"
     assert "tools" not in sent["body"] and sent["body"]["temperature"] == 0
     assert sent["body"]["messages"] == [{"role": "user", "content": "the prompt"}]
+
+
+def test_reasoning_is_off_unless_asked_and_on_raises_the_budget(monkeypatch):
+    """The first recorded run lost 36 of 42 cases to a reasoning pass that spent
+    the whole budget before any content; the default must not reason."""
+    sent: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": "VERDICT: stale"}}]}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        sent.append(json.loads(req.data.decode()))
+        return _Resp()
+
+    monkeypatch.setattr(R.urllib.request, "urlopen", fake_urlopen)
+    R.endpoint_model("http://engine.invalid:1/")("p")
+    R.endpoint_model("http://engine.invalid:1/", thinking=True)("p")
+    assert sent[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert sent[0]["max_tokens"] == 3000
+    assert "chat_template_kwargs" not in sent[1]
+    assert sent[1]["max_tokens"] == R.THINKING_MAX_TOKENS

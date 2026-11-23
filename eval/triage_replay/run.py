@@ -182,15 +182,32 @@ def render(summary: dict) -> str:
     return "\n".join(out)
 
 
+#: The budget a reasoning replay needs to reach its verdict (measured: ~8,000).
+THINKING_MAX_TOKENS = 16000
+
+
 def endpoint_model(base_url: str, *, model: str = "primary", max_tokens: int = 3000,
-                   timeout: float = 600.0) -> Callable[[str], str]:
+                   timeout: float = 600.0, thinking: bool = False) -> Callable[[str], str]:
     """A `prompt -> text` over `/v1/chat/completions`: one user message, no
-    `tools`, temperature 0."""
+    `tools`, temperature 0, and reasoning OFF unless `thinking` is set.
+
+    Reasoning is off because the first recorded run (2026-11-22) was lost to it:
+    with reasoning on, 36 of 42 cases spent the whole 3,000-token budget before
+    writing a word of content and were scored `no_verdict` (about 21 s each).
+    Probed on one case: reasoning on needs about 8,000 tokens and 60 s to reach a
+    verdict; reasoning off answers in 489 tokens and 4 s. A replay is already a
+    text-only reading of a turn that had tools, so the cheap, repeatable form is
+    the one a gate rung can afford. `--thinking` restores the production shape
+    and raises the budget to `THINKING_MAX_TOKENS`; rows from the two modes are
+    not comparable with each other."""
+    if thinking:
+        max_tokens = max(max_tokens, THINKING_MAX_TOKENS)
+    extra = {} if thinking else {"chat_template_kwargs": {"enable_thinking": False}}
     url = base_url.rstrip("/") + "/v1/chat/completions"
 
     def call(prompt: str) -> str:
         body = json.dumps({"model": model, "temperature": 0, "max_tokens": max_tokens,
-                           "messages": [{"role": "user", "content": prompt}]}).encode()
+                           "messages": [{"role": "user", "content": prompt}], **extra}).encode()
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             data = json.loads(resp.read().decode("utf-8"))
@@ -219,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
                            help="the engine, e.g. http://127.0.0.1:8096 — there is no default")
             p.add_argument("--model", default="primary")
             p.add_argument("--max-tokens", type=int, default=3000)
+            p.add_argument("--thinking", action="store_true",
+                           help="reason before answering (about 60 s a case; not comparable with the default)")
     args = ap.parse_args(argv)
 
     if args.cmd == "grade":
@@ -243,7 +262,8 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     args.rows.parent.mkdir(parents=True, exist_ok=True)
-    model = endpoint_model(args.base_url, model=args.model, max_tokens=args.max_tokens)
+    model = endpoint_model(args.base_url, model=args.model, max_tokens=args.max_tokens,
+                           thinking=getattr(args, "thinking", False))
 
     def record(row: dict) -> None:
         with args.rows.open("a", encoding="utf-8") as fh:

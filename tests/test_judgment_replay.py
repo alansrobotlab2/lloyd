@@ -665,3 +665,15 @@ def test_a_round_may_not_switch_off_the_guard_nor_flip_its_own_selection():
     ok, why, _ = spec.config_value_change(sel.format("false"), sel.format("true"))
     assert not ok and "automod.selection" in why
     assert "gate" not in spec.CONFIG_DENIED_BLOCKS and "selection" not in spec.CONFIG_DENIED_BLOCKS
+
+
+def test_a_run_that_mostly_returned_no_verdict_may_not_stand_as_a_baseline():
+    from scripts.automod import judgment_replay as JR
+    silent = {f"c{i}": {"got": "no_verdict", "agree": False} for i in range(36)}
+    spoke = {f"d{i}": {"got": "confirmed", "agree": True} for i in range(6)}
+    assert "36 of 42" in JR.baseline_unusable("triage", {**silent, **spoke})
+    few = {f"c{i}": {"got": "no_verdict", "agree": False} for i in range(5)}
+    many = {f"d{i}": {"got": "confirmed", "agree": True} for i in range(37)}
+    assert JR.baseline_unusable("triage", {**few, **many}) == ""
+    assert JR.baseline_unusable("grader", {"negative/x": "retry"}) == ""
+    assert JR.baseline_unusable("triage", {}) == ""

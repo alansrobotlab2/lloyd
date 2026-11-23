@@ -733,6 +733,10 @@ def _record(surface: str, root: Path, base_url: str) -> int:
         print(f"nothing graded (exit {ran.get('returncode')}, timed out {ran.get('timed_out')}); "
               f"nothing recorded. Rows, if any: {out}")
         return 1
+    why = baseline_unusable(surface, verdicts)
+    if why:
+        print(f"NOT recorded: {why}. Rows: {out}")
+        return 1
     row = record_run(surface=surface, fingerprint=fp, verdicts=verdicts, cases_sha=sha,
                      source="record", commit=commit, seconds=time.monotonic() - started)
     print(f"recorded {surface} baseline: {len(verdicts)} cases under fingerprint {fp} "
@@ -780,6 +784,31 @@ def main(argv=None) -> int:
             print(f"not run, nothing recorded: {exc}")
             return 2
     return run_grader_subset(args.out, label=args.label)
+
+# ── a baseline the instrument could not read is not a baseline ───────────────
+#
+# The first `record triage` (2026-11-22) stored 36 `no_verdict` answers of 42:
+# the replay's completion spent its whole token budget reasoning and wrote no
+# content. Paired against that, any later run would have shown 30-odd flips to
+# RIGHT and passed whatever it did. `no_verdict` from a HEAD run stays a
+# disagreement — a prompt that stops the model answering is a regression — but
+# a baseline made mostly of them measured the harness, so `record` refuses it.
+# The newest row per fingerprint is the baseline, so a good run recorded after
+# a bad one supersedes it without the store being edited.
+BASELINE_MAX_NO_VERDICT_SHARE = 0.25
+
+
+def baseline_unusable(surface: str, verdicts: dict) -> str:
+    """Why this run may not stand as a baseline, or `""`."""
+    if surface != "triage" or not verdicts:
+        return ""
+    silent = sum(1 for v in verdicts.values()
+                 if isinstance(v, dict) and v.get("got") == "no_verdict")
+    if silent / len(verdicts) > BASELINE_MAX_NO_VERDICT_SHARE:
+        return (f"{silent} of {len(verdicts)} cases returned no verdict — the replay "
+                f"did not get answers (token budget, reasoning mode or engine), so "
+                f"this measures the harness and not the prompt")
+    return ""
 
 
 if __name__ == "__main__":

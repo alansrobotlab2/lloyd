@@ -476,6 +476,15 @@ landed. It is not run by the gate and it needs the engine:
     .venvs/lloyd/bin/python eval/triage_replay/run.py plan
     .venvs/lloyd/bin/python eval/triage_replay/run.py run --base-url http://127.0.0.1:8096
 
+The runner sends each case with reasoning **off** (`chat_template_kwargs:
+{enable_thinking: false}`). The first recorded run, 2026-11-22, had it on with a
+3,000-token budget, and 36 of 42 cases spent the whole budget reasoning and returned
+no content (`no_verdict`, about 21 s each). One case probed both ways: reasoning on
+reaches its verdict in about 8,000 tokens and 60 s, reasoning off in 489 tokens and
+4 s. `--thinking` restores reasoning with a 16,000-token budget; rows from the two
+modes are not comparable. `judgment_replay record` refuses to store a triage baseline
+in which more than a quarter of the cases returned no verdict.
+
 `tests/test_triage_replay.py` drives the runner with a fake model.
 
 ## Behaviour benches
