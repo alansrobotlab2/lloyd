@@ -235,7 +235,7 @@ def dashboard_serving(session, ledger=None):
         [str(vite), "--port", str(port), "--host", "127.0.0.1", "--strictPort"],
         cwd=str(WEB),
         stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL, preexec_fn=_die_with_parent,
     )
     served = False
     try:
@@ -1378,3 +1378,59 @@ def test_an_unreachable_drawer_button_raises_within_the_pins_own_budget():
     assert "Open menu" in str(raised.value), (
         f"the failure does not name the drawer it could not open, so a caller "
         f"reading the message cannot tell it from a layout verdict: {raised.value}")
+
+
+def _die_with_parent() -> None:
+    """Run in the vite child between fork and exec: ask the kernel to SIGTERM it
+    when the process that started it dies. `dashboard_serving`'s `finally` stops
+    the child on every exit pytest itself gets to run, but not when the xdist
+    worker is killed outright (a timeout, an OOM kill, a cancelled gate). One such
+    orphan was found on 2026-11-23 still serving a deleted worktree's `web/`
+    after 12 h 52 min, reparented to the user's systemd. Linux only; anywhere
+    else, or if the call fails, the child starts exactly as before.
+
+    Appended at the module foot so no line above moves."""
+    try:
+        import ctypes
+        import signal
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(1, int(signal.SIGTERM))  # PR_SET_PDEATHSIG
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def test_a_vite_child_dies_with_the_process_that_started_it(tmp_path):
+    """The parent-death signal, exercised on a stand-in child: a middle process
+    starts `sleep` with `_die_with_parent` and is killed with SIGKILL, so no
+    `finally` runs anywhere — the case that orphaned a vite server for 13 h."""
+    import os
+    import signal
+    pidfile = tmp_path / "child.pid"
+    script = (
+        "import subprocess, sys, time\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parent)!r})\n"
+        "import test_dashboard_responsive as T\n"
+        "p = subprocess.Popen(['sleep', '60'], preexec_fn=T._die_with_parent)\n"
+        f"open({str(pidfile)!r}, 'w').write(str(p.pid))\n"
+        "time.sleep(60)\n")
+    middle = subprocess.Popen([sys.executable, "-c", script])
+    deadline = time.monotonic() + 30
+    while not (pidfile.exists() and pidfile.read_text()) and time.monotonic() < deadline:
+        time.sleep(0.05)
+    child = int(pidfile.read_text())
+    os.kill(middle.pid, signal.SIGKILL)
+    middle.wait(timeout=10)
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        try:
+            os.kill(child, 0)
+        except ProcessLookupError:
+            return
+        # A zombie still answers signal 0; its state says it is dead.
+        try:
+            if Path(f"/proc/{child}/stat").read_text().split()[2] == "Z":
+                return
+        except OSError:
+            return
+        time.sleep(0.05)
+    os.kill(child, signal.SIGKILL)
+    pytest.fail("the child outlived the process that started it")

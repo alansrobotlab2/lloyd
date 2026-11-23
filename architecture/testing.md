@@ -403,6 +403,16 @@ surface can name a `web/src/**.test.ts` file the way a code clause names
 
 ## The dashboard pins' dependency arrives by symlink from the parent checkout
 
+**The vite child dies with its parent (2026-11-23).** `dashboard_serving` stops
+the dev server in a `finally`, which runs on every exit pytest gets to make but not
+when the xdist worker itself is killed (a timeout, an OOM kill, a cancelled gate).
+One such orphan was found still serving a deleted worktree's `web/` 12 h 52 min
+after its run. The child is now started with `PR_SET_PDEATHSIG` (`_die_with_parent`,
+Linux only, a no-op where it fails), and
+`test_a_vite_child_dies_with_the_process_that_started_it` kills a middle process with
+SIGKILL and asserts its child goes too — a child without the hook was checked to
+survive the same kill.
+
 Since 2026-10-05 (#2233), a pytest run in a **linked git worktree** of this repo is
 given the frontend its own tree lacks: `tests/conftest.py` and
 `tests/test_dashboard_responsive.py::_vite_binary` both call
