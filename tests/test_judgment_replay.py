@@ -59,12 +59,14 @@ def test_mode_reads_what_yaml_makes_of_the_key(value, want):
     assert JR.mode(value) == want
 
 
-def test_the_switch_ships_off_and_is_quoted():
+def test_the_switch_is_advisory_and_quoted():
+    """Shipped off; advisory since 2026-11-23, once both baselines existed.
+    `enforce` waits on more than one pair of repeat runs (automod.md 12.5)."""
     text = (ROOT / "config.yaml").read_text(encoding="utf-8")
     cfg = yaml.safe_load(text)
-    assert cfg["automod"]["gate"]["judgment_replay"] == "off"
-    assert JR.mode(cfg["automod"]["gate"]["judgment_replay"]) == "off"
-    assert 'judgment_replay: "off"' in text, "a bare off is YAML false; the value is quoted"
+    assert cfg["automod"]["gate"]["judgment_replay"] == "advisory"
+    assert JR.mode(cfg["automod"]["gate"]["judgment_replay"]) == "advisory"
+    assert 'judgment_replay: "advisory"' in text, "the value is quoted like the off it replaced"
 
 
 # ── what fires it: the prompt's text, not the file ───────────────────────
@@ -677,3 +679,20 @@ def test_a_run_that_mostly_returned_no_verdict_may_not_stand_as_a_baseline():
     assert JR.baseline_unusable("triage", {**few, **many}) == ""
     assert JR.baseline_unusable("grader", {"negative/x": "retry"}) == ""
     assert JR.baseline_unusable("triage", {}) == ""
+
+
+def test_status_reads_the_grader_baseline_the_rung_reads(tmp_path, monkeypatch):
+    """`status` printed UNMEASURED for a grader the rung had a full baseline
+    for, from a `calibrate --record` row at a commit rendering the same prompt."""
+    from scripts.automod import calibration_cases as CC
+    fp = "f" * 24
+    verdicts = {f"{s}/{n}": k for s, n, k in JR.grader_subset()}
+    monkeypatch.setattr(CC, "read_records", lambda include_partial=True: [
+        {"commit": "abc", "ts": 1.0, "verdicts": verdicts}])
+    monkeypatch.setattr(JR, "surface_fingerprint", lambda surface, read: fp)
+    monkeypatch.setattr(JR, "git_reader", lambda root, rev: (lambda path: None))
+    line = JR._grader_status_from_calibration(tmp_path, fp, runs=[])
+    assert line.startswith("baseline from `calibrate --record` rows")
+    assert f"{len(verdicts)}/{len(verdicts)}" in line
+    monkeypatch.setattr(CC, "read_records", lambda include_partial=True: [])
+    assert JR._grader_status_from_calibration(tmp_path, fp, runs=[]).startswith("UNMEASURED")

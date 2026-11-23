@@ -4914,8 +4914,8 @@ on, and what each needs first:
 
 | # | Switch | Needs | State on 2026-11-22 |
 |---|---|---|---|
-| 1 | `workers.sources.fitness.enabled` | every bench's noise floor `ok` | met: all seven `ok` (`architecture/testing.md`, "Noise floors") |
-| 2 | `automod.gate.judgment_replay: advisory` | a triage baseline, a grader baseline | met: triage recorded under the finalizer runner, grader covered by the `calibrate --record` row (§4.5) |
+| 1 | `workers.sources.fitness.enabled` | every bench's noise floor `ok` | **on 2026-11-23**: all seven `ok` (`architecture/testing.md`, "Noise floors"); it runs only while the pool is not paused |
+| 2 | `automod.gate.judgment_replay: advisory` | a triage baseline, a grader baseline | **on 2026-11-23**: triage recorded twice under the finalizer runner; the grader's 11-case subset is covered by the `calibrate --record` row at `417911e0`, whose grader fingerprint equals HEAD's (`judgment_replay status` now says so instead of `UNMEASURED`) |
 | 3 | `automod.selection.prefer_improvement` | triage writing `class:` on live items | waits on triage running with the new schema |
 | 4 | `workers.sources.fitness.file_items` | about 8 nightly rows per bench | waits on 1 |
 | 5 | `automod.landing.measured_close` | a week of `fitness_intake report` read by hand | waits on 4 |

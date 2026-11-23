@@ -1609,15 +1609,16 @@ automod:
     # The `judgment_replay` rung (scripts/automod/judgment_replay.py): a round
     # whose diff changes the TEXT of a judging prompt is measured before it
     # lands — the triage replay against a recorded run of the base's prompt
-    # (paired per case, provisional thresholds), a fixed calibration subset
+    # (paired per case; floor 2 of 42 measured 2026-11-22), a fixed calibration subset
     # for the review grader (refused on a new false `met`). "off" = the rung
     # is skipped; "advisory" = it runs and records, refuses nothing; "enforce".
     # No recorded baseline is an external blocker under enforce, never a pass:
     # record both first (`python -m scripts.automod.judgment_replay record
     # triage|grader`). Quoted — YAML reads a bare off as false. A round may
     # not change this key (spec.CONFIG_DENIED_KEYS). Read by each gate
-    # process at start: no restart needed.
-    judgment_replay: "off"
+    # process at start: no restart needed. "advisory" since 2026-11-23, once
+    # both baselines existed (architecture/automod.md 12.5).
+    judgment_replay: "advisory"
   # The review rung's policy knobs. The rung refused 86% of the rounds it
   # graded over 2026-09-11 and the two largest contributors were both
   # findings that are real and usually unfixable INSIDE the round.
@@ -2899,7 +2900,10 @@ workers:
     # scripts/automod/fitness_intake.py; every decision is a `fitness_intake`
     # ledger event. Read when the nightly row is enqueued.
     fitness:
-      enabled: false
+      # On since 2026-11-23: every bench's noise floor read `ok`
+      # (architecture/testing.md "Noise floors"). file_items stays off until
+      # about 8 nightly rows per bench exist (architecture/automod.md 12.5).
+      enabled: true
       file_items: false
       file_lowest: false
       interval_seconds: 1800

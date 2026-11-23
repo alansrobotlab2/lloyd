@@ -713,8 +713,8 @@ move in Lloyd's behaviour but not necessarily in Lloyd's code.
    measurements. No bisect runs and no rollback is requested.
 
 The nightly caller is the `fitness` worker source
-(`workers/sources/fitness.py`, `workers.sources.fitness.enabled`, **ships
-false**): once a night inside `[window_start_hour, window_end_hour)` local, one
+(`workers/sources/fitness.py`, `workers.sources.fitness.enabled`, shipped
+false, **on since 2026-11-23** once the floors below were measured): once a night inside `[window_start_hour, window_end_hour)` local, one
 subprocess off the event loop. It cannot ask for a paused pool — it is one of
 the pool's own in-flight jobs — so it runs `--pool-job`: before each engine
 bench it waits up to 10 minutes for the pool to hold nothing but itself with

@@ -840,10 +840,11 @@ sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
   3600 s poll, so the `interval_seconds` figure is how often it asks, not how
   often it measures.
 
-### `fitness` — did Lloyd's behaviour move? (ships off)
+### `fitness` — did Lloyd's behaviour move?
 
-**Disabled in config** (`workers.sources.fitness.enabled: false`) until the
-benches' noise floors have been measured by hand. When on, it **wakes** on the
+**Enabled 2026-11-23** (`workers.sources.fitness.enabled`; shipped false until
+the benches' noise floors were measured by hand, `architecture/testing.md`). It
+**wakes** on the
 1800 s poll and enqueues at most once per `min_interval_seconds` (72000), and
 only while the local hour is inside `[window_start_hour, window_end_hour)` — 1
 to 4. `execute` spawns `python -m scripts.automod.fitness run --once --pool-job`

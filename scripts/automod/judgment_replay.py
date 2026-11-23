@@ -756,11 +756,34 @@ def _status(root: Path) -> int:
             print(f"  {surface:13} {fp}  uncovered (no replay set)")
             continue
         have = [r for r in runs if r.get("surface") == surface and r.get("fingerprint") == fp]
-        print(f"  {surface:13} {fp}  " + (
-            f"baseline {have[-1]['created_at']} ({len(have[-1].get('verdicts') or {})} cases)"
-            if have else "UNMEASURED at this tree" + (
-                " (`calibrate --record` rows may still cover it)" if surface == "grader" else "")))
+        if have:
+            line = f"baseline {have[-1]['created_at']} ({len(have[-1].get('verdicts') or {})} cases)"
+        elif surface == "grader":
+            line = _grader_status_from_calibration(root, fp, runs)
+        else:
+            line = "UNMEASURED at this tree"
+        print(f"  {surface:13} {fp}  {line}")
     return 0
+
+
+def _grader_status_from_calibration(root: Path, fp: str, runs: list[dict]) -> str:
+    """What the rung itself would read for the grader: `calibrate --record` rows
+    count when their commit renders the same grader prompt (`grader_baseline`).
+    Reporting UNMEASURED while the rung had a full baseline sent a reader off to
+    spend an hour of engine time re-recording one (2026-11-23)."""
+    from scripts.automod import calibration_cases as CC
+    try:
+        calibration = CC.read_records(include_partial=True)
+    except Exception:  # noqa: BLE001
+        calibration = []
+    base = grader_baseline(fp, runs=runs, calibration=calibration,
+                           fingerprint_at=lambda c: surface_fingerprint("grader", git_reader(root, c)))
+    keys = [f"{s}/{n}" for s, n, _kind in grader_subset()]
+    covered = [k for k in keys if base.get(k)]
+    neg = [k for k in keys if k.startswith("negative/")]
+    if not any(base.get(k) for k in neg):
+        return "UNMEASURED at this tree (no calibration row renders this grader prompt)"
+    return f"baseline from `calibrate --record` rows ({len(covered)}/{len(keys)} subset cases)"
 
 
 def main(argv=None) -> int:

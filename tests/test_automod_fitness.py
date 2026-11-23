@@ -775,13 +775,17 @@ def _item() -> QueueItem:
                      completed_at=None, error=None)
 
 
-def test_the_source_is_registered_long_lived_and_ships_disabled():
+def test_the_source_is_registered_long_lived_and_files_nothing_yet():
+    """Shipped off; enabled 2026-11-23 once every noise floor read `ok`. What it
+    may not do yet is file items or settle closes off its own rows."""
     import yaml
     src = _source()
     assert src.NAME == "fitness" and src.LONG_LIVED is True
     cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8"))
     block = cfg["workers"]["sources"]["fitness"]
-    assert block["enabled"] is False, "the kill switch ships off until floors are measured"
+    assert block["enabled"] is True
+    assert block["file_items"] is False and block["file_lowest"] is False
+    assert cfg["automod"]["landing"].get("measured_close", "off") in ("off", False)
     assert block["max_inflight"] == 1 and "inner_voice" not in block
     assert block["window_start_hour"] == src.DEFAULT_WINDOW_START_HOUR
     assert block["window_end_hour"] == src.DEFAULT_WINDOW_END_HOUR
