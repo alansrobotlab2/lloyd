@@ -207,3 +207,54 @@ def test_reasoning_is_off_unless_asked_and_on_raises_the_budget(monkeypatch):
     assert sent[0]["max_tokens"] == 3000
     assert "chat_template_kwargs" not in sent[1]
     assert sent[1]["max_tokens"] == R.THINKING_MAX_TOKENS
+
+
+def test_an_answer_with_no_verdict_gets_one_schema_bound_second_completion(monkeypatch):
+    """Two runs at one commit differed on 13 of 42 cases, 12 of them only in
+    whether a verdict block was written at all. The second completion asks for
+    the object; a parseable first answer costs no second request."""
+    sent: list[dict] = []
+    answers = iter(["I'll start by exploring the codebase.",
+                    json.dumps({"verdict": "confirmed", "evidence": "the premise  names a real path"}),
+                    "VERDICT: stale",
+                    "no block here", "not json"])
+
+    class _Resp:
+        def __init__(self, content):
+            self.content = content
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"choices": [{"message": {"content": self.content}}]}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        sent.append(json.loads(req.data.decode()))
+        return _Resp(next(answers))
+
+    monkeypatch.setattr(R.urllib.request, "urlopen", fake_urlopen)
+    model = R.endpoint_model("http://engine.invalid:1/")
+
+    text = model("the prompt")
+    assert R.grade({"expected": "confirmed"}, text)["got"] == "confirmed"
+    assert R.FINALIZER_MARK in text and text.startswith("I'll start")
+    assert len(sent) == 2 and "response_format" not in sent[0]
+    assert sent[1]["response_format"]["type"] == "json_schema"
+    assert [m["role"] for m in sent[1]["messages"]] == ["user", "assistant", "user"]
+    assert sent[1]["messages"][0] == {"role": "user", "content": "the prompt"}
+    assert "tools" not in sent[1]
+
+    assert model("p2") == "VERDICT: stale" and len(sent) == 3
+
+    # A finalizer that answers nothing usable leaves the case with no verdict.
+    assert model("p3") == "no block here" and len(sent) == 5
+    assert R.grade({"expected": "confirmed"}, "no block here")["got"] == "no_verdict"
+
+    plain = R.endpoint_model("http://engine.invalid:1/", finalize=False)
+    answers2 = iter(["still exploring"])
+    monkeypatch.setattr(R.urllib.request, "urlopen", lambda req, timeout=None: _Resp(next(answers2)))
+    assert plain("p4") == "still exploring"

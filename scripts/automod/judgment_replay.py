@@ -23,8 +23,8 @@ on the ledger, 82 and 21.
            that flipped from agreeing with their label to disagreeing outnumber
            the ones that flipped the other way by `TRIAGE_NET_FLIPS` and a
            one-sided sign test on the flips is under `TRIAGE_SIGN_ALPHA`.
-           PROVISIONAL: no repeat-run noise floor has been measured for this
-           set, so both numbers are a first guess sized to be hard to trip.
+           Repeat-run floor, measured 2026-11-22: 2 of 42 cases differ between
+           two runs of one prompt (13 before the runner's finalizer; §4.6).
   grader   a fixed subset of the review calibration set (`GRADER_NEGATIVE`,
            the five constructed defects whose own tests stay green, then
            `GRADER_INDEPENDENT`), graded by the round's `review.py` through the

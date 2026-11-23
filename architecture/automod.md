@@ -2460,9 +2460,41 @@ python -m scripts.automod.review_tools calibrate --set negative --set independen
 prints one combined line — false met and false refusal as `k/N` with a 95 %
 Wilson interval each — and `--record` appends the run to
 `review_calibration.jsonl` in the state dir (§11), read back by
-`calibration_cases.scorecard_reading()`. No scorecard row renders it yet. It
-runs from `~/lloyd` against the live grader, about 2 h of engine time for the
-33 cases, so it is a hand step in an idle window, never CI.
+`calibration_cases.scorecard_reading()`, which scorecard row 24 renders. It
+runs from `~/lloyd` against the live grader, about 1 h 42 min of engine time for
+the 33 cases (measured, pool paused), so it is a hand step in an idle window,
+never CI.
+
+**The first baseline (2026-11-22, commit `417911e0`, primary as grader).**
+
+| | k/N | 95 % Wilson |
+|---|---|---|
+| false met (a `retry` case graded `pass`) | 2/20 | 3 %–30 % |
+| — constructed defects | 0/14 | |
+| — refused-then-fixed heads | 2/6 | |
+| — tests rung green, review alone | 0/5 | |
+| false refusal (a `pass` case graded `retry`) | 3/12 | 9 %–53 % |
+
+One negative case (`4214-stripped-tests`) came back `unsound` and is counted
+as ungraded, not as a catch. What the numbers do and do not say:
+
+- **Every constructed defect was refused**, including all five that the tests
+  rung would have let through. A missing test, a reverted source file and a
+  dropped doc are things this grader sees.
+- **Both false mets are refused heads** (`3292-surviving-bare-citation`,
+  `4187-guarded-vacuous-read`): work the grader itself sent back once and, on a
+  second reading of the same diff, accepted. That is run-to-run disagreement on
+  a judgment call, not blindness to a defect class, and it is the error a
+  second reading (`confirm`) is priced against. Six cases cannot rank it.
+- **False refusal is the larger error and the interval is too wide to act
+  on.** Of the three, `3991-steward-prose-fit` was a grader that never graded
+  three clauses (downgraded to `partial` by the parser — a transport outcome,
+  §4.5b), `4200-link-footer-residue` is a provisional label the grader
+  disputes with a reproduced red node, and `4293-bash-record-armed` is a
+  test-honesty objection. One clean disagreement in twelve.
+- Neither interval supports a policy change. The use of this run is as the
+  number the next one is compared to; a re-run that moves either rate by less
+  than these intervals has measured nothing.
 
 ### 4.5b The verdict has to reach the author: transport, attempts, snapshots
 
@@ -2813,11 +2845,24 @@ run an hour of engine for the other 17.
 
 The triage comparison is **paired per case**: the same 42 cases under the base's
 prompt and the head's, counted as flips between agreeing and disagreeing with
-the outcome label. Both thresholds are **provisional**. No repeat-run noise
-floor has been measured for this set, so `TRIAGE_NET_FLIPS = 3` and
-`TRIAGE_SIGN_ALPHA = 0.125` (exactly three flips to wrong and none to right, the
-smallest result that can refuse) are a first guess sized to be hard to trip;
-two identical-prompt runs on the primary are what replaces them. The set is
+the outcome label. `TRIAGE_NET_FLIPS = 3` and `TRIAGE_SIGN_ALPHA = 0.125`
+(exactly three flips to wrong and none to right, the smallest result that can
+refuse) were a first guess; the repeat-run floor was measured on 2026-11-22,
+two identical-prompt runs each way, pool paused, reasoning off:
+
+| Runner | no verdict (run 1 / run 2) | agreement | cases that differed between the runs |
+|---|---|---|---|
+| one completion | 11 / 5 of 42 | 64 % / 76 % | 13 — 12 of them only in whether a verdict was written |
+| one completion + schema-bound restatement | 0 / 0 | 83 % / 88 % | 2 (#2218, #701) |
+
+The first row is why the runner now asks a second, schema-bound completion of
+any answer with no parseable verdict (`eval/triage_replay/run.py::_finalized`,
+the shape production's finalizer has): without it, reading the two runs as base
+and head in the unlucky order is 9 flips to wrong against 4 to right, sign-test
+p = 0.133 — an **unchanged** prompt one flip short of a refusal. With it the
+floor is 2 flips, under the threshold of 3, so the thresholds stand. One pair
+is a thin floor: `advisory` is the mode that thickens it, since every advisory
+run on a round that did not change the prompt's meaning is another repeat. The set is
 40 good confirmations and 2 bad, so the one thing it can detect is a prompt
 that stopped confirming work that landed and stayed landed — it cannot say a
 prompt confirms too much. The grader's rule is one flip of five cases and is
@@ -2841,7 +2886,7 @@ from the store without the engine, and once the round lands its run is the next
 round's baseline. Only the first baseline is recorded by hand:
 
     python -m scripts.automod.judgment_replay status
-    python -m scripts.automod.judgment_replay record triage    # 42 completions, ~20-40 min
+    python -m scripts.automod.judgment_replay record triage    # 42 completions, ~4 min
     python -m scripts.automod.judgment_replay record grader    # 11 grading turns, ~45-60 min
 
 **What is not a verdict.** No recorded baseline is `unmeasured`; a lock still
@@ -4860,6 +4905,43 @@ latest), and a week of `fitness_intake report` read by hand. Before
 shows a ruling a person agrees with.
 
 `tests/test_fitness_intake.py`, `tests/test_measured_close.py`.
+
+### 12.5 Where the 2026-11-22 plan stands: what is off, and what each switch waits for
+
+Everything the plan built that acts unattended ships off, and a round cannot
+flip any of it (`spec.JUDGE_CONFIG_DENIED_KEYS`, §10). The order to turn them
+on, and what each needs first:
+
+| # | Switch | Needs | State on 2026-11-22 |
+|---|---|---|---|
+| 1 | `workers.sources.fitness.enabled` | every bench's noise floor `ok` | met: all seven `ok` (`architecture/testing.md`, "Noise floors") |
+| 2 | `automod.gate.judgment_replay: advisory` | a triage baseline, a grader baseline | met: triage recorded under the finalizer runner, grader covered by the `calibrate --record` row (§4.5) |
+| 3 | `automod.selection.prefer_improvement` | triage writing `class:` on live items | waits on triage running with the new schema |
+| 4 | `workers.sources.fitness.file_items` | about 8 nightly rows per bench | waits on 1 |
+| 5 | `automod.landing.measured_close` | a week of `fitness_intake report` read by hand | waits on 4 |
+| — | `automod.gate.judgment_replay: enforce` | a floor from more than one pair of runs | waits on advisory rows |
+
+Measured, and so not built:
+
+- **A second grader on a 24 GB card.** A review session never peaks under 43k
+  tokens (p50 95k); the 27B AWQ build on a 3090 has a KV ceiling near 20k. The
+  primary stays the only grader, with the error rates in §4.5.
+- **A ranking correction from worth labels.** `high` and `medium` items land
+  and stay landed at indistinguishable rates; only `low` differs (§12.3).
+- **ReasoningBank.** The A/B ran 2026-09-26 → 10-04 and was null (#1677); it
+  was not re-armed unchanged.
+- **A round-directory pruner.** 176 MB, kept on purpose by #1037.
+- **Throttling a source on its yield.** owed-check was the largest inflow and
+  84 % of its witness items land; landing rate is not value. The brake is on
+  what is filed (§3.2c), not on who files.
+
+Not done: the one-time board pass closed nothing (17 open low-worth derived
+items, six closable — #4068, #4081, #4316, #4371, #4430, #4470 — left for a
+person); loop prompts as experiments (plan 7.3); the `backlog.py` split and the
+`confirm` second-reader removal (assessed only, `architecture/backlog.md`,
+`architecture/testing.md`); test selection by affected files; hand labels for
+"triage confirms too much", which the replay set's two `bad_confirm` cases
+cannot measure.
 
 ## 13. Known limits
 

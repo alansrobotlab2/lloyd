@@ -485,6 +485,16 @@ reaches its verdict in about 8,000 tokens and 60 s, reasoning off in 489 tokens 
 modes are not comparable. `judgment_replay record` refuses to store a triage baseline
 in which more than a quarter of the cases returned no verdict.
 
+Reasoning off was not enough on its own. Two runs at one commit left 11 and 5
+of 42 cases with no verdict: the model announced a check it had no tools for
+and stopped, or wrote the block in bold, which the production text parser does
+not read either. An answer with no parseable verdict now gets one more
+completion under a two-field JSON schema (`verdict`, `evidence`), appended to
+the text as a plain block marked `replay finalizer` so the share stays
+countable (5 and 10 of 42 on the two measured runs). After it: no case without
+a verdict, agreement 83 % and 88 %, and 2 cases differing between the runs
+where 13 did. A full run is about 4 minutes of primary time.
+
 `tests/test_triage_replay.py` drives the runner with a fake model.
 
 ## Behaviour benches
@@ -736,6 +746,28 @@ that says nothing about next week's traffic. A bench with no measured floor, a `
 one, or one with no row old enough has `outside_noise: null` and a sentence
 saying which — it is neither a move nor a clean reading. Until the floors are
 measured, nothing can be reported as moved, by construction.
+
+**The floors as measured (2026-11-22, five repeats each, pool operator-paused,
+engine benches at `417911e0`, offline ones at `99accc2d`).** Every bench reads
+`ok`, so the first condition for switching the nightly source on is met.
+
+| Bench | n | min | max | spread | manifest limit | one repeat |
+|---|---|---|---|---|---|---|
+| `refusal_detour` (lower is better) | — | 0.263 | 0.263 | 0.000 | 0.05 | offline |
+| `skill_match` | 54 | 0.639 | 0.639 | 0.000 | 0.02 | offline |
+| `skill_activation` | 45 | 0.756 | 0.756 | 0.000 | 0.02 | offline |
+| `tool_choice` | 20 | 0.800 | 0.850 | 0.050 | 0.15 | ~55 s |
+| `injection_canary` (lower is better) | 15 | 0.000 | 0.000 | 0.000 | 0.20 | ~5 min |
+| `stale_fact` (lower is better) | 60 | 0.000 | 0.034 | 0.034 | 0.15 | ~2.5 min |
+| `memory_history` | 267 | 0.693 | 0.734 | 0.041 | 0.08 | ~3.7 min |
+
+Read with the sizes in view. `tool_choice` at n 20 moves in steps of 0.05, so
+its spread is one case and nothing under two cases is a move. `stale_fact`'s
+spread is two cases of 60. `injection_canary` sits on its floor: it can report
+a regression and can never report an improvement, which is what a tripwire is
+for and why it is a poor target for an `improvement` item. `memory_history` is
+the only engine bench with enough cases for its Wilson interval to bind before
+its spread does. A full engine pass is about 12 minutes of primary time.
 
 `tests/test_automod_fitness.py`; the index arms are pinned in
 `tests/test_eval_instrument_index.py`.

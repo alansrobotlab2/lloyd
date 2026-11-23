@@ -187,7 +187,8 @@ THINKING_MAX_TOKENS = 16000
 
 
 def endpoint_model(base_url: str, *, model: str = "primary", max_tokens: int = 3000,
-                   timeout: float = 600.0, thinking: bool = False) -> Callable[[str], str]:
+                   timeout: float = 600.0, thinking: bool = False,
+                   finalize: bool = True) -> Callable[[str], str]:
     """A `prompt -> text` over `/v1/chat/completions`: one user message, no
     `tools`, temperature 0, and reasoning OFF unless `thinking` is set.
 
@@ -205,14 +206,67 @@ def endpoint_model(base_url: str, *, model: str = "primary", max_tokens: int = 3
     extra = {} if thinking else {"chat_template_kwargs": {"enable_thinking": False}}
     url = base_url.rstrip("/") + "/v1/chat/completions"
 
-    def call(prompt: str) -> str:
+    def post(messages: list[dict], **more) -> str:
         body = json.dumps({"model": model, "temperature": 0, "max_tokens": max_tokens,
-                           "messages": [{"role": "user", "content": prompt}], **extra}).encode()
+                           "messages": messages, **extra, **more}).encode()
         req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310
             data = json.loads(resp.read().decode("utf-8"))
         return data["choices"][0]["message"].get("content") or ""
+
+    def call(prompt: str) -> str:
+        first = [{"role": "user", "content": prompt}]
+        text = post(first)
+        if not finalize or _has_verdict(text):
+            return text
+        return text + _finalized(post, first, text)
     return call
+
+
+#: The second completion's question. Production asks the same thing of a turn
+#: that ended without a parseable block (`app/harness/finalizer.py`).
+FINALIZE_NOTE = (
+    "You have no tools and this is your last message. Restate your verdict on "
+    "the item as the JSON object asked for, deciding now from the item's own "
+    "text if you had not decided. `evidence` is one sentence.")
+
+FINALIZER_MARK = "replay finalizer"
+
+
+def _finalize_schema() -> dict:
+    from scripts.automod.backlog import VERDICTS
+    return {"type": "json_schema", "json_schema": {"name": "triage_replay_verdict", "strict": True, "schema": {
+        "type": "object", "additionalProperties": False, "required": ["verdict", "evidence"],
+        "properties": {"verdict": {"type": "string", "enum": list(VERDICTS)},
+                       "evidence": {"type": "string", "maxLength": 400}}}}}
+
+
+def _has_verdict(text: str) -> bool:
+    from workers.sources import autotriage
+    return bool((autotriage.parse_verdict(text or "") or {}).get("verdict"))
+
+
+def _finalized(post: Callable[..., str], first: list[dict], text: str) -> str:
+    """The text block a second, schema-bound completion adds to an answer that
+    carried no parseable verdict. Measured 2026-11-22 with reasoning off: 11 and
+    5 of 42 answers had none (the model announced a check it had no tools for
+    and stopped, or wrote the block in bold), and 12 of the 13 cases that
+    differed between two runs at one commit differed only in that. Production
+    reads its verdict the same way, from a finalizer, with the text block as the
+    fallback. A finalizer that fails adds nothing and the case stays
+    `no_verdict`; the mark stays in `text_tail` so the share is countable."""
+    try:
+        raw = post(first + [{"role": "assistant", "content": text or "(no answer)"},
+                            {"role": "user", "content": FINALIZE_NOTE}],
+                   response_format=_finalize_schema())
+        obj = json.loads(raw)
+        verdict = str(obj.get("verdict") or "").strip().lower()
+        evidence = " ".join(str(obj.get("evidence") or "").split())[:400]
+    except Exception:  # noqa: BLE001
+        return ""
+    if not verdict:
+        return ""
+    return f"\n\nVERDICT: {verdict}\nEVIDENCE: ({FINALIZER_MARK}) {evidence}\n"
 
 
 def _read_rows(path: Path) -> list[dict]:
