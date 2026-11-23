@@ -1,20 +1,20 @@
 """Red-tree items: a full-suite failure the gate did not cause, filed once and
 closed by the loop itself when the tree heals.
 
-Moved out of `scripts/automod/backlog.py` unchanged (2026-11-23, the first cut of
-the split assessed in `architecture/backlog.md`). Every backlog name is read
-through the module at call time (`B.all_items`, `B.update_frontmatter`, ...), so
-a `monkeypatch.setattr(backlog, ...)` reaches this code exactly as it did when it
-lived there. `backlog` re-exports every name defined here (`backlog.__getattr__`),
-so `backlog.file_red_tree_item` and `from scripts.automod.backlog import ...`
-keep working; the constants (`RED_TREE_TAG`, `RED_TREE_COOLDOWN_S`, ...) and
-`new_item` stay in `backlog`, where the rest of the module reads them.
+Moved out of `scripts/automod/backlog.py` (2026-11-23, the first cut of the
+split assessed in `architecture/backlog.md`). The bodies are unchanged except
+that every reference to a backlog name — this module's own names included — reads
+`B.<name>`, so a `monkeypatch.setattr(backlog, ...)` reaches this code exactly as
+it did when it lived there. The foot of this module binds every name it defines
+back onto `backlog`. The constants (`RED_TREE_TAG`, `RED_TREE_COOLDOWN_S`, ...)
+and `new_item` stay in `backlog`.
 """
 from __future__ import annotations
 
-import time
-from datetime import datetime, timezone
 from pathlib import Path
+from datetime import datetime
+import time
+from datetime import timezone
 
 from app.backlog_status import OPEN_STATUSES
 
@@ -31,7 +31,7 @@ def _red_tree_clauses(nodes: list[str]) -> list[str]:
     clause so every node stays in the contract."""
     by_file: dict[str, list[str]] = {}
     for n in sorted(set(nodes)):
-        by_file.setdefault(_red_tree_file(n), []).append(n)
+        by_file.setdefault(B._red_tree_file(n), []).append(n)
     files = sorted(by_file)
     room = B.MAX_CLAUSES - 1
     head, rest = (files, []) if len(files) <= room else (files[:room - 1], files[room - 1:])
@@ -138,7 +138,7 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
     ledger = ledger or S.LEDGER_PATH
     now = time.time() if now is None else now
     changed = {str(p) for p in (changed_paths or ())}
-    nodes = sorted({str(n) for n in (node_ids or ()) if _red_tree_file(n) not in changed})
+    nodes = sorted({str(n) for n in (node_ids or ()) if B._red_tree_file(n) not in changed})
     if not base or not nodes:
         return None
 
@@ -147,7 +147,7 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
                         "node_ids": sorted(item_nodes)[:50], "round_id": round_id,
                         "action": action}, path=ledger)
 
-    open_items_ = open_red_tree_items(boards, backlog_dir=backlog_dir)
+    open_items_ = B.open_red_tree_items(boards, backlog_dir=backlog_dir)
     # A round is working an `in_progress` item against the contract it was
     # given. Growing that contract mid-flight graded #1454's round on a clause
     # added 20 minutes into its turn (2026-09-24): what such an item already
@@ -155,14 +155,14 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
     # item is looked at, or a newer open item would absorb the worked one's.
     for item in open_items_:
         if item.status == "in_progress":
-            covered = {str(n) for n in (_red_tree_fm(item).get("red_tree_nodes") or [])}
+            covered = {str(n) for n in (B._red_tree_fm(item).get("red_tree_nodes") or [])}
             nodes = [n for n in nodes if n not in covered]
     if not nodes:
         return None
     for item in open_items_:
         if item.status == "in_progress":
             continue
-        fm = _red_tree_fm(item)
+        fm = B._red_tree_fm(item)
         old_base = str(fm.get("red_tree_base") or "")
         old_nodes = [str(n) for n in (fm.get("red_tree_nodes") or [])]
         if old_base == base:
@@ -171,11 +171,11 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
             union = sorted(set(old_nodes) | set(nodes))
             action = "merged"
             new_base = base
-        elif _is_ancestor(live_root, old_base, base):
+        elif B._is_ancestor(live_root, old_base, base):
             union = nodes
             action = "replaced"
             new_base = base
-        elif old_base and _is_ancestor(live_root, base, old_base):
+        elif old_base and B._is_ancestor(live_root, base, old_base):
             return None           # an older view of a tree the item already describes
         else:
             if set(nodes) <= set(old_nodes):
@@ -183,7 +183,7 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
             union = sorted(set(old_nodes) | set(nodes))
             action = "merged"
             new_base = old_base or base
-        clauses, _dropped = B.cap_new_clauses(_red_tree_clauses(union))
+        clauses, _dropped = B.cap_new_clauses(B._red_tree_clauses(union))
         B.update_frontmatter(item.path, {"red_tree_base": new_base, "red_tree_nodes": union,
                                        "acceptance_clauses": clauses},
                            activity=(f"red tree {action} by round {round_id}: base "
@@ -194,27 +194,27 @@ def file_red_tree_item(base: str, node_ids, round_id: str, changed_paths=(), *,
     for item in B.all_items(boards, backlog_dir=backlog_dir):
         if B.RED_TREE_TAG not in item.tags or item.status in OPEN_STATUSES:
             continue
-        fm = _red_tree_fm(item)
+        fm = B._red_tree_fm(item)
         covered = {str(n) for n in (fm.get("red_tree_nodes") or [])}
-        if not (set(nodes) <= covered and _closed_recently(fm, now, B.RED_TREE_COOLDOWN_S)):
+        if not (set(nodes) <= covered and B._closed_recently(fm, now, B.RED_TREE_COOLDOWN_S)):
             continue
         # Suppressed only as an OLDER view of the healed tree. A report at the
         # heal's own base (or a newer one) says the heal was wrong — the green
         # run that closed it carried a diff that fixed the test, and that diff
         # never landed — so it is filed again.
         healed = str(fm.get("red_tree_healed_base") or fm.get(B.LANDED_MARKER) or "")
-        if not healed or (healed != base and _is_ancestor(live_root, base, healed)):
+        if not healed or (healed != base and B._is_ancestor(live_root, base, healed)):
             return None
 
-    files = sorted({_red_tree_file(n) for n in nodes})
+    files = sorted({B._red_tree_file(n) for n in nodes})
     name = f"main is red: {len(nodes)} failing test(s) in {len(files)} file(s) at {base[:8]}"
-    item = B.new_item(name, _red_tree_body(base, nodes, round_id), priority="high",
+    item = B.new_item(name, B._red_tree_body(base, nodes, round_id), priority="high",
                     tags=(B.RED_TREE_TAG,), status="draft", board=B.RED_TREE_BOARD,
                     backlog_dir=backlog_dir)
     B.update_frontmatter(item.path, {"red_tree_base": base, "red_tree_nodes": nodes,
                                    "red_tree_round": round_id})
     item = B.load_item(item.path) or item
-    clauses, dropped = B.cap_new_clauses(_red_tree_clauses(nodes))
+    clauses, dropped = B.cap_new_clauses(B._red_tree_clauses(nodes))
     acceptance = (f"Every test listed on the item passes at live HEAD under the gate's "
                   f"selection (-m \"{B._RED_TREE_MARK_EXPR}\"), with no test skipped, xfailed, "
                   f"deleted or excluded to get there.")
@@ -255,12 +255,12 @@ def close_healed_red_tree(base: str, round_id: str, live_root: Path | None = Non
     ledger = ledger or S.LEDGER_PATH
     touched_files = {str(p) for p in (touched or ())}
     closed: list[int] = []
-    for item in open_red_tree_items(boards, backlog_dir=backlog_dir):
-        fm = _red_tree_fm(item)
+    for item in B.open_red_tree_items(boards, backlog_dir=backlog_dir):
+        fm = B._red_tree_fm(item)
         item_base = str(fm.get("red_tree_base") or "")
-        if not item_base or not _is_ancestor(live_root, item_base, base):
+        if not item_base or not B._is_ancestor(live_root, item_base, base):
             continue
-        if {_red_tree_file(n) for n in (fm.get("red_tree_nodes") or [])} & touched_files:
+        if {B._red_tree_file(n) for n in (fm.get("red_tree_nodes") or [])} & touched_files:
             continue
         B.update_frontmatter(item.path, {"red_tree_healed_base": base})
         item = B.load_item(item.path) or item
@@ -322,7 +322,7 @@ def close_healed_red_tree_at_pickup(item: B.Item, probe, *, live_root: Path | No
     if item.status not in OPEN_STATUSES:
         return {"action": "closed", "item_id": item.id, "head": "",
                 "reason": f"the item is `{item.status}`, not open: no attempt to spend"}
-    fm = _red_tree_fm(item)
+    fm = B._red_tree_fm(item)
     nodes = [str(n) for n in (fm.get("red_tree_nodes") or []) if str(n).strip()]
     if not nodes:
         return {"action": "attempt", "item_id": item.id, "head": "",
@@ -340,7 +340,7 @@ def close_healed_red_tree_at_pickup(item: B.Item, probe, *, live_root: Path | No
         return {"action": "attempt", "item_id": item.id, "head": head,
                 "reason": f"still red at {head[:12]}: {still}"}
     item_base = str(fm.get("red_tree_base") or "")
-    if not _is_ancestor(live_root, item_base, head):
+    if not B._is_ancestor(live_root, item_base, head):
         return {"action": "attempt", "item_id": item.id, "head": head,
                 "reason": (f"the nodes pass at {head[:12] or '?'}, but the item was filed at "
                            f"{item_base[:12] or '?'} and that is not an ancestor of the tree "
@@ -365,3 +365,23 @@ def close_healed_red_tree_at_pickup(item: B.Item, probe, *, live_root: Path | No
                     "probe": note}, path=ledger)
     return {"action": "closed", "item_id": item.id, "head": head,
             "reason": f"{len(nodes)} node(s) pass at {head[:12]}"}
+
+
+# Bound onto `backlog`, so `backlog.<name>`, `from scripts.automod.backlog import
+# <name>`, a bare call from code still in backlog, and a monkeypatch on backlog
+# all keep meaning what they meant before the move.
+RED_TREE_NAMES = (
+    "_red_tree_file",
+    "_red_tree_clauses",
+    "_red_tree_body",
+    "_red_tree_fm",
+    "open_red_tree_items",
+    "_is_ancestor",
+    "_closed_recently",
+    "file_red_tree_item",
+    "close_healed_red_tree",
+    "PICKUP_CLOSER",
+    "close_healed_red_tree_at_pickup",
+)
+for _name in RED_TREE_NAMES:
+    setattr(B, _name, globals()[_name])

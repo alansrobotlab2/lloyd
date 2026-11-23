@@ -3019,7 +3019,7 @@ records `[]` for its base. The set is only consulted for nodes that failed at
 HEAD, so a stale entry can skip a probe, never hide a failure; a preflight
 rebase is a new base and a new entry. `tests/test_gate_red_set.py`.
 
-**The tree heals itself** (`red_tree.file_red_tree_item`, re-exported by `backlog`,
+**The tree heals itself** (`red_tree.file_red_tree_item`, bound onto `backlog` too,
 `automod.gate.file_red_tree`). A conclusive pre-existing set is filed as one
 open item tagged `red-tree` — priority `high`, confirmed at birth through
 `record_verdict` with one clause per failing file plus "no test skipped,

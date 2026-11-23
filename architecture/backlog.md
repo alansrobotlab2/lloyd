@@ -946,27 +946,48 @@ most active is the worst possible reading of "bounded".
   primitive that reads bytes it did not ask for must refuse for the same reason
   the lanes do (#1020).
 
-## Splitting `scripts/automod/backlog.py`: assessed 2026-11-22, first cut 2026-11-23
+## Splitting `scripts/automod/backlog.py`: assessed 2026-11-22, cut from 2026-11-23
 
-**Done so far:** red-tree items moved to `scripts/automod/red_tree.py` (11 names,
-343 lines; the module went from 10,805 lines to 10,488). The mechanics, as a
-pattern for each later cut:
+**Done so far**, bottom-up as planned below (the module went from 10,805 lines to
+10,263):
 
-- the moved bodies read every backlog name through the module at call time —
-  an AST pass rewrote each free reference to `B.<name>` and touched nothing
-  else, so a `monkeypatch.setattr(backlog, ...)` still reaches them;
-- `backlog` re-exports the moved names through a PEP 562 `__getattr__` keyed
-  on `RED_TREE_NAMES`, not an eager import, because the new module imports
-  `backlog` at its top and an eager import back would hand a first importer of
-  `red_tree` a half-built module;
-- the constants (`RED_TREE_TAG`, `RED_TREE_COOLDOWN_S`, ...) and `new_item` —
-  which sits in that section but is a general constructor used by eight test
-  files — stayed in `backlog`.
+| module | what | names | lines |
+|---|---|---|---|
+| `scripts/automod/red_tree.py` | red-tree items (`file_red_tree_item`, `close_healed_red_tree*`, `open_red_tree_items`) | 11 | 344 |
+| `scripts/automod/sweep.py` | the sweep's functions (`sweep_pool`, `record_sweep_verdicts`, `unfold_oversized_umbrellas`, ...) | 9 | 202 |
 
-Verified with the backlog/gate/automod/doc-claim selection (6,956 passed; the
-seven failures are red on the unmodified tree in a clone, four of them only
-because the clone lacked `refs/automod/*`, which `git fetch ~/lloyd
-'refs/automod/*:refs/automod/*'` into the sandbox fixes).
+The mechanics, done by one script so each cut is the same:
+
+- **Every reference in a moved body to a backlog name — the new module's own
+  names included — is rewritten to `B.<name>`** by an AST pass that changes
+  nothing else. A `monkeypatch.setattr(backlog, "sweep_enabled", ...)` (six
+  tests do exactly that) therefore still reaches the moved code, and no patch
+  site was re-pointed. The one exception is a default argument naming a moved
+  constant, evaluated at definition time (`PICKUP_CLOSER`), left bare.
+- **The new module binds its names back onto `backlog` at its foot**
+  (`setattr(B, name, ...)` over `RED_TREE_NAMES` / `SWEEP_NAMES`), and
+  `backlog`'s foot imports it. The names are real attributes, so code still in
+  `backlog` calls them by bare name (`board_health` calls `sweep_pool`), and
+  `from scripts.automod.backlog import ...` keeps working. Both import orders
+  are safe: the new module imports `backlog` at its top and reads its names
+  only at call time. (The first landing of the red-tree cut, `b6e71e59`,
+  re-exported through a PEP 562 `__getattr__` instead; that cannot answer a
+  bare global lookup from code still in `backlog`, which the sweep needed.)
+- **Constants and the comments that explain them stay in `backlog`**
+  (`RED_TREE_TAG`, `SWEEP_VERDICTS`, `SWEEP_SCHEMA`, ...), as does `new_item`,
+  which sits in the red-tree section but is a general constructor.
+
+Verified on the backlog/sweep/gate/automod/doc-claim selection: 7,980 passed and
+three failed. Two of them fail the same way on the unmodified tree because they
+read history a clone lacks. The third reads the live board and passes when run
+alone. A clone also lacks `refs/automod/*`, which several of the corpus tests
+read; `git -C ~/lloyd-sandbox fetch ~/lloyd 'refs/automod/*:refs/automod/*'`
+supplies them.
+
+Next by the same rule: the witness and clause-artefact machinery is the largest
+win (about 1,500 lines), but it sits at lines 1,236–3,200, above every one of
+the 45 `backlog.py:<line>` pins, so its cut re-points them all in the same
+commit.
 
 What follows is the assessment as written before the first cut. The module was 10,695 lines: 264 top-level functions (84 of
 them private), 2 classes, 160 module-level assignments. Who holds on to it:
