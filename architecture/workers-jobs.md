@@ -20,27 +20,29 @@ chain and the morning triage are all autonomy *task files* that reach the pool
 through the single `scheduled-task` source — [[autonomy]] is that mechanism
 and [[autonomy-jobs]] is what each of those jobs is for, not this document.
 
-The sixteen are grouped here by **what they are for**, not by priority, because
+The seventeen are grouped here by **what they are for**, not by priority, because
 the families share more than the members do:
 
 | § | family | sources | what it is for |
 |---|---|---|---|
 | §3 | **dispatch** | `scheduled-task` | one door onto the autonomy fleet |
-| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch`, `frontend-probe-canary` | change Lloyd's own code, behind a gate |
+| §4 | **self-mod** | `arch-review`, `backlog-cluster`, `board-steward`, `owed-check`, `autotriage`, `autocode`, `automod-regression`, `autoresearch`, `frontend-probe-canary`, `fitness` | change Lloyd's own code, behind a gate, and measure what that did |
 | §5 | **intake** | `youtube-digest`, `deep-research` | turn outside text into vault knowledge |
 | §6 | **mining** | `session-distill`, `bench-mine`, `failure-ledger`, `cost-investigate` | turn Lloyd's own exhaust into staged notes, and into dated failure issues |
 
-§1's roster is the other view — the same sixteen in priority order, which is
+§1's roster is the other view — the same seventeen in priority order, which is
 the order the pool considers them.
 
 ---
 
 ## 1. The roster
 
-Sixteen sources are registered.
+Seventeen sources are registered.
 
-All sixteen have a block under `workers.sources`, and none is registered-but-off:
-`failure-ledger` was the last to get one, on 2026-10-06 (#2309). Until that block
+All seventeen have a block under `workers.sources`, and one is registered-but-off
+by design: `fitness` (2026-11-22) ships `enabled: false` until its noise floors are
+measured by hand (§4). Before it, `failure-ledger` was the last to get a block, on
+2026-10-06 (#2309). Until that block
 existed `WorkerPool._scheduler_pass` read an empty dict for the source
 (`workers/pool.py:2045`) and stepped past it at `:2046` without calling its
 `enqueue_if_due`, which is why its **on** column was the only **no** in the table and
@@ -76,12 +78,14 @@ the parser as the count sentence being gone.
 | `failure-ledger` | mining | 75 | every 1 h poll; **one sweep a day** (`min_interval_seconds`) | 1 | direct (primary) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 | `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
+| `fitness` | self-mod | 85 | 1800 s poll, one run a night inside 01:00–04:00 local | 1 | none (subprocess) | **yes** | — | **no** |
 
 **KV-gated** is `LONG_LIVED = True`: tens of iterations each re-submitting a
 100–200k context, so the pool will not *claim* one while the primary's
-one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Nine
+one-minute median KV usage is over `workers.kv_gate.max_kv_usage` (0.60). Ten
 sources declare the attribute — `True` on the five long-session turns
-(`autocode`, `autotriage`, `arch-review`, `deep-research`, `owed-check`),
+(`autocode`, `autotriage`, `arch-review`, `deep-research`, `owed-check`) and on
+`fitness`, which holds no session but runs up to an hour of engine benches,
 `False` explicitly on `backlog-cluster`, `board-steward`, `failure-ledger`
 and `frontend-probe-canary`.
 
@@ -358,7 +362,7 @@ hygiene, inbound signal.
 
 ## 4. Self-modification — the loop that changes Lloyd's own code
 
-Nine sources are in this family. Five of them are one loop over the backlog,
+Ten sources are in this family. Five of them are one loop over the backlog,
 and they read best in pipeline order rather than priority order:
 
 ```
@@ -822,6 +826,30 @@ sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
   **one run a day, not one an hour**: `min_interval_seconds: 86400` floors the
   3600 s poll, so the `interval_seconds` figure is how often it asks, not how
   often it measures.
+
+### `fitness` — did Lloyd's behaviour move? (ships off)
+
+**Disabled in config** (`workers.sources.fitness.enabled: false`) until the
+benches' noise floors have been measured by hand. When on, it **wakes** on the
+1800 s poll and enqueues at most once per `min_interval_seconds` (72000), and
+only while the local hour is inside `[window_start_hour, window_end_hour)` — 1
+to 4. `execute` spawns `python -m scripts.automod.fitness run --once --pool-job`
+as one subprocess off the event loop.
+
+- **The source is only the schedule.** The benches (`eval/fitness/manifest.yaml`),
+  their values, the noise floors, the `fitness_move` ledger event and scorecard
+  row 22 are the script's; [[testing]] "Behaviour benches" is the account.
+- **`--pool-job`, not a paused pool.** The job is one of the pool's own in-flight
+  rows, so before each engine bench the script waits for the pool to hold nothing
+  else and the KV gate to be released, and records a bench it could not get a
+  quiet engine for as `skipped` with no value. `LONG_LIVED = True` also holds the
+  claim itself under KV pressure.
+- **Three timers, nested.** The pool's cap is `max_duration_seconds` (4500); the
+  subprocess is killed 60 s before it; the script stops *starting* benches 120 s
+  before that, so the pool never orphans a bench mid-run.
+- **Failures are returned.** A run that measured nothing (a held
+  `regression.lock`, every bench skipped) is a returned failure; a partial run is
+  a success whose summary names what was not measured.
 
 ### `autoresearch` — the gate-less week, and why it runs again now
 

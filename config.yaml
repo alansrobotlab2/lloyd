@@ -2858,6 +2858,25 @@ workers:
       # here alone would change nothing, and wiring the key through is recorded on
       # #2309.
       max_turns: 12
+    # The nightly behaviour-fitness run: `python -m scripts.automod.fitness run
+    # --once --pool-job` over eval/fitness/manifest.yaml, one bench at a time
+    # behind regression.lock, rows appended to ${LLOYD_DATA}/eval/fitness.jsonl.
+    # SHIPS OFF: the noise floors are measured by hand first (`fitness noise
+    # --repeat 5`, pool paused), and a delta with no floor under it reports
+    # nothing. Enqueued once a night while the local hour is inside
+    # [window_start_hour, window_end_hour). No session and no `inner_voice` key:
+    # the benches are subprocesses, not a judgement. The subprocess is killed 60 s
+    # before `max_duration_seconds` and the script stops starting benches 120 s
+    # before that (`workers/sources/fitness.py::timers`); the manifest's engine
+    # budget is 60 minutes, so the cap is 75.
+    fitness:
+      enabled: false
+      interval_seconds: 1800
+      min_interval_seconds: 72000
+      window_start_hour: 1
+      window_end_hour: 4
+      max_inflight: 1
+      max_duration_seconds: 4500
   staging_root: ${LLOYD_DATA}/_pipeline/vault-derived/pending-research
 
 # Fact writes through the fact_add MCP tool. The rebuild sets this

@@ -95,3 +95,10 @@ register(_failure_ledger)
 # Its own runs are excluded from the distribution that arms it — see
 # `app.cost_outlier.EXCLUDED_SOURCES`.
 register(_cost_investigate)
+# The nightly behaviour-fitness run (`scripts/automod/fitness.py`). Appended here,
+# import and registration together, so nothing above moves; it ships disabled in
+# config.yaml and is registered anyway, because a queue row whose source is not in
+# this registry is poisoned as `unknown source`.
+from workers.sources import fitness as _fitness  # noqa: E402,F401
+
+register(_fitness)

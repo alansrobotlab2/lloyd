@@ -237,6 +237,7 @@ python -m scripts.automod.round board-pass          # housekeeping's board passe
 python -m scripts.automod.review_tools calibrate    # the review grader against known verdicts
 python -m scripts.automod.review_tools backfill     # grade past landings → review_backfill.jsonl
 python -m scripts.automod.rehearse --yes-i-mean-it  # prove rollback still works
+python -m scripts.automod.fitness report           # behaviour benches vs noise (testing.md)
 ```
 
 ### Rules before touching it

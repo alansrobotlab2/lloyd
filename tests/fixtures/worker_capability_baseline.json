@@ -372,6 +372,44 @@
    "reachable_after": 129,
    "reachable_before": 129
   },
+  "fitness": {
+   "declared": false,
+   "durable_external_after": [
+    "autonomy_delete_task",
+    "autonomy_write_task",
+    "calendar_create",
+    "calendar_delete_event",
+    "calendar_update_event",
+    "contacts_create",
+    "contacts_delete",
+    "contacts_update",
+    "email_forward",
+    "email_reply",
+    "email_send",
+    "email_update",
+    "tasks_create",
+    "tasks_update"
+   ],
+   "durable_external_before": [
+    "autonomy_delete_task",
+    "autonomy_write_task",
+    "calendar_create",
+    "calendar_delete_event",
+    "calendar_update_event",
+    "contacts_create",
+    "contacts_delete",
+    "contacts_update",
+    "email_forward",
+    "email_reply",
+    "email_send",
+    "email_update",
+    "tasks_create",
+    "tasks_update"
+   ],
+   "n_allowed": null,
+   "reachable_after": 129,
+   "reachable_before": 129
+  },
   "frontend-probe-canary": {
    "declared": false,
    "durable_external_after": [

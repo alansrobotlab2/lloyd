@@ -7163,8 +7163,8 @@ def test_no_architecture_doc_cites_a_command_its_module_does_not_dispatch():
     # is what this sweep exists to collect, not a defect; the entry above, whose
     # module has no chain, is the shape that would need reading.
     assert graded_by == {"automod.md", "autonomy-jobs.md", "harness.md",
-                         "infrastructure.md", "measurement.md",
-                         "research-pipeline.md", "voice.md"}, (
+                         "infrastructure.md", "measurement.md", "testing.md", "workers.md",
+                         "research-pipeline.md", "voice.md", "workers-jobs.md"}, (
         f"graded claims came from {sorted(graded_by)}; harness.md among them is "
         f"the point of #1890 — its `lloyd_rpc.py` row was the report the widening "
         f"existed to settle")

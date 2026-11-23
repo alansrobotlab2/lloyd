@@ -531,3 +531,13 @@ EVAL_VAULT_SEARCH_DIR = DATA_ROOT / "eval" / "vault-search"
 # the item's whole point is that a human reads the number before spending effort
 # on #2144/#3771/#4128/#2019.
 ENGINE_SHARE_DIR = DATA_ROOT / "eval" / "engine-share"
+# The behaviour-fitness series (`scripts/automod/fitness.py`): one JSONL row per
+# bench per run of `eval/fitness/manifest.yaml` — commit, value, n, Wilson
+# interval, duration — and one closing `summary` row per run, which is the row the
+# instrument index's `fitness_*` arms read. Declared last for the reason the block
+# above gives (this file's line numbers are anchors). Report-only: scorecard row 22
+# and `fitness report` read it; no gate, promotion rule or rollback path does.
+FITNESS_SERIES = DATA_ROOT / "eval" / "fitness.jsonl"
+# The measured noise floor per bench (`fitness noise --repeat N`): min, max and
+# stdev of N runs at one commit. A delta inside it is not a move.
+FITNESS_NOISE_PATH = DATA_ROOT / "eval" / "fitness_noise.json"

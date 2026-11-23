@@ -1328,9 +1328,9 @@ def _roots_file(tmp_path, values: dict, *, omit: tuple[str, ...] = (),
     """Seed each instrument into its own tmp store and publish the `--roots`
     snapshot that points the publisher at them instead of at the live data root."""
     roots = _seed_all(tmp_path, values, omit=omit, days=days)
+    roots.update({i.key: tmp_path / "no-fitness-row" / i.key for i in EII.fitness_instruments()})
     path = tmp_path / "roots-snapshot.json"
-    path.write_text(json.dumps({k: str(v) for k, v in roots.items()}, indent=1),
-                    encoding="utf-8")
+    path.write_text(json.dumps({k: str(v) for k, v in roots.items()}, indent=1), encoding="utf-8")
     return path
 
 
@@ -1359,7 +1359,7 @@ def test_the_module_cli_appends_one_row_and_exits_zero_on_the_ok_branch(tmp_path
         "this fixture is the ok branch — the exit-1 test below is the other one, so "
         "the pair pins a mapping rather than self-consistency")
     assert rows[0]["date"] == "2026-10-13", "`--now` is what stamps the row"
-    assert len(rows[0]["components"]) == 8, (
+    assert len(rows[0]["components"]) == 8 + len(EII.fitness_instruments()), (
         "the subprocess publishes the whole table, arms carried by ruling included — "
         "nine since #3886 added the ninth, eight since #4169 retired the scorecard arm")
 
@@ -1392,7 +1392,7 @@ def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(
     rows = EII.read_series(out)
     assert len(rows) == 1, "a refused run publishes one row, not zero"
     assert rows[0]["totals"]["status"] == "refused"
-    assert len(rows[0]["dead_or_stale"]) == 7
+    assert len(rows[0]["dead_or_stale"]) == 7 + len(EII.fitness_instruments())
 
 
 def test_no_record_prints_and_creates_nothing_even_on_the_refused_branch(tmp_path):
@@ -2085,3 +2085,153 @@ def test_naming_the_window_leaves_the_arm_named_by_app_paths_at_zero_weight(tmp_
     assert comp["weight"] == 0.0 and comp["averageable"] is False
     assert comp["contributes"] is False and comp["in_total_denominator"] is False
     assert any(x["key"] == "behaviour_exhibit" for x in row["totals"]["excluded"])
+
+
+# ── the behaviour-fitness arms ────────────────────────────────────────────────
+#
+# `scripts/automod/fitness.py` appends one `summary` row per run to
+# `app.paths.FITNESS_SERIES`; the publisher reads it through one arm per bench of
+# `eval/fitness/manifest.yaml`. These nodes pin the three things that could go
+# quietly wrong: the arms silently entering a total, an arm reading a shape its
+# writer does not write, and a night with no run reading as anything but dead.
+
+def _fitness_mod():
+    from scripts.automod import fitness
+    return fitness
+
+
+def test_the_fitness_arms_are_one_per_manifest_bench_and_leave_the_ruled_table_alone():
+    fit = _fitness_mod()
+    arms = EII.fitness_instruments()
+    names = [b.name for b in fit.load_manifest()]
+    assert [a.key for a in arms] == [f"fitness_{n}" for n in names]
+    assert EII.all_instruments() == EII.INSTRUMENTS + arms
+    assert len(EII.INSTRUMENTS) == 8, "the ruled table is not what grew"
+    assert {a.key for a in arms}.isdisjoint(ALL_KEYS)
+    polarity = {b.name: ("up" if b.higher_is_better else "down") for b in fit.load_manifest()}
+    for arm in arms:
+        assert arm.weight == 0.0 and arm.averageable is False, (
+            f"{arm.key} would enter a total with no measured noise floor behind it")
+        assert arm.unit == "rate" and arm.cadence_days == 1
+        assert arm.hand_run_by_ruling is False, "a nightly arm must be able to go stale"
+        assert arm.polarity == polarity[arm.key.removeprefix("fitness_")]
+        assert arm.date_key == "recorded_at" and arm.pattern is None
+        assert arm.scheduled_by == "workers/sources/fitness.py"
+        assert (ROOT / arm.scheduled_by).is_file()
+
+
+def test_the_fitness_arms_name_a_consumer_that_compares_rows_and_exists():
+    """Tier 2 needs a named consumer that compares an artifact against a prior
+    row. The one named here has to be a real file with the comparing functions the
+    sentence claims, or the tier is a claim about nothing."""
+    fit = _fitness_mod()
+    consumer = EII.FITNESS_CONSUMER
+    assert consumer.compares_rows is True
+    assert (ROOT / consumer.script).is_file()
+    assert consumer.script == "scripts/automod/fitness.py"
+    for name in ("moves", "deltas", "bench_delta", "render_report"):
+        assert callable(getattr(fit, name)), name
+    assert all(a.consumer is consumer for a in EII.fitness_instruments())
+
+
+def test_the_fitness_arm_path_is_the_constant_its_writer_appends_to():
+    from app import paths
+    fit = _fitness_mod()
+    for arm in EII.fitness_instruments():
+        assert arm.artifact() == paths.FITNESS_SERIES == fit.series_path()
+    assert paths.DATA_ROOT in paths.FITNESS_SERIES.parents
+
+
+def _fitness_series(tmp_path, *, day: str, measured: dict) -> Path:
+    """A series written by the writer's own functions: bench rows, then the
+    closing summary row `execute_run` appends."""
+    fit = _fitness_mod()
+    stamp = datetime.fromisoformat(f"{day}T09:30:00+00:00")
+    rows = []
+    for name, (k, n) in measured.items():
+        lo, hi = fit.wilson(k, n)
+        rows.append({"schema": 1, "kind": "bench", "bench": name, "status": "measured",
+                     "value": round(k / n, 6), "k": k, "n": n, "ci_low": lo, "ci_high": hi,
+                     "run_id": "run-1", "commit": "abc", "ts": stamp.timestamp(),
+                     "recorded_at": stamp.isoformat(timespec="seconds")})
+    path = tmp_path / "fitness.jsonl"
+    fit.append_rows(rows, path)
+    fit.append_rows([fit.summary_row(rows, sorted(measured), run_id="run-1", now=stamp,
+                                     commit="abc")], path)
+    return path
+
+
+def test_a_fitness_arm_reads_the_summary_row_its_writer_appends(tmp_path):
+    arms = {a.key: a for a in EII.fitness_instruments()}
+    series = _fitness_series(tmp_path, day=FRESH,
+                             measured={"tool_choice": (15, 20), "injection_canary": (2, 16)})
+    up = EII.read_instrument(arms["fitness_tool_choice"], today=NOW.date(),
+                             root_override=series)
+    assert up.status == "measured" and up.value == 0.75 and up.denominator == 20
+    assert up.ci95 and up.ci95[0] < 0.75 < up.ci95[1], "the writer's own Wilson bounds"
+    assert up.age_days == 1
+    assert EII.tier_of(arms["fitness_tool_choice"], up) == 2, (
+        "fresh rows plus a consumer that compares rows is the tier-2 test")
+
+    down = EII.read_instrument(arms["fitness_injection_canary"], today=NOW.date(),
+                               root_override=series)
+    assert down.status == "measured" and down.value == 0.125
+    assert EII.quality(down, arms["fitness_injection_canary"]) == 0.875
+
+    # A bench the run did not measure is a named refusal, never a zero.
+    absent = EII.read_instrument(arms["fitness_skill_match"], today=NOW.date(),
+                                 root_override=series)
+    assert absent.status == "no-value" and absent.value is None
+
+
+def test_a_night_with_no_fitness_run_is_named_dead_and_moves_no_total(tmp_path):
+    values = GOOD_VALUES
+    plain, _, _ = _row(tmp_path / "a", values)
+    roots = _seed_all(tmp_path / "b", values)
+    stale = _fitness_series(tmp_path, day="2026-10-01", measured={"tool_choice": (15, 20)})
+    arms = EII.fitness_instruments()
+    roots.update({a.key: tmp_path / "no-such-series.jsonl" for a in arms})
+    roots["fitness_tool_choice"] = stale
+    row = EII.build_row(EII.all_instruments(), now=NOW, root_overrides=roots,
+                        out_dir=None, code_root=tmp_path / "code")
+
+    by = {c["key"]: c for c in row["components"]}
+    assert by["fitness_tool_choice"]["status"] == "stale", "12 d old against a 1 d cadence"
+    assert by["fitness_tool_choice"]["tier"] == 1
+    assert by["fitness_stale_fact"]["status"] == "missing" and by["fitness_stale_fact"]["tier"] == 0
+    dead = {d["key"] for d in row["dead_or_stale"]}
+    assert {a.key for a in arms} <= dead, "every unmeasured bench is in the headline's list"
+    assert "fitness_tool_choice" in row["headline"]
+
+    for key in ("declared_weights", "equal_weights", "scored", "renormalised_weight_sum"):
+        assert row["totals"][key] == plain["totals"][key], (
+            f"the fitness arms moved `{key}`: they are reported, never averaged")
+    assert row["weights_sum_declared"] == plain["weights_sum_declared"] == 1.0
+    assert not any(by[a.key]["contributes"] for a in arms)
+
+
+def test_a_measured_fitness_arm_is_carried_in_the_table_and_still_not_averaged(tmp_path):
+    plain, _, _ = _row(tmp_path / "a", GOOD_VALUES)
+    roots = _seed_all(tmp_path / "b", GOOD_VALUES)
+    series = _fitness_series(tmp_path, day=FRESH, measured={
+        b.name: (1, 20) for b in _fitness_mod().load_manifest()})
+    roots.update({a.key: series for a in EII.fitness_instruments()})
+    row = EII.build_row(EII.all_instruments(), now=NOW, root_overrides=roots,
+                        out_dir=None, code_root=tmp_path / "code")
+    by = {c["key"]: c for c in row["components"]}
+    for arm in EII.fitness_instruments():
+        assert by[arm.key]["status"] == "measured" and by[arm.key]["value"] == 0.05
+        assert by[arm.key]["tier"] == 2 and by[arm.key]["contributes"] is False
+    assert row["totals"]["declared_weights"] == plain["totals"]["declared_weights"]
+    assert row["totals"]["equal_weights"] == plain["totals"]["equal_weights"]
+
+
+def test_the_fitness_runner_never_reads_the_index():
+    """The index reads the fitness series; nothing flows the other way. The runner
+    lives in `scripts/automod/`, beside the gate and the promoter, so it is held to
+    the same boundary the whole-tree scan above enforces — asserted on the three
+    files this change added, by name, so the positive is not left to the scan."""
+    for rel in ("scripts/automod/fitness.py", "workers/sources/fitness.py",
+                "tests/test_automod_fitness.py"):
+        assert _index_reads_in(ROOT / rel) == [], rel
+        assert rel not in DECLARED_IN

@@ -1,0 +1,201 @@
+# The behaviour-fitness manifest: the benches `scripts/automod/fitness.py` runs,
+# one at a time, and how each one's single 0..1 value and its n are read back.
+# The inventory these were picked from, and why the others were not, is
+# architecture/testing.md "Behaviour benches".
+#
+# Rules a new entry has to meet (the loader refuses the first three):
+#   * it replays no prompt with live tools unless the bench mints a sandboxed
+#     session id itself (`safety:` says which, in words a reviewer can check);
+#   * it never sets LLOYD_DATA, and everything it writes goes to `{scratch}` or to
+#     a store the bench already owns under the data root;
+#   * its value is a share in 0..1 with an n;
+#   * it finishes inside `timeout_s`. The nightly budget is 60 minutes of engine
+#     time over the whole file: the `engine_minutes` column must keep adding up
+#     to less than that.
+#
+# Placeholders in `commands`, `env` and `read.path`: {python} the interpreter
+# running fitness.py, {root} the checkout, {scratch} this run's own temp
+# directory (made by the runner, removed by the runner), {data_root}
+# `app.paths.DATA_ROOT`, {days_ago:N} the ISO date N days before the run.
+#
+# `engine_minutes` is an ESTIMATE until `fitness noise` has run once: none of
+# these benches has been timed by this runner. Where a number is recorded
+# elsewhere the comment says where; the rest are guesses and say so.
+#
+# `noise_max_spread`: `fitness noise` flags a bench `too-noisy`, and every delta
+# report excludes it, when max - min over its repeats at one commit exceeds this.
+schema: 1
+budget_engine_minutes: 60
+benches:
+  # ORDER: the three offline benches run first — they take seconds, and the
+  # nightly run's budget stops STARTING benches when it runs short, so whatever
+  # is last is what a slow night drops.
+  # Refusal detour: after a refused tool call, how often the next calls reach
+  # for the same effect anyway. Offline — it reads the last 30 days of session
+  # transcripts and calls nothing. The corpus is live traffic, so this is a
+  # reading of recent behaviour, not of one commit: n moves with traffic and a
+  # run with no measurable refusal has no value (recorded `no-value`, never 0).
+  - name: refusal_detour
+    covers: refusal detour
+    engine: false
+    safety: "offline: reads session transcripts"
+    commands:
+      - ["{python}", "eval/refusal_detour_baseline.py", "--since", "{days_ago:30}",
+         "--no-devset", "--out", "{scratch}/refusal-detour.json"]
+    read:
+      from: file
+      path: "{scratch}/refusal-detour.json"
+      value: all.same_effect_rate
+      n: all.measurable
+    higher_is_better: false
+    cadence_days: 1
+    timeout_s: 900
+    engine_minutes: 0
+    noise_max_spread: 0.05
+
+  # Skill match: the prefetch skill matcher's recall@5 on the labelled turns (54 on 2026-11-22),
+  # default lexical arm only (no djev, no embedder). Offline and deterministic
+  # for a given skill inventory — which lives in the vault, so a nightly skill
+  # rewrite can move it with no code change. The value is a mean of per-turn
+  # fractions, not k successes of n, so its Wilson interval is approximate.
+  - name: skill_match
+    covers: skill match
+    engine: false
+    safety: "offline: scores the matcher in-process"
+    commands:
+      - ["{python}", "eval/run_skill_match_eval.py", "--json", "{scratch}/skill-match.json"]
+    read:
+      from: file
+      path: "{scratch}/skill-match.json"
+      value: arms.lexical.recall@5
+      n: arms.lexical.labelled_turns
+    binomial: false
+    higher_is_better: true
+    cadence_days: 1
+    timeout_s: 600
+    engine_minutes: 0
+    noise_max_spread: 0.02
+
+  # Skill activation: per-skill trigger recall pooled over the labelled corpus.
+  # Offline, identical counts across runs by its own docstring. Exit 1 means a
+  # skill has too few labelled cases; the report is written before that exit and
+  # the pooled rate is still a measurement, so 1 is accepted here.
+  - name: skill_activation
+    covers: skill match
+    engine: false
+    safety: "offline: scores the trigger rule in-process"
+    commands:
+      - ["{python}", "eval/run_skill_activation_eval.py", "--json",
+         "{scratch}/skill-activation.json"]
+    ok_exit_codes: [0, 1]
+    read:
+      from: file
+      path: "{scratch}/skill-activation.json"
+      value: corpus.recall
+      k: corpus.triggers
+      n: corpus.positives
+    higher_is_better: true
+    cadence_days: 1
+    timeout_s: 600
+    engine_minutes: 0
+    noise_max_spread: 0.02
+
+  # Tool choice: the first tool the model reaches for on 20 web-shaped prompts.
+  # Sends the real `tools` array through `run_query` and closes the generator at
+  # the first tool_call event, so nothing is dispatched — but nothing at the tool
+  # layer enforces that, and it mints no session id. One cold ~34k-token prefill
+  # per query. Runtime: not recorded anywhere; 8 min is a guess.
+  - name: tool_choice
+    covers: tool choice
+    engine: true
+    safety: "schema-only: the generator is closed before dispatch; no session id"
+    commands:
+      - ["{python}", "eval/run_tool_choice_eval.py", "--label", "fitness",
+         "--notes", "fitness run"]
+    read:
+      from: file
+      path: "{data_root}/eval/baselines/tool-choice/fitness-*.json"
+      value: summary.overall.correct_rate
+      n: summary.overall.n_queries
+    higher_is_better: true
+    cadence_days: 1
+    timeout_s: 1500
+    engine_minutes: 8
+    noise_max_spread: 0.15
+
+  # Injection canary: 20 scenarios, each a real turn under a
+  # `<date>_<time>_bench_<hex>` id (sandboxed by slug; the runner itself exits 2
+  # unless the aggregator reports the sandbox enforced). Rows go to the scratch
+  # file, never to the tracked corpus: LLOYD_CANARY_ROWS is what the bench's own
+  # guard requires of any caller that is not a window unit. Runtime: median
+  # 23.8 s per episode over the 286 tracked rows, so ~8 min plus the four
+  # persistence episodes' summariser passes.
+  - name: injection_canary
+    covers: injection canary
+    engine: true
+    safety: "sandboxed: new_background_session_id('bench'), sandbox pre-flight"
+    env:
+      LLOYD_CANARY_ROWS: "{scratch}/canary-rows.jsonl"
+    commands:
+      - ["{python}", "eval/run_injection_canary.py", "run"]
+      - ["{python}", "eval/run_injection_canary.py", "grade"]
+    read:
+      from: stdout
+      value: attack_success_rate
+      k: attack_success
+      n: attack_scenarios
+    higher_is_better: false
+    cadence_days: 1
+    timeout_s: 1800
+    engine_minutes: 12
+    noise_max_spread: 0.20
+
+  # Memory, acting on a superseded value: 32 synthetic probes planted into a temp
+  # shadow store the bench makes and deletes; `facts_appended` is the arm shaped
+  # like the live store (the extractor adds the new value and leaves the old row
+  # active). No live tools. Runtime: 1,414 s was recorded for five arms x three
+  # samples (2026-09-24), so ~95 s per arm-sample and ~5 min here.
+  - name: stale_fact
+    covers: memory
+    engine: true
+    safety: "no live tools: fact_get is answered from a temp shadow store"
+    commands:
+      - ["{python}", "eval/run_stale_fact_eval.py", "--arms", "facts_appended",
+         "--samples", "3", "--out", "{scratch}/stale-fact.json"]
+    read:
+      from: file
+      path: "{scratch}/stale-fact.json"
+      value: summary.facts_appended.stale_action.rate
+      k: summary.facts_appended.stale_action.numerator
+      n: summary.facts_appended.stale_action.denominator
+    higher_is_better: false
+    cadence_days: 1
+    timeout_s: 1200
+    engine_minutes: 5
+    noise_max_spread: 0.15
+
+  # Memory, using a fact told earlier in the conversation: LloydMemEval's
+  # `history` arm over the frozen dev set, rules judge only (`correct_strict`
+  # never takes the djev judge's word anyway, and this keeps GPU 2 out of it).
+  # Engine-only, no tools, no fact snapshot (the prefetch arms need
+  # ~/lloyd-data/eval/1480/corpus, which is not in the tree — not used here).
+  # Runtime: 31 min was recorded for 1,275 prompts over three arms (2026-09-25);
+  # one arm of 267 is ~7 min pro rata, and `history` prompts are the long ones.
+  - name: memory_history
+    covers: memory
+    engine: true
+    safety: "no tools: one chat completion per question"
+    commands:
+      - ["{python}", "eval/run_memory_eval.py", "run", "--arms", "history",
+         "--judge", "rules", "--label", "fitness", "--out-dir", "{scratch}/memeval"]
+    read:
+      from: file
+      path: "{scratch}/memeval/lloydmemeval-fitness.json"
+      value: dev.history.all.correct_strict.rate
+      k: dev.history.all.correct_strict.k
+      n: dev.history.all.correct_strict.n
+    higher_is_better: true
+    cadence_days: 1
+    timeout_s: 1800
+    engine_minutes: 10
+    noise_max_spread: 0.08

@@ -4482,6 +4482,20 @@ None of the four is a gate. They exist so that a week in which the loop
 landed 149 changes and deleted almost nothing does not read as healthy.
 `tests/test_loop_inflow_brakes.py`.
 
+Row 22 is the first one about what Lloyd *does* rather than how the loop ran:
+
+| # | Row | Why |
+|---|---|---|
+| 22 | fitness — per behaviour bench, the latest value and its 7-day delta, and whether that delta is outside the bench's measured noise floor (`scripts/automod/fitness.py`) | Rows 1–21 can all be green in a week that made the agent worse at picking a tool or ignoring a planted instruction. `unmeasured` when the series holds no value — never 0. |
+
+It reads `app.paths.FITNESS_SERIES` (`fitness.jsonl` in the data root's eval directory), which the nightly `fitness` source
+(off until its noise floors are measured) and hand runs append to. Not a gate
+either, and deliberately so: a bench that regresses outside noise appends one
+`fitness_move` ledger event naming the landings between the two measured
+commits, and nothing bisects or rolls back on it. The benches, the runner and
+the noise rule are in `architecture/testing.md`, "Behaviour benches";
+`tests/test_automod_fitness.py`.
+
 ### 12.2 The 2026-11-22 defect survey: ten hypotheses against the ledger
 
 A code survey listed ten suspected defects in the loop. Each was treated as a

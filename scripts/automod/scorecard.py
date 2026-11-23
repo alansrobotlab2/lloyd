@@ -1214,7 +1214,7 @@ def compute(*, since_days: float = 7.0, ledger: Path | None = None,
         inflow = {}
 
     return {"tree_growth": growth, "derived_work": derived, "tests_rung": tests_rung,
-            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now),
+            "inflow_yield": inflow, "verdict_outcomes": _verdict_outcomes(ledger, backlog_dir, now), "fitness": _fitness(now),
             "computed_at": datetime.fromtimestamp(now, tz=timezone.utc).isoformat(timespec="seconds"),
             "since_days": since_days, "events": len(ev), "grouping": grouping,
             "acceptance": acceptance, "audit": audit, "review": review, "spawn": spawn,
@@ -1287,7 +1287,7 @@ def render(row: dict) -> str:
     lines.append(_render_overrides(row))
     lines.append(_render_denials(row))
     lines.append(_render_provenance(row))
-    lines.extend(_render_growth_rows(row))
+    lines.extend(_render_growth_rows(row) + _render_fitness_row(row))
     return "\n".join(lines + [_render_verdict_outcomes(row)])
 
 
@@ -1328,6 +1328,48 @@ def _render_growth_rows(row: dict) -> list[str]:
                    + "; ".join(cell(n, r) for n, r in top)
                    + f"; {total['derived']} of all filed only witness an earlier item |")
     return out
+
+
+def _fitness(now: float) -> dict[str, Any]:
+    """Row 22's block: per behaviour bench, the latest value and its 7-day delta,
+    from the fitness series (`scripts/automod/fitness.py`). The only row here that
+    is about what Lloyd DOES rather than how the loop ran. Never raises, and an
+    unreadable or empty series is `measured: False` — which renders `unmeasured`,
+    never a zero."""
+    try:
+        from scripts.automod import fitness as F
+        return F.scorecard_block(now)
+    except Exception:
+        return {}
+
+
+def _render_fitness_row(row: dict) -> list[str]:
+    """Row 22. A row recorded before it existed, or a series with no measured
+    bench, renders `unmeasured`."""
+    f = row.get("fitness")
+    if not isinstance(f, dict) or not f.get("measured"):
+        return ["| 22 | fitness | unmeasured | no behaviour bench has a recorded value |"]
+
+    def cell(b: dict) -> str:
+        if b.get("value") is None:
+            return f"{b['bench']} unmeasured"
+        delta = b.get("delta_7d")
+        if delta is None:
+            move = "no 7 d delta yet"
+        elif b.get("outside_noise") is True:
+            move = f"{delta:+.3f} over 7 d, OUTSIDE noise ({b.get('direction')})"
+        elif b.get("outside_noise") is False:
+            move = f"{delta:+.3f} over 7 d, inside noise"
+        else:
+            move = f"{delta:+.3f} over 7 d, noise floor {b.get('noise_status')}"
+        return f"{b['bench']} {b['value']:.3f} (n {b.get('n')}; {move})"
+
+    benches = f.get("benches") or []
+    measured = sum(1 for b in benches if b.get("value") is not None)
+    moved = f.get("moved") or []
+    head = f"{len(moved)} moved" if moved else "none moved"
+    return [f"| 22 | fitness | {measured} of {len(benches)} benches, {head} | "
+            + "; ".join(cell(b) for b in benches) + " |"]
 
 
 def _override_ref(event_row: dict) -> str:

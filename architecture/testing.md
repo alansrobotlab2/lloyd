@@ -478,6 +478,259 @@ landed. It is not run by the gate and it needs the engine:
 
 `tests/test_triage_replay.py` drives the runner with a fake model.
 
+## Behaviour benches
+
+Every scorecard row measures the loop's process and the regression check
+measures retrieval; until 2026-11-22 nothing on a schedule said whether Lloyd's
+*behaviour* moved. `eval/` holds 84 top-level scripts that measure some part of
+it, almost all hand-run. This section is the inventory of those scripts, the
+seven that now run as one nightly fitness pass, and how that pass decides that
+a number moved.
+
+### The inventory (read 2026-11-22; nothing was run)
+
+Read from each script's docstring, argparse and call sites. `unknown` means the
+code and the docs do not say — almost no script records its own runtime, so
+that column is mostly `unknown` and is not a guess. Columns: **engine** — does
+a run call a model (`yes` = the primary or secondary; `djev`, `qmd`, `embed`,
+`TTS` when only those; `helper` = no CLI). **tools** — does it replay prompts
+through real tool dispatch (`schema-only` = the `tools` array is sent and the
+chosen call is scored, nothing is dispatched). **sandboxed** — for a live-tools
+bench only: does it mint a session id `agent_mcp/_tool_sandbox.py` sandboxes
+(`bench_…`, `pt-eval-…`, or `<date>_<time>_bench_<hex>`). **det.** — `yes`
+(offline, no sampling), `temp 0`, `no`, or `corpus` (deterministic for a given
+live corpus, which drifts).
+
+| script | measures | engine | tools | sandboxed | runtime | det. | artifact |
+|---|---|---|---|---|---|---|---|
+| `action_equivalence.py` | tool-call equivalence tiers between two engine captures | no | no | n/a | unknown | yes | stdout |
+| `aggregator_binding.py` | nothing: resolves where the egress child finds `agent_mcp` | helper | no | n/a | n/a | yes | none |
+| `answer_bearing_rows.py` | answer-bearing sentences as djev's ranked row | djev, qmd | no | n/a | unknown | no | `--out`, undated |
+| `artifact_named_in_final_message.py` | whether note-writing sessions name the note at the end | no | no | n/a | unknown | corpus | stdout |
+| `autoresearch_judge_compare.py` | scalar vs binary rubric judge noise | yes | no | n/a | unknown | no | tree, fixed tracked name |
+| `bench_lint.py` | bench task validity | no | no | n/a | unknown | yes | stdout |
+| `calibrate_dup_threshold.py` | near-duplicate threshold agreement | djev on rebuild | no | n/a | unknown | `--check` yes | tree, undated |
+| `canary_rows_guard.py` | nothing: who may append to the tracked canary corpus | helper | no | n/a | n/a | yes | none |
+| `check_doc_matches_json.py` | whether a context-rot doc's figures equal its JSON | no | no | n/a | unknown | yes | stdout |
+| `ci_backtest.py` | past retrieval verdicts re-decided against 95 % intervals | no | no | n/a | unknown | yes | optional `--out` |
+| `compare_tool_choice.py` | two tool-choice runs against the per-metric noise floor | no | no | n/a | unknown | yes | stdout |
+| `contextual_full_corpus.py` | LLM situating context on the full recall corpus | yes, qmd | no | n/a | unknown | unknown | data root, undated |
+| `contextual_titles.py` | the same on the #1493 sub-corpus | yes, qmd | no | n/a | unknown | temp 0 | data root, undated |
+| `counterfactual.py` | whether one flipped constraint moves retrieved entities | qmd | no | n/a | unknown | unknown | unknown |
+| `cross_engine_disagreement.py` | whether primary/djev disagreement localises verdict error | yes, djev | no | n/a | unknown | temp 0 | `--out` dir |
+| `decision_replay_588.py` | whether triage re-proposes retired decisions | yes | yes | yes (`bench_588_…`) | unknown | no | tree, appended, undated |
+| `diagnosis_fanout_replay.py` | K=3 theory fan-out vs linear diagnosis | yes | yes | yes (`bench_2258_…`) | unknown | no | data root, timestamped |
+| `djev_name_prior_probe.py` | whether djev follows an option's name or its definition | djev | no | n/a | unknown | no | data root, dated |
+| `dup_detect.py` | near-duplicate predicate and vault census | no | no | n/a | unknown | yes | stdout |
+| `egress_arms.py` | canary under enforce-off vs a private enforce-on aggregator | yes | yes | yes (via canary) | "hours" | no | canary rows file |
+| `embed_side_index.py` | embedding-model A/B on a side index | embed, qmd | no | n/a | "hours" | unknown | data root, undated |
+| `engine_output_probe.py` | primary output-integrity drift | yes | no | n/a | unknown | temp 0 | data root |
+| `episodic_arm.py` | raw-transcript retrieval arm | qmd | no | n/a | unknown | unknown | tree, undated |
+| `extraction_disagreement.py` | fact-extraction error from two independent passes | yes | no | n/a | unknown | no | `--out`, timestamped |
+| `fact_write_gate_snapshot.py` | nothing: builds the fact-tree pair for the write gate | unknown | no | n/a | unknown | unknown | `--out` |
+| `gold_blind_menu_probe.py` | gold-blind candidate menus for the label ceiling | embed (optional) | no | n/a | "minutes" | yes | stdout |
+| `instruction_compliance_eval.py` | instruction-density compliance per engine slot | yes | no | n/a | unknown | temp 0 | data root, stamped, top level of `eval/baselines/` |
+| `kv_dtype_arm.py` | output drift under another KV dtype — **restarts the primary** | yes | no | n/a | unknown | no | unknown |
+| `label_agreement_ceiling.py` | retrieval-blind second labelling pass | yes | no | n/a | unknown | temp 0 | data root, stamped |
+| `label_audit.py` | mechanical gold-shape defects in a LloydMemEval set | no | no | n/a | unknown | yes | stdout |
+| `measure_parallel_dispatch.py` | share of traffic parallel dispatch could speed up | no | no | n/a | unknown | corpus | stdout |
+| `measure_session_io_stalls.py` | event-loop stalls from session-file I/O | no | no | n/a | unknown | no | stdout |
+| `memory_eval_build.py` | nothing: builds the frozen LloydMemEval set | yes | no | n/a | unknown | no | data root, then tree |
+| `persistence_arms.py` | canary persistence arms with worker dispatch held | yes | yes | yes (via canary) | unknown | no | canary rows file |
+| `prefetch_conflict_count.py` | conflicting look-alikes in merged prefetch | no | no | n/a | unknown | corpus | stdout |
+| `qmd_contention.py` | cost of the eval pin on production qmd, from logs | no | no | n/a | unknown | yes | optional `--json` |
+| `recall_topics_merge.py` | topics merge on `vault_recall` vs production | djev, qmd | no | n/a | unknown | no | `--out` |
+| `refusal_detour_baseline.py` | retry-at-the-same-effect rate after a refused tool call | no | no | n/a | unknown | corpus | tree, dated (`--out` redirects) |
+| `refusal_detour_labels.py` | nothing: hand labels for the detour dev set | helper | no | n/a | n/a | yes | none |
+| `retrieval_holdout.py` | nothing: holdout manifest and reserve rule | no | no | n/a | unknown | yes | unknown |
+| `run_compaction_recall_eval.py` | planted-fact recall under compaction policies | yes | no (local stub) | n/a | unknown | no | `--out`, undated |
+| `run_context_rot_eval.py` | needle recall vs prompt length | yes | no | n/a | unknown | temp 0 | tree, dated |
+| `run_egress_arms.sh` | wrapper for `egress_arms.py` | yes | yes | yes (via canary) | unknown | no | as above |
+| `run_episodic_recall_eval.py` | whether transcripts earn recall slots | qmd, djev | no | n/a | unknown | no | `--out` |
+| `run_eval.py` | vault retrieval (entity, doc hit, MRR) — **the nightly** | qmd, djev | no | n/a | unknown | no | data root, stamped |
+| `run_fact_write_gate_eval.py` | fact writes replayed through the ADD/UPDATE/NOOP gate | djev | no | n/a | unknown | no | `--out` |
+| `run_find_all_arms.py` | "find all" vs "find one" phrasing on audit tasks | yes | yes | yes (`…_bench_<hex>`) | unknown | no | `--out` dir |
+| `run_framing_acceptance_eval.py` | whether replies adopt a wrong user framing | yes, djev | yes | yes (`run_bench_sdk`) | unknown | no | tree, undated |
+| `run_harness_replay_diff.py` | behaviour diff of two trees' `run_query` on replayed sessions | no (scripted) | no (scripted pool) | n/a | unknown | yes | `--out` |
+| `run_injection_canary.py` | whether a planted instruction drives a sink call | yes | yes | yes (`new_background_session_id("bench")` + sandbox pre-flight) | median 23.8 s per episode (286 tracked rows) | no | tree, appended; guarded |
+| `run_kv_dtype_arm.sh` | wrapper for `kv_dtype_arm.py` | yes | no | n/a | unknown | no | as above |
+| `run_memory_eval.py` | LloydMemEval: remembers and acts on told facts | yes (djev judge optional) | no | n/a | 31 min for 1,275 prompts (2026-09-25) | no (temp 0.6, seeded) | data root, undated |
+| `run_memory_index_ab.py` | A/B of MEMORY.md as a typed index | yes | yes | yes (`run_bench_sdk`) | unknown | no | tree, undated |
+| `run_memory_trim_ab.py` | A/B of one restored USER.md line | yes | yes | yes (`run_bench_sdk`) | unknown | no | tree, undated |
+| `run_midturn_recall_probe.py` | whether mid-turn recall would have anticipated fetches | qmd | no | n/a | unknown | unknown | `--out` |
+| `run_observation_compression_eval.py` | tool-observation compressor by decision preserved | yes | schema-only (unverified) | n/a | unknown | temp 0 | `--out` |
+| `run_persistence_arms.sh` | wrapper for `persistence_arms.py` | yes | yes | yes (via canary) | unknown | no | as above |
+| `run_prefetch_cost_eval.py` | downstream cost the prefetched `<context>` removes | yes | yes | yes (`pt-eval-562-…`) | unknown | no | tree, stamped |
+| `run_prefetch_eval.py` | prefetch vault leg doc hit, MRR, latency | qmd | no | n/a | "~5 s" lex-only | unknown | data root, stamped |
+| `run_prefetch_followup_eval.py` | facts and skills legs on a short follow-up | no | no | n/a | unknown | unknown | stdout |
+| `run_prefetch_route_eval.py` | whether one djev read can gate `<context>` | djev | no | n/a | unknown | no | `--out` |
+| `run_preserve_thinking_eval.py` | A/B of `preserve_thinking_iterations` | yes | yes | yes (`pt-eval-<keep>-<epoch>`) | unknown | no | optional `--out` |
+| `run_reasoningbank_eval.py` | whether banked lessons would have named a refusal's cause | yes | no | n/a | unknown | temp 0 | data root, undated |
+| `run_rpc_eval.py` | whether `lloyd_rpc` cuts prompt tokens | yes | yes | **NO** (`…_rpceval_…`; needs `--live-bash`, hook denies all but Bash + read-only) | unknown | no | `--out` dir |
+| `run_scratchpad_ab.py` | prefill cost of the Scratchpad tool | yes | yes | **NO** (worker id on purpose; annotation deny-list) | unknown | no | tree, dated |
+| `run_skill_activation_eval.py` | per-skill trigger recall and false-trigger rate | no | no | n/a | unknown | yes | stdout, optional `--json` |
+| `run_skill_dispatch_probe.py` | dispatch-time skill rule trigger rate | no | no | n/a | unknown | corpus | stdout, optional `--json` |
+| `run_skill_match_eval.py` | prefetch skill matcher recall@5 | no (djev/embed in optional arms) | no | n/a | unknown | yes (default arm) | stdout, optional `--json` |
+| `run_stale_fact_eval.py` | whether the model acts on a superseded value | yes | no (shadow store) | n/a | 1,414 s for five arms × 3 samples (2026-09-24) | no | tree, dated (`--out` redirects) |
+| `run_tool_choice_eval.py` | first tool chosen on web-shaped prompts | yes | schema-only | n/a — no session id at all | unknown | no | data root, stamped |
+| `run_transcript_self_hit_audit.py` | how often a prompt retrieves its own transcript | qmd; `probe`: yes | `probe`: schema-only | n/a | unknown | unknown | optional `--out` |
+| `run_tts_fidelity_eval.py` | whether the cloned voice says the words sent | TTS + ASR | no | n/a | unknown | no | data root, dated, top level of `eval/baselines/` |
+| `run_user_md_curation_dryrun.py` | rationale-per-line curation on copies of USER.md | yes | no | n/a | unknown | temp 0 | `--out` |
+| `run_vault_search_eval.py` | `vault_search` document quality per pipeline | qmd, djev | no | n/a | unknown | no | data root, stamped |
+| `secondary_routing_eval.py` | primary vs secondary on the secondary's jobs | yes (both) | no | n/a | unknown | unknown | tree, undated |
+| `self_question.py` | retrieval against LLM-drafted recall questions | yes, qmd, djev | no | n/a | unknown | temp 0 | `--out` |
+| `speaker_embed_eval.py` | speaker-embedding model bake-off | local models | no | n/a | unknown | unknown | `--work` dir |
+| `stats.py` | nothing: Wilson and bootstrap interval arithmetic | helper | no | n/a | n/a | yes | none |
+| `step_replay_fidelity.py` | whether disk bytes rebuild a recorded step's prompt | no | no | n/a | unknown | corpus | stdout |
+| `summary_length_attribution_probe.py` | summary length vs marker survival in canary rows | no | no | n/a | unknown | yes | stdout |
+| `summary_length_repetition_run.py` | summariser length distribution on one fixture | yes | no | n/a | unknown | no | tree, dated |
+| `tool_call_equivalence_probe.py` | tool-call decisions captured per engine arm | yes | schema-only | n/a | unknown | temp 0 | data root, labelled |
+| `tool_choice_none_probe.py` | whether the primary renders `tools` at `tool_choice: none` | yes | schema-only | n/a | unknown | temp 0 | stdout |
+| `tool_failure_baseline.py` | per-tool failure signatures from transcripts | no | no | n/a | unknown | corpus | dated |
+
+What the read turned up that a nightly has to know:
+
+- **Two benches dispatch live tools without a sandboxed id**: `run_rpc_eval.py`
+  and `run_scratchpad_ab.py`. Both are deliberate and each carries its own
+  deny rule, but neither is the tool-layer sandbox, so neither may be put on a
+  schedule (vault-protection.md, layer 1).
+- **`run_tool_choice_eval.py` is safe by a `break`, not by a guard.** It opens
+  the live MCP pool, sends the real `tools` array and closes the generator at
+  the first `tool_call` event; it mints no session id. It is in the nightly
+  set on that reading — if that loop is ever changed to let a call dispatch,
+  it must mint a `_bench_` id first.
+- **`kv_dtype_arm.py` restarts the primary engine.** Attended only.
+- **`run_injection_canary.py run` appends to a tracked file** unless
+  `LLOYD_CANARY_ROWS` redirects it; `eval/canary_rows_guard.py` refuses a
+  caller that is not one of the two window units and did not set it.
+- **Almost nothing records its own runtime.** Three numbers exist, all quoted
+  in the table.
+
+### The seven that run nightly, and the ones that do not
+
+`eval/fitness/manifest.yaml` is the list. A bench is in it only if it cannot
+change the machine (sandboxed id, or no live tools), yields one 0..1 share with
+an n, and finishes inside a declared timeout. The engine-minute figures are
+**estimates** — pro-rated from the three recorded runtimes or guessed, and
+marked which — until `fitness noise` has timed each bench once.
+
+| bench | covers | script | value (n) | better | engine min (est.) |
+|---|---|---|---|---|---|
+| `tool_choice` | tool choice | `run_tool_choice_eval.py --label fitness` | `summary.overall.correct_rate` (20 queries) | up | 8 (guess: 20 cold ~34k prefills) |
+| `injection_canary` | injection canary | `run_injection_canary.py run`, then `grade` | `attack_success_rate` (attack scenarios) | down | 12 (20 × 23.8 s median, plus persistence passes) |
+| `stale_fact` | memory | `run_stale_fact_eval.py --arms facts_appended --samples 3` | `stale_action.rate` | down | 5 (pro rata from 1,414 s / 15 arm-samples) |
+| `memory_history` | memory | `run_memory_eval.py run --arms history --judge rules` | `dev.history.all.correct_strict` (dev set) | up | 10 (pro rata from 31 min / 1,275 prompts) |
+| `refusal_detour` | refusal detour | `refusal_detour_baseline.py --since <30 d ago> --no-devset` | `all.same_effect_rate` (`all.measurable`) | down | 0 (offline) |
+| `skill_match` | skill match | `run_skill_match_eval.py` (lexical arm) | `arms.lexical.recall@5` (labelled turns) | up | 0 (offline) |
+| `skill_activation` | skill match | `run_skill_activation_eval.py` | `corpus.recall` (positives) | up | 0 (offline) |
+
+35 estimated engine minutes against a budget of 60; the loader refuses a
+manifest whose `engine_minutes` add up to more than `budget_engine_minutes`.
+The manifest lists the three offline benches first: the nightly run stops
+*starting* benches when its budget runs short, so whatever is last is what a
+slow night drops.
+
+Named in the plan and **not** in the manifest, with the reason:
+
+- **Retrieval** — already nightly (`autonomy/82`, the `retrieval_nightly` arm of
+  the instrument index). Running it twice a night would buy nothing.
+- **Compaction** (`run_compaction_recall_eval.py`) — 60 rows by default on
+  90k–130k-token histories with no recorded runtime, needs a tools snapshot,
+  and refuses to start unless `LLOYD_DATA` is exported to a scratch root, which
+  a scheduled child of the backend must never do.
+- **Context rot** (`run_context_rot_eval.py`) — 450 cold plus 450 warm requests
+  at 50k–240k tokens, pauses the pool itself, and publishes a grid, not one
+  rate. A windowed run by its own docstring.
+- **Voice first-token latency** — nothing in `eval/` measures it.
+  `scripts/maintenance/voice_turn_trend.py` reads the spoken-turn store, but it
+  publishes percentiles in seconds, the store holds 53 rows in total
+  (2026-11-22), and turning a latency into a share needs a budget the script
+  deliberately declines to invent (`EOS_TO_AUDIO_P90_BOUND_S = None`).
+- **Instruction compliance** — a mean over six requests, not k of n, and it
+  writes into the top level of `eval/baselines/`.
+
+Three of the seven are not readings of one commit:
+`refusal_detour` scores the last 30 days of real sessions, so it moves with
+traffic; `skill_match` and `skill_activation` score the live skill inventory,
+which is in the vault and is rewritten nightly. A move in any of them is a
+move in Lloyd's behaviour but not necessarily in Lloyd's code.
+
+### How a fitness run works
+
+`python -m scripts.automod.fitness run --once [--only NAME] [--repeat N]`
+(`scripts/automod/fitness.py`):
+
+1. **Preconditions.** If any selected bench calls the engine, the pool must be
+   **paused with nothing in flight** (`GET /api/workers/status`) or the run
+   refuses, exit 2. A momentary idle reading is not idle. `--force` overrides
+   and stamps `mode: force` on every row. A run of only offline benches needs
+   neither the pool nor the lock.
+2. **`regression.lock`.** Engine runs hold the regression runner's own lock
+   (`automod_regression.REGRESSION_LOCK`) for the whole pass, so a fitness run
+   and a regression measurement never overlap. Held already: exit 3, nothing
+   run (`--lock-wait SECONDS` queues instead).
+3. **One bench at a time.** Each bench's commands run in order as child
+   processes in their own process group, in a scratch directory the runner made
+   and removes, under the bench's `timeout_s`; a timeout kills that group. The
+   pool is re-read before each engine bench: a pool resumed mid-run means the
+   remaining engine benches are `skipped`, not run against live traffic.
+4. **One row per bench per repeat** appended to `app.paths.FITNESS_SERIES`
+   (`fitness.jsonl` in the data root's eval directory): run id, bench, commit (the tree's `HEAD`)
+   and `backend_commit` (`/health`), value, n, k, Wilson 95 % interval,
+   duration, exit codes, pool state. A bench that timed out, failed, wrote no
+   artifact or wrote nothing at the declared pointer carries its status and
+   `value: null` — never a zero. Only an artifact written *by this run* is
+   read; an older file at the same path is some other run's number.
+5. **One closing `summary` row** with every bench's newest value from the last
+   36 h in the rate-record shape (`{k, n, rate, ci_low, ci_high}`). This is the
+   row the instrument index reads, one `fitness_<bench>` arm per bench
+   (`scripts/eval_instrument_index.py::fitness_instruments`). Those arms are
+   carried in the daily table at weight 0.0 and are never averaged; what they
+   add is that a night with no fitness run prints `missing or stale:
+   fitness_…` in the index headline.
+6. **Attribution, record only.** If a bench *regressed* outside its noise floor
+   (below), one `fitness_move` event is appended to the promotions ledger: the
+   bench, the delta, the two commits, and the `promoted` events between the two
+   measurements. No bisect runs and no rollback is requested.
+
+The nightly caller is the `fitness` worker source
+(`workers/sources/fitness.py`, `workers.sources.fitness.enabled`, **ships
+false**): once a night inside `[window_start_hour, window_end_hour)` local, one
+subprocess off the event loop. It cannot ask for a paused pool — it is one of
+the pool's own in-flight jobs — so it runs `--pool-job`: before each engine
+bench it waits up to 10 minutes for the pool to hold nothing but itself with
+the KV gate released, and records the bench `skipped` if it never does. That is
+a weaker guarantee than a paused pool (another job can still be claimed
+mid-bench), which is why the noise floors are taken by hand with the pool
+paused and why `pool` and `mode` are on every row. Taking a machine pause for
+the hour instead was considered and not built: a machine hold whose holder died
+is reconciled only at the next backend boot (`workers/pool.py`), and an
+unattended nightly that can leave the fleet halted is a worse failure than a
+noisier number.
+
+### Noise floors
+
+`python -m scripts.automod.fitness noise --repeat 5` runs each bench five times
+at one commit and writes, per bench, min, max, mean, stdev and the per-repeat
+durations to `app.paths.FITNESS_NOISE_PATH` (`fitness_noise.json` beside it). The repeats are not appended
+to the series. A bench whose spread (max − min) exceeds its manifest
+`noise_max_spread` is flagged `too-noisy`.
+
+`fitness report`, `fitness.moves(now)` and scorecard row 22 all use one rule
+(`bench_delta`): the 7-day delta is the latest value minus the newest value at
+least 7 days older, and it is **outside noise** only if its magnitude exceeds
+that bench's measured spread **and** the latest row's own Wilson interval does
+not cover the older value. Both, because neither alone is a floor: a bench that
+is deterministic on a fixed set (the two skill benches) measures a spread of
+zero, and one that scores live traffic (`refusal_detour`) measures a spread
+that says nothing about next week's traffic. A bench with no measured floor, a `too-noisy`
+one, or one with no row old enough has `outside_noise: null` and a sentence
+saying which — it is neither a move nor a clean reading. Until the floors are
+measured, nothing can be reported as moved, by construction.
+
+`tests/test_automod_fitness.py`; the index arms are pinned in
+`tests/test_eval_instrument_index.py`.
+
 ## See also
 
 [[automod]] for the rungs, the promoter and rollback · [[vault-protection]] for

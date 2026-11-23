@@ -1838,7 +1838,7 @@ CO_PRESENT_AT_2026_10_23 = frozenset({
     "arch-review", "autocode", "automod-regression", "autoresearch",
     "backlog-cluster", "board-steward", "cost-investigate", "deep-research",
     "failure-ledger", "frontend-probe-canary", "owed-check", "scheduled-task",
-    "youtube-digest"})
+    "youtube-digest", "fitness"})  # fitness: 2026-11-22, undeclared, subprocess-only, no model turn
 
 #: How many verb families the recording node commits. The corpus measured at
 #: triage was 720 Bash commands in 111 transcripts across 180 families, so a
@@ -2916,8 +2916,8 @@ async def test_the_reverted_video_turn_is_co_present_by_decision_and_the_report_
                       if s != youtube_digest.NAME], (
         f"the live list of unsplit co-present sources disagrees with the report: "
         f"live={others}")
-    assert len(others) == 12, (
-        f"expected the 12 co-present sources #2932 left unsplit, got {len(others)}: "
+    assert len(others) == 13, (  # 12 until 2026-11-22, when `fitness` registered undeclared
+        f"expected the 13 co-present sources left unsplit, got {len(others)}: "
         f"{others}")
     assert "deep-research" in others, (
         "deep-research holds browser_* beside vault_write/fact_add at triage and must "

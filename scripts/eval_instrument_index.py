@@ -1213,7 +1213,7 @@ def _load_roots(path: str | None) -> dict[str, Path] | None:
     if not isinstance(raw, dict):
         raise RootsFileError(f"{path} must hold a JSON object of component key -> path, "
                              f"not {type(raw).__name__}")
-    known = sorted(i.key for i in INSTRUMENTS)
+    known = sorted(i.key for i in all_instruments())
     unknown = sorted(set(raw) - set(known))
     if unknown:
         raise RootsFileError(f"{path} names component(s) {unknown} that are not in the "
@@ -1249,7 +1249,7 @@ def main(argv: list[str] | None = None) -> int:
     except (RootsFileError, json.JSONDecodeError) as exc:
         print(f"refusing to publish: {exc}", file=sys.stderr)
         return 2
-    row = build_row(now=stamp, out_dir=out, root_overrides=overrides)
+    row = build_row(all_instruments(), now=stamp, out_dir=out, root_overrides=overrides)
     if not args.no_record:
         append_row(row, out)
     if args.show or args.no_record:
@@ -1260,6 +1260,83 @@ def main(argv: list[str] | None = None) -> int:
     # exit code lies. A refused total exits 1 so a caller cannot read an index
     # that measured nothing as a run that succeeded.
     return 0 if row["totals"]["status"] == "ok" else 1
+
+
+# ── the behaviour-fitness arms ────────────────────────────────────────────────
+#
+# Declared at the END of the module and built from `eval/fitness/manifest.yaml`,
+# not typed into `INSTRUMENTS`: that tuple is the eight RULED arms — its weights
+# sum to 1.0 by a recorded ruling (#4169) and its length is cited in
+# architecture/autonomy-jobs.md — and the benches are a list that grows by editing
+# a manifest. `all_instruments()` is what the publisher runs, so one bench is one
+# line of the daily table without a second runner or a second index.
+#
+# Every fitness arm is REPORTED, NEVER AVERAGED (weight 0.0, `averageable=False`),
+# for two reasons that both have precedent in the table above. A bench's value has
+# no measured noise floor until `fitness noise` has run, and a share whose spread
+# is unknown has no business moving a composite; and seven arms entering the
+# equal-weight total at once would redefine that total overnight, which is the
+# move #4169's ruling exists to make deliberate. What the arms earn by being here
+# is what `behaviour_exhibit` earned: a night with no fitness row prints
+# `missing or stale: fitness_<bench>` in the headline instead of being an absent
+# file nobody opens.
+
+FITNESS_KEY_PREFIX = "fitness_"
+
+#: The reader that makes these arms tier 2 when rows arrive on cadence: it compares
+#: a row against a prior row, which is the whole test (`Consumer.compares_rows`).
+FITNESS_CONSUMER = Consumer(
+    "scripts/automod/fitness.py",
+    "`report` and `moves` take each bench's latest row against the newest row at "
+    "least 7 days older and say whether the delta is outside the bench's measured "
+    "noise floor; scorecard row 22 (`scripts/automod/scorecard.py`) prints the same "
+    "delta",
+    compares_rows=True)
+
+
+def _fitness_series() -> Path:
+    """The fitness series, through the constant its writer appends to."""
+    from app import paths as p
+    return p.FITNESS_SERIES
+
+
+def fitness_instruments() -> tuple[Instrument, ...]:
+    """One arm per bench of the fitness manifest, read from the run's closing
+    `summary` row (`benches.<name>` is the `{k, n, rate, ci_low, ci_high}` record
+    `_coerce_value` already reads for `landed_outcomes`).
+
+    A manifest that does not load RAISES: an arm list that silently came back
+    empty would turn seven dead instruments into seven absent ones, which is the
+    failure this file exists to remove.
+    """
+    from scripts.automod import fitness as fit
+    return tuple(
+        Instrument(
+            key=f"{FITNESS_KEY_PREFIX}{b.name}",
+            title=f"Behaviour fitness: {b.covers or b.name} ({b.name})",
+            artifact=_fitness_series,
+            pattern=None,
+            value_path=f"benches.{b.name}",
+            unit="rate",
+            polarity="up" if b.higher_is_better else "down",
+            weight=0.0,
+            weight_why="reported, never averaged: no measured noise floor stands "
+                       "behind this share until `fitness noise` has run, and the "
+                       "ruled weights (#4169) are not redistributed by a manifest "
+                       "edit",
+            cadence_days=b.cadence_days,
+            hand_run_by_ruling=False,
+            scheduled_by="workers/sources/fitness.py",
+            averageable=False,
+            consumer=FITNESS_CONSUMER,
+            date_key="recorded_at",
+        )
+        for b in fit.load_manifest())
+
+
+def all_instruments() -> tuple[Instrument, ...]:
+    """What the publisher runs: the ruled table, then the fitness arms."""
+    return INSTRUMENTS + fitness_instruments()
 
 
 if __name__ == "__main__":
