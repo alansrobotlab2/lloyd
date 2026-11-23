@@ -946,9 +946,29 @@ most active is the worst possible reading of "bounded".
   primitive that reads bytes it did not ask for must refuse for the same reason
   the lanes do (#1020).
 
-## Splitting `scripts/automod/backlog.py`: an assessment, not a plan in motion (2026-11-22)
+## Splitting `scripts/automod/backlog.py`: assessed 2026-11-22, first cut 2026-11-23
 
-Nothing was moved. The module is 10,695 lines: 264 top-level functions (84 of
+**Done so far:** red-tree items moved to `scripts/automod/red_tree.py` (11 names,
+343 lines; the module went from 10,805 lines to 10,488). The mechanics, as a
+pattern for each later cut:
+
+- the moved bodies read every backlog name through the module at call time —
+  an AST pass rewrote each free reference to `B.<name>` and touched nothing
+  else, so a `monkeypatch.setattr(backlog, ...)` still reaches them;
+- `backlog` re-exports the moved names through a PEP 562 `__getattr__` keyed
+  on `RED_TREE_NAMES`, not an eager import, because the new module imports
+  `backlog` at its top and an eager import back would hand a first importer of
+  `red_tree` a half-built module;
+- the constants (`RED_TREE_TAG`, `RED_TREE_COOLDOWN_S`, ...) and `new_item` —
+  which sits in that section but is a general constructor used by eight test
+  files — stayed in `backlog`.
+
+Verified with the backlog/gate/automod/doc-claim selection (6,956 passed; the
+seven failures are red on the unmodified tree in a clone, four of them only
+because the clone lacked `refs/automod/*`, which `git fetch ~/lloyd
+'refs/automod/*:refs/automod/*'` into the sandbox fixes).
+
+What follows is the assessment as written before the first cut. The module was 10,695 lines: 264 top-level functions (84 of
 them private), 2 classes, 160 module-level assignments. Who holds on to it:
 
 - **Importers:** 31 non-test modules and 81 test files.
