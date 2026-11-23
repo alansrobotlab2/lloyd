@@ -298,11 +298,11 @@ def test_the_report_surface_prints_the_envelopes_on_demand():
     assert out.returncode == 0, out.stderr[-2000:]
     assert "worker sources with a capability envelope" in out.stdout
     assert "`youtube-digest`" in out.stdout
-    # One row per registered source, so this moves with the registry: 16 since
+    # One row per registered source, so this moves with the registry: 17 since `fitness` on 2026-11-22, 16 since
     # `cost-investigate` (#2510) registered on 2026-10-10. It is the report's own
     # count, not a constant this file invented — the node above pins the row set
     # against the roster's import list read from the AST.
-    assert "worker sources with a capability envelope: 16" in out.stdout
+    assert "worker sources with a capability envelope: 17" in out.stdout
     assert "| 24 durable-external reach" not in out.stdout
     # Every un-narrowed source is named in the findings block, once. Which
     # sources are owed is this node's question; how many is the node below's.
@@ -400,7 +400,7 @@ def test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more():
         "bench-mine still declares no capability set, which is the precondition of "
         "the 2026-10-13 live-tree write: with no ceiling `envelope_for` answers None, "
         "the turn ships the floor-only surface, and Write and Bash are in it")
-    assert len(undeclared) == 10, undeclared
+    assert len(undeclared) == 11, undeclared
     assert "autotriage" in SOURCE_CAPABILITIES
     matrix = G.capability_matrix(ROOT)
     assert matrix["autotriage"]["declared"] is True, matrix["autotriage"]
@@ -413,21 +413,21 @@ def test_declaring_a_source_moves_the_undeclared_row_count_and_named_no_more():
     assert matrix["bench-mine"]["n_allowed"] == 5, matrix["bench-mine"]
     assert matrix["bench-mine"]["durable_reach"] == [], matrix["bench-mine"]
     # The registry itself did not move, so the ten missing rows are declarations and
-    # not a deletion: 16 registered sources, 6 of them declared.
-    assert len(matrix) == 16, sorted(matrix)
+    # not a deletion: 17 registered sources, 6 of them declared.
+    assert len(matrix) == 17, sorted(matrix)
     assert sum(1 for c in matrix.values() if c["declared"]) == 6
 
     out = subprocess.run([sys.executable, str(SCRIPT), "--capabilities"],
                          cwd=str(ROOT), capture_output=True, text=True, timeout=180)
     assert out.returncode == 0, out.stderr[-2000:]
-    assert out.stdout.count("worker-source-declares-no-capability-set") == 10, \
+    assert out.stdout.count("worker-source-declares-no-capability-set") == 11, \
         out.stdout[-3000:]
     # The other half of the clause, read off the printed rows themselves: of the
     # ten findings lines, none names a source either round declared. A count
     # alone cannot tell which sources left the set.
     finding_lines = [ln for ln in out.stdout.splitlines()
                      if "worker-source-declares-no-capability-set" in ln]
-    assert len(finding_lines) == 10, finding_lines
+    assert len(finding_lines) == 11, finding_lines
     assert not [ln for ln in finding_lines
                 if "autotriage" in ln or "bench-mine" in ln], finding_lines
-    assert "worker sources with a capability envelope: 16" in out.stdout
+    assert "worker sources with a capability envelope: 17" in out.stdout
