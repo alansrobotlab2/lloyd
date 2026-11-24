@@ -1326,11 +1326,11 @@ def write_targets(command: str, cwd: str | None = None,
 def check_bash_write_denied(command: str, cwd: str | None = None) -> str | None:
     """Why `command` would write into the write deny-set, or None.
 
-    The Bash half of `write_deny_reason`, for the lane that reaches a shell
-    instead of a path argument: it names the shape and the resolved target and
-    then refuses on exactly the predicate the file lane refuses on, grant
-    contextvar included. A reader of a deny-set path is not a target of this
-    check at all — see the block comment above.
+    The Bash half of `write_deny_reason`, the one predicate the Bash lane and
+    the file lane both refuse on: it names the shape and the resolved target,
+    then asks that one function, which takes the target alone and answers from
+    set membership — nothing lifts it, nothing else is consulted (#3563). A
+    reader of a deny-set path is not a target — see the block comment above.
     """
     if not command or not isinstance(command, str):
         return None
