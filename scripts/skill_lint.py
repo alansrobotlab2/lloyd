@@ -89,7 +89,7 @@ from agent_mcp.skills import iter_active_skills, skill_roots  # noqa: E402
 from app.prompt_builder import (  # noqa: E402
     _skills_index_lines, _skills_index_settings, clip_skill_description,
     skill_index_description)
-from app.data_root import vault_root
+from app.data_root import (DataRootMissing, resolve_data_root_for_tree, vault_root)
 
 #: Category name of the P5 bucket, used as the table row and the payload key.
 DESCRIPTION_CATEGORY = "DESCRIPTION"
@@ -1370,7 +1370,8 @@ def char_cap_census(rows: Sequence[dict], *, corpus: str = CHAR_CAP_CORPUS) -> d
     }
 
 
-def live_char_cap_census(skill_records: Optional[Sequence] = None) -> dict:
+def live_char_cap_census(skill_records: Optional[Sequence] = None,
+                         vault: Optional[Path] = None) -> dict:
     """Count the frozen population NOW, over the corpus `iter_active_skills` owns.
 
     The automod gate calls this at refusal time rather than parsing
@@ -1384,6 +1385,12 @@ def live_char_cap_census(skill_records: Optional[Sequence] = None) -> dict:
     Never raises on a bad file: a skill it cannot read is a skill not counted, and a
     census that can throw would put an observability note in the way of a refusal
     `skill_contract_findings` has already justified.
+
+    `vault` names the repo to read attribution from; by default the census asks git which
+    repo owns each skill file, which is how the live call lands on `~/obsidian`. It is a
+    parameter rather than a constant for the same reason `skill_records` is: a test that
+    points the census at a temp root must not read the real vault's history and report it
+    as what the fixture did.
     """
     records = (list(iter_active_skills()) if skill_records is None
                else list(skill_records))
@@ -1396,7 +1403,13 @@ def live_char_cap_census(skill_records: Optional[Sequence] = None) -> dict:
             continue
         rows.append(skill_size(record.directory.name, skill_file, content,
                                parse_frontmatter(content)[1]))
-    return char_cap_census(rows)
+    census = char_cap_census(rows)
+    where = {r["name"]: Path(r["path"]) for r in rows}
+    for row in census["skills"]:
+        row.update(char_cap_attribution(
+            where.get(row["name"], Path("/nonexistent")), vault))
+    record_char_cap_crossings(census["skills"])
+    return census
 
 
 def size_summary(rows: list[dict]) -> dict:
@@ -2819,6 +2832,248 @@ def main() -> int:
           f"machine_written={(result.get('authorship') or {}).get('machine_written', 0)}, "
           f"unrecorded_author={len((result.get('authorship') or {}).get('unrecorded', []))}")
     return 0
+
+
+# ── #4336: who moved a body past the cap, and a durable record of the crossing ──────
+#
+# This block is at the TAIL of the module and `live_char_cap_census` forward-references it
+# for the reason #4332 wrote into `app/harness/protected_paths.py`: this file is cited by
+# line number from places a code round cannot edit — `architecture/skills.md:35` and
+# `:529` and `architecture/autonomy-jobs.md:793` cite `skill_lint.py:372` and `:392`, and
+# `tests/test_autonomy_jobs_doc_claims.py:6668` grades that one — so new code is appended
+# and never inserted above a cited line.
+#
+# What it is for: the census could say THAT 30 of 208 bodies sit past
+# `SKILL_BODY_CHAR_CAP` and how big each is; it could not say who put it there.
+# `nightly-reflection-signals` went 156,329 -> 167,502 body chars in 48 hours across vault
+# commits 78357539e..f775c602b, authored `lloyd-nightly-reflection-config` and
+# `lloyd-nightly-reflection-knowledge-write`, and 0 of the promotions ledger's 85,295 rows
+# recorded it: the growth arm at `scripts/automod/vault_round.py:2985` binds only
+# `vault_land`, and the other commit door, `scripts/util/vault-commit.sh`, never reads the
+# cap at all. So the spill question was argued instead of measured. Attribution comes from
+# the vault's own history, and a crossing is appended to a FILE, because stdout dies with
+# the run and `~/obsidian/autonomy/skill-lint-report.md` was three days stale on
+# 2026-11-16 — the same reason `live_char_cap_census` refuses to quote that report.
+#
+# Two claims this block deliberately does NOT make. An AUTHOR does not name the route:
+# `land()` commits with the ambient identity (`vault_round.py:2474`), so a `vault_land` is
+# authored `alansrobotlab` like 3,040 other vault commits, which is why the row carries the
+# commit SUBJECT as well and a reader classifies from both. And this writes no ceiling:
+# `SKILL_BODY_CHAR_CAP` and `SKILL_CONTRACT_ENFORCE` are untouched, the growth arm is
+# untouched, and the 30 bodies frozen on 2026-11-16 stay a backlog that #4191 ruled each
+# spill settles as its own item.
+
+#: Row keys `live_char_cap_census` adds to an over-cap skill, beside #4191's
+#: `name`/`body_chars`/`siblings`. None-valued when the skill is not inside a git repo, or
+#: the repo cannot be read: an unknown author is reported as unknown, never blamed.
+ATTRIBUTION_KEYS = ("last_commit_sha", "last_commit_author", "last_commit_subject",
+                    "body_char_delta", "prev_body_chars", "crossed")
+
+#: Where a crossing is recorded, under `$LLOYD_DATA` — not into
+#: `~/obsidian/autonomy/skill-lint-report.md`, which regenerates nightly and was three
+#: days old on 2026-11-16, and not into `promotions.jsonl`, which is the land route's own
+#: ledger and would then be read as the record of routes it does not cover.
+CHAR_CAP_CROSSINGS_REL = ("skill-lint", "char-cap-crossings.jsonl")
+
+#: The new store's own horizon, applied on append. The retention sweep's rule is that a
+#: store missing from its table is a store nothing bounds, and this store is not in that
+#: table: self-bounding here is what keeps #4336 a single-surface code change instead of a
+#: vault skill edit too. Age is measured against the ROW's own ISO stamp, never the file's
+#: mtime — a file appended to every day is forever young by mtime and would never trim.
+CROSSING_MAX_AGE_DAYS = 90
+CROSSING_MAX_ROWS = 500
+
+
+def _git_vault(vault: Path, *args: str) -> str:
+    """`git -C vault ...` on stdout, "" on any failure. A skill outside any repo, a repo
+    with no commits, and a path git has never seen are one answer here: unknown. Attribution
+    is observability, and observability that can throw is a refusal in the way.
+    """
+    try:
+        return subprocess.run(["git", "-C", str(vault), *args], capture_output=True,
+                              text=True, timeout=10).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _repo_owner(skill_file: Path, vault: Optional[Path]) -> tuple[Path, str] | None:
+    """The repo owning `skill_file`, and that file's path relative to it; None if neither.
+
+    `--show-toplevel` rather than a configured vault path, so the census attributes a
+    skill wherever the corpus owner puts it, and the relative path it returns is the one
+    to ask git about — `skills/<name>/SKILL.md` in the real vault, which is what makes the
+    answer this skill's own history rather than the repo's last commit.
+    """
+    root = vault
+    if root is None:
+        out = _git_vault(skill_file.parent, "rev-parse", "--show-toplevel").strip()
+        root = Path(out) if out else None
+    if root is None:
+        return None
+    try:
+        return root, skill_file.resolve().relative_to(root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+
+
+def _body_history(vault: Path, rel: str) -> list[dict]:
+    """The last TWO commits touching `rel`, newest first, each with its body's char count.
+
+    `_git_show` (#2158) is the module's one git body reader and `spill_delta` already
+    consumes it — but over five frozen `SPILL_SAMPLE` names against one frozen baseline of
+    2026-09-24T13:30:00, which answers "how far has the baseline drifted" and not "what did
+    the last writer do". `nightly-reflection-signals` is not in that sample, so the
+    library's largest body had no delta anywhere. This reuses `_git_show` over the last two
+    commits of the file being censused; a one-commit file yields one entry, and that is not
+    a transition.
+    """
+    hist = []
+    for line in _git_vault(vault, "log", "-2", "--format=%H%x09%an%x09%s",
+                           "--", rel).splitlines():
+        parts = line.split("\t", 2)
+        if len(parts) != 3:
+            continue
+        sha, author, subject = parts
+        text = _git_show(vault, sha, rel)
+        if text is None:
+            continue
+        hist.append({"sha": sha, "author": author, "subject": subject,
+                     "body_chars": len(parse_frontmatter(text)[1].strip("\n"))})
+    return hist
+
+
+def char_cap_attribution(skill_file: Path, vault: Optional[Path] = None) -> dict:
+    """Who last changed this skill's own `SKILL.md`, and by how much.
+
+    `body_char_delta` is the body chars at the LAST commit touching that path less the body
+    chars at the commit before it — the named commit's own move — both counted with
+    `skill_size`'s ruler (front matter out, edge newlines off), not the file's byte length,
+    because front matter moves independently of a body. `crossed` is the event worth
+    recording between those two commits: at or under the cap at the earlier one, past it at
+    the later one. A skill past the cap at both commits is one of the 30 frozen on
+    2026-11-16, and logging those every run would bury the signal in the count that made the
+    record worth opening; a file with one commit has no earlier body to cross from, so its
+    delta is absent rather than counted from zero.
+
+    `skill_file` locates the path in the repo and measures nothing: the census's own
+    working-tree count stays on its row as `body_chars`, and nothing here is computed from
+    it, which is what keeps a dirty tree from charging uncommitted growth to the last
+    committer.
+    """
+    blank = dict.fromkeys(ATTRIBUTION_KEYS, None)
+    blank["crossed"] = False
+    owner = _repo_owner(skill_file, vault)
+    if owner is None:
+        return blank
+    root, rel = owner
+    hist = _body_history(root, rel)
+    if not hist:
+        return blank
+    latest, prev = hist[0], (hist[1] if len(hist) > 1 else None)
+    # `body_chars` on the CENSUS row is the working tree, because that is what the census
+    # counts; the three numbers here are COMMIT facts, read off the two commits named. That
+    # split is deliberate and is the whole safety property: between two commits a nightly
+    # writer can have the tree dirty, and a delta or a crossing computed against the on-disk
+    # body would charge whoever committed last with growth that has not been committed by
+    # anyone yet. The census's on-disk count is therefore reported beside them, never mixed
+    # into them; on a clean tree — the normal nightly state — the two bodies are equal.
+    return {"last_commit_sha": latest["sha"],
+            "last_commit_author": latest["author"],
+            "last_commit_subject": latest["subject"],
+            "body_char_delta": (latest["body_chars"] - prev["body_chars"] if prev else None),
+            "prev_body_chars": prev["body_chars"] if prev else None,
+            "crossed": bool(prev and latest["body_chars"] > SKILL_BODY_CHAR_CAP
+                             and prev["body_chars"] <= SKILL_BODY_CHAR_CAP)}
+
+
+def char_cap_crossings_path() -> Path:
+    """`$LLOYD_DATA/skill-lint/char-cap-crossings.jsonl`, the env var honoured like every
+    other store path on this box so a test can point the writer at a temp directory."""
+    try:
+        data_root = resolve_data_root_for_tree()
+    except DataRootMissing:
+        data_root = Path.home() / "lloyd-data"
+    return data_root.joinpath(*CHAR_CAP_CROSSINGS_REL)
+
+
+def record_char_cap_crossings(skill_rows: Sequence[dict]) -> int:
+    """Append one dated row per crossing; return how many rows were appended.
+
+    One row per (skill, commit), not one per census run: the lint runs nightly AND the gate
+    calls the census at every refusal, so a per-run append would re-write one event dozens
+    of times and the file's length would stop meaning anything. A run with nothing new
+    writes nothing — no empty file, no timestamp churn. On an append the store trims itself
+    to `CROSSING_MAX_AGE_DAYS` and `CROSSING_MAX_ROWS`; a row whose stamp cannot be parsed
+    is KEPT rather than destroyed and still counts against the row bound, because the bound
+    is what stops unbounded growth and a format bug must not eat the history.
+    """
+    fresh = [row for row in skill_rows if row.get("crossed")]
+    # A crossing row is only meaningful with both of its commit facts, and `crossed` is
+    # computed from them, so a row missing either is a bug rather than a case: drop it.
+    fresh = [row for row in fresh
+             if row.get("prev_body_chars") is not None
+             and row.get("body_char_delta") is not None]
+    if not fresh:
+        return 0
+    path = char_cap_crossings_path()
+    kept: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    if path.is_file():
+        try:
+            lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except OSError:
+            lines = []
+        for line in lines:
+            if not line.strip():
+                continue
+            try:
+                prior = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(prior, dict):
+                continue
+            seen.add((str(prior.get("skill")), str(prior.get("sha"))))
+            try:
+                age = (dt.datetime.now(dt.timezone.utc)
+                       - dt.datetime.fromisoformat(str(prior.get("at"))))
+            except (TypeError, ValueError):
+                kept.append(prior)
+                continue
+            if age.days <= CROSSING_MAX_AGE_DAYS and age.total_seconds() >= 0:
+                kept.append(prior)
+    stamped = dt.datetime.now(dt.timezone.utc).isoformat()
+    appended = 0
+    for row in fresh:
+        key = (row["name"], str(row["last_commit_sha"]))
+        if key in seen:
+            continue
+        seen.add(key)
+        # `body_chars` here is the COMMITTED body at the sha the row names — prev plus the
+        # delta, both commit facts — not the census row's on-disk count. A reader holding
+        # one row reconciles it against `git show <sha>`, and a number that only matched the
+        # working tree at the instant of the read is the narration this store exists to
+        # replace. On a clean tree the two are equal; they differ only when the census ran
+        # with the tree dirty, which is when an on-disk number would be the wrong one.
+        kept.append({"at": stamped, "skill": row["name"], "sha": row["last_commit_sha"],
+                     "author": row["last_commit_author"],
+                     "subject": row["last_commit_subject"],
+                     "body_chars": row["prev_body_chars"] + row["body_char_delta"],
+                     "body_char_delta": row["body_char_delta"]})
+        appended += 1
+    if not appended:
+        return 0
+    kept = kept[-CROSSING_MAX_ROWS:]
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.parent / (path.name + ".tmp")
+        tmp.write_text("".join(json.dumps(row, sort_keys=True) + "\n" for row in kept),
+                       encoding="utf-8")
+        tmp.replace(path)
+    except OSError:
+        return 0
+    return appended
+
+
 
 
 if __name__ == "__main__":

@@ -777,3 +777,75 @@ def test_the_census_publishes_without_refusing_anything(vault, tmp_path, monkeyp
     row = _body_finding(vault)
     assert set(row) == {"skill", "gate", "would_refuse", "body_chars", "cap", "reason"}, \
         "no new field, and above all no new gate: " + str(sorted(row))
+
+
+# ── #4336: attributing a crossing must not move the ceiling or the growth arm ────────
+# Appended at the file's tail rather than inserted beside the other census nodes above,
+# for the reason #4332 wrote into `app/harness/protected_paths.py`: a document can cite a
+# line number, and an insertion above one silently re-points the citation. The nodes above
+# stay where their authors put them.
+
+
+def test_attribution_arrived_without_moving_the_cap_the_flag_or_the_growth_arm(
+        vault, tmp_path, monkeypatch):
+    """Clause 5: #4336 reads the census, so it may not have edited what the census counts.
+
+    Three things had to survive the attribution work, the first two pinned against the
+    shipped source rather than a constant restated in a test — a restated constant is a
+    second place to be wrong:
+
+      - `SKILL_BODY_CHAR_CAP` is still 12,000 and `SKILL_CONTRACT_ENFORCE` is still True, so
+        the ceiling was neither raised nor switched off to make a crossing quiet;
+      - the growth arm's condition is still the shipped text — the one door that refuses a
+        body CREATED over the cap or GROWN past it, and which #4336 does not own;
+      - both arms still refuse under the same `gate`, with the same six row fields, and
+        still carry #4191's census sentence verbatim. The attribution fields live BESIDE
+        that note, on the census rows; nothing about the refusal's wording moved.
+
+    A census that now writes a store must not start writing on a refusal's behalf either:
+    the corpus here has no crossing, so `LLOYD_DATA` stays empty.
+    """
+    src = (Path(V.__file__).parent / "vault_round.py").read_text(encoding="utf-8")
+    assert "SKILL_BODY_CHAR_CAP = 12_000" in src, \
+        "the cap moved: #4336 was asked to attribute crossings, not to raise the ceiling"
+    assert "SKILL_CONTRACT_ENFORCE = True" in src, \
+        "the contract was disabled, which would make every crossing quiet instead of named"
+    assert ("if new_body > SKILL_BODY_CHAR_CAP and (old_desc is None"
+            " or new_body > old_body):") in src, \
+        "the growth arm's condition changed, and this round does not own it"
+    assert V.SKILL_BODY_CHAR_CAP == 12_000 and V.SKILL_CONTRACT_ENFORCE is True
+
+    _corpus(tmp_path, monkeypatch, over=3, under=1, tag="a")
+    store = tmp_path / "data"
+    monkeypatch.setenv("LLOYD_DATA", str(store))
+    # #4191's sentence verbatim, as `_char_cap_note` composes it for a 3-over-of-4 corpus.
+    note = ". 3 of 4 live skills are already frozen against that ceiling"
+
+    # Arm one: a body CREATED past the cap, the `old_desc is None` half.
+    created = _body_finding(vault)
+    assert (created["gate"], created["skill"], created["would_refuse"]) == (
+        "skill body size", "frozen-target", True), created
+    assert set(created) == {"skill", "gate", "would_refuse", "body_chars", "cap",
+                            "reason"}, sorted(created)
+    assert created["cap"] == 12_000, created
+    assert "and this landing creates it" in created["reason"], created["reason"]
+    assert note in created["reason"], created["reason"]
+
+    # Arm two: a body GROWN past the cap — the half a nightly writer crosses. Same `gate`,
+    # same fields, same census sentence; only the creates/grows word differs.
+    rel = _write(vault, "grown", "Use when grown.", "# body\n" + ("y" * 200 + "\n") * 5)
+    git(vault, "add", ".")
+    git(vault, "commit", "-q", "-m", "add the skill with its body inside the cap")
+    grown_rel = _write(vault, "grown", "Use when grown.", "# body\n" + ("y" * 200 + "\n") * 70)
+    assert grown_rel == rel, "the grown skill must be the one this landing touches"
+    rows = [r for r in V.skill_contract_findings([grown_rel])
+            if r["gate"] == "skill body size"]
+    assert len(rows) == 1, f"a body grown past the cap must refuse exactly once: {rows}"
+    grown = rows[0]
+    assert (grown["skill"], grown["would_refuse"], set(grown)) == (
+        "grown", True, set(created)), grown
+    assert "and this landing grows it" in grown["reason"], grown["reason"]
+    assert note in grown["reason"], grown["reason"]
+
+    assert not any(q.is_file() for q in store.rglob("*")), \
+        "a census run with no crossing wrote the store from inside a refusal"

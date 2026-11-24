@@ -915,6 +915,13 @@ def test_the_census_counts_the_records_it_is_handed(tmp_path):
     census = sl.live_char_cap_census(list(iter_active_skills(roots=[root])))
     assert (census["cap"], census["count"], census["over"]) == (12_000, 3, 2)
     assert [s["name"] for s in census["skills"]] == ["two", "one"]
+    # #4336 widened this key set: an over-cap row now carries the commit and author that
+    # put the body over the cap, plus the delta that shows how fast. Pinned as a set
+    # equality because the shape is the API — `_char_cap_note` reads it at refusal time and
+    # a key renamed or dropped there is invisible until someone asks who grew the file.
+    # `CENSUS_ROW_KEYS` and its reading are defined in the #4336 section at the tail of
+    # this file, which is also where the fixture-backed proof of these fields lives.
+    assert set(census["skills"][0]) == CENSUS_ROW_KEYS, sorted(census["skills"][0])
     assert sl.live_char_cap_census([]) == {"cap": 12_000, "corpus": "live", "count": 0,
                                           "over": 0, "skills": []}
 
@@ -973,3 +980,456 @@ def test_system_health_check_is_frozen_with_siblings_already_on_disk():
     assert row["siblings"] == ["check-components.md", "implementation.md",
                                "output-format.md", "usage-examples.md"], \
         f"the spill shape this node names has changed: {row['siblings']}"
+
+
+# ── #4336: a crossing names the commit and the author that caused it ────────────────
+#
+# The census could say THAT 30 of 208 bodies sit past 12,000 chars and how big each is;
+# it could not say who put it there. `nightly-reflection-signals` grew 156,329 ->
+# 167,502 body chars in 48 hours across vault commits 78357539e..f775c602b, authored
+# `lloyd-nightly-reflection-config` and `lloyd-nightly-reflection-knowledge-write`, and
+# zero of the promotions ledger's 85,295 rows recorded it — the growth arm at
+# `scripts/automod/vault_round.py:2985` binds only `vault_land`, and the other commit
+# door, `scripts/util/vault-commit.sh`, never reads the cap at all. So the spill
+# question was argued instead of measured, and the census — which runs nightly and at
+# every refusal — had no writer, no author and no delta.
+#
+# These nodes pin the two things that close that: attribution on the row, and a durable
+# dated row on a crossing. Both are read over a throwaway git repo, because the only
+# history that identifies an author is the vault's own, and a fixture with two commits by
+# two authors is the smallest thing that can prove a sha is not a guess.
+
+#: The row keys an over-cap census row must carry after #4336. `name`, `body_chars` and
+#: `siblings` are #4191's; the last four are #4336's, and `crossed` is what the durable
+#: store keys on.
+CENSUS_ROW_KEYS = {"name", "body_chars", "siblings", "last_commit_sha",
+                   "last_commit_author", "last_commit_subject", "body_char_delta",
+                   "prev_body_chars", "crossed"}
+
+#: The keys of one durable crossing row. #4336 clause 4 names seven of them; the ISO
+#: stamp is `at`, and the delta is spelled as it is on the census row so a reader
+#: reconciling the two files is not reconciling two names for one number.
+CROSSING_ROW_KEYS = {"at", "skill", "sha", "author", "subject", "body_chars",
+                     "body_char_delta"}
+
+# Imported here rather than beside the other imports at the top of the file because this
+# whole section is appended: a line inserted above anything a rail may pin is precisely
+# the fragility #4332 and #4336 exist to remove.
+import datetime as dt  # noqa: E402
+
+
+def _body_chars(text: str) -> int:
+    """Body chars the way `skill_size` counts them: front matter out, edge newlines off."""
+    return len(sl.parse_frontmatter(text)[1].strip("\n"))
+
+
+def _cap_repo(tmp_path) -> Path:
+    """A throwaway vault: `<root>/skills/<name>/SKILL.md`, committed under git.
+
+    `iter_active_skills(roots=[root / "skills"])` then yields exactly the fixture's
+    skills, and the repo root is one level above the skills directory — the same shape
+    as the real vault, which is what makes the relative path the code asks git about
+    come out as `skills/<name>/SKILL.md`.
+    """
+    vault = tmp_path / "vault"
+    (vault / "skills").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(vault)], check=True)
+    return vault
+
+
+def _commit_skill(vault: Path, name: str, chars: int, author: str,
+                  subject: str = "") -> str:
+    """Commit `skills/<name>/SKILL.md` with a body of about `chars` chars as `author`.
+
+    200-char lines for the same reason `_wide` uses them: they keep the LINE ceiling off
+    the measurement, so a body counted over the char cap is over it on chars alone. The
+    body is rewritten in place on a second call, which is what makes this the shape of a
+    nightly writer appending to a skill it already committed. `--author` goes AFTER
+    `commit`: before the subcommand git(1) reads it as its own option and exits 129.
+    """
+    path = vault / "skills" / name / "SKILL.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("---\n"
+                    f"description: Use this skill when testing {name} growth.\n"
+                    "tags: [test]\n"
+                    "---\n\n" + "\n".join(["x" * 200] * max(1, chars // 200)) + "\n",
+                    encoding="utf-8")
+    ident = ["-c", f"user.name={author}", "-c", f"user.email={author}@example.invalid"]
+    subprocess.run(["git", "-C", str(vault), *ident, "add", "--",
+                    f"skills/{name}/SKILL.md"], check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(vault), *ident, "commit", "-q",
+                    f"--author={author} <{author}@example.invalid>",
+                    "-m", subject or f"{name}: body now ~{chars} chars"],
+                   check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(vault), "rev-parse", "HEAD"],
+                          check=True, capture_output=True, text=True).stdout.strip()
+
+
+def _commit_unrelated(vault: Path, author: str) -> str:
+    """Commit a file that is not a SKILL.md, as `author`, and return the new HEAD sha.
+
+    Exists so a test can put HEAD out of alignment with a skill's own history: a fixture
+    with one skill has its last commit BE its HEAD commit, and then no assertion on sha or
+    author can tell the two apart.
+    """
+    path = vault / "notes.md"
+    path.write_text("# an unrelated vault note\n", encoding="utf-8")
+    ident = ["-c", f"user.name={author}", "-c", f"user.email={author}@example.invalid"]
+    subprocess.run(["git", "-C", str(vault), *ident, "add", "--", "notes.md"],
+                   check=True, capture_output=True)
+    subprocess.run(["git", "-C", str(vault), *ident, "commit", "-q",
+                    f"--author={author} <{author}@example.invalid>",
+                    "-m", "note: touches no skill at all"],
+                   check=True, capture_output=True)
+    return subprocess.run(["git", "-C", str(vault), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+
+
+def _records(vault: Path):
+    from agent_mcp.skills import iter_active_skills
+    return list(iter_active_skills(roots=[vault / "skills"]))
+
+
+def _crossing_store(tmp_path, monkeypatch) -> Path:
+    """Point `$LLOYD_DATA` at the fixture and hand back the store path it implies."""
+    monkeypatch.setenv("LLOYD_DATA", str(tmp_path / "data"))
+    return (tmp_path / "data" / "skill-lint" / "char-cap-crossings.jsonl")
+
+
+def _store_rows(path: Path) -> list[dict]:
+    if not path.is_file():
+        return []
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def test_an_over_cap_row_names_the_commit_author_and_delta_from_history(tmp_path):
+    """Clauses 1 and 2: the row says which commit last touched THIS skill's SKILL.md,
+    who authored it, and how far the body moved since the commit before that.
+
+    Two commits, two authors: the row must carry the SECOND sha and the second author —
+    reading `HEAD` instead of the path's own history would name whoever committed an
+    unrelated file last, which is how a growth report blames the wrong route — and
+    `body_char_delta` must equal the body-char difference between the two commits,
+    counted with `skill_size`'s own ruler rather than the file's byte length, because
+    front matter moves independently of a body.
+    """
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    _commit_skill(vault, "grower", cap - 5_000, "lloyd-nightly-reflection-config")
+    second = _commit_skill(vault, "grower", cap + 4_000,
+                           "lloyd-nightly-reflection-knowledge-write",
+                           subject="knowledge-write: append the 2026-11-24 stage plan")
+    # A commit that touches NO skill, by a third author, AFTER the growth commit: without it
+    # this fixture's HEAD would BE the skill's last commit and the two asserts below could
+    # not tell "the history of this file" from "whatever the repo did last" — which is the
+    # exact failure mode that blames the wrong route for a crossing.
+    _commit_unrelated(vault, "lloyd-nightly-skills-management")
+    head = subprocess.run(["git", "-C", str(vault), "rev-parse", "HEAD"], check=True,
+                          capture_output=True, text=True).stdout.strip()
+    assert head != second, "the unrelated commit has to move HEAD for this to prove anything"
+    census = sl.live_char_cap_census(_records(vault))
+    row = next(s for s in census["skills"] if s["name"] == "grower")
+    assert row["last_commit_sha"] == second, (
+        f"the row named {row['last_commit_sha']} while HEAD is {head}: it must name the "
+        "last commit touching skills/grower/SKILL.md, not the repo's latest commit")
+    assert row["last_commit_author"] == "lloyd-nightly-reflection-knowledge-write", row
+    assert row["last_commit_subject"] == "knowledge-write: append the 2026-11-24 stage plan"
+    assert row["last_commit_sha"] != head, (
+        "the attribution came off HEAD: an author field read that way names whoever "
+        "committed anything last, not whoever grew this body")
+    first_body = _body_chars(
+        subprocess.run(["git", "-C", str(vault), "show",
+                        f"{second}^:skills/grower/SKILL.md"],
+                       check=True, capture_output=True, text=True).stdout)
+    assert row["prev_body_chars"] == first_body
+    assert row["body_char_delta"] == row["body_chars"] - first_body, (
+        f"delta {row['body_char_delta']} must be today's body chars less the body chars "
+        f"at the previous commit touching this file ({row['body_chars']} - {first_body})")
+
+
+def test_a_skill_that_crossed_the_cap_is_flagged_and_one_already_over_is_not(tmp_path):
+    """Clause 3: the crossing is the transition, not the state.
+
+    `grower` was inside the cap at the previous commit touching it and is past it now:
+    that is the event worth a durable row. `already-frozen` was past the cap at BOTH
+    commits, so it is over the cap with no crossing — the 30 skills frozen on 2026-11-16
+    are a backlog, and a store that logged all 30 every night would bury the one signal
+    in the count that made the store worth opening. A skill with only one commit in its
+    history has no previous body to cross from, so it is not a crossing either.
+    """
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    _commit_skill(vault, "grower", cap - 5_000, "lloyd-nightly-reflection-config")
+    _commit_skill(vault, "grower", cap + 4_000, "lloyd-nightly-reflection-signals")
+    _commit_skill(vault, "already-frozen", cap + 1_000, "lloyd-nightly-skills-management")
+    _commit_skill(vault, "already-frozen", cap + 9_000, "lloyd-nightly-skills-management")
+    _commit_skill(vault, "single-commit", cap + 500, "lloyd-nightly-reflection-signals")
+    rows = {s["name"]: s for s in sl.live_char_cap_census(_records(vault))["skills"]}
+    assert rows["grower"]["crossed"] is True, (
+        f"{rows['grower']}: inside the cap at the previous commit, past it now")
+    assert rows["already-frozen"]["crossed"] is False, (
+        f"{rows['already-frozen']}: past the cap at both commits is a frozen skill, "
+        "not a crossing")
+    assert rows["single-commit"]["crossed"] is False, (
+        "one commit touching a file is no transition to measure")
+    assert all(r["prev_body_chars"] is not None for r in rows.values()
+               if r["crossed"]), "a crossing needs the previous body it crossed from"
+
+
+def test_a_crossing_appends_one_dated_row_and_a_quiet_run_appends_nothing(
+        tmp_path, monkeypatch):
+    """Clause 4: the crossing outlives the window in a file, and only crossings write it.
+
+    stdout is not a record: `~/obsidian/autonomy/skill-lint-report.md` was three days old
+    on 2026-11-16, which is why this row goes to `$LLOYD_DATA/skill-lint/
+    char-cap-crossings.jsonl` where the owed-check job can read it after the growth
+    window has closed. One row per crossing, not one per census run — the lint runs
+    nightly and the gate calls the census at every refusal, so a per-run append would
+    write the same event dozens of times and the row count would stop meaning anything.
+    A census over a corpus with no crossing appends nothing at all.
+    """
+    store = _crossing_store(tmp_path, monkeypatch)
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    _commit_skill(vault, "grower", cap - 5_000, "lloyd-nightly-reflection-config")
+    sha = _commit_skill(vault, "grower", cap + 4_000,
+                        "lloyd-nightly-reflection-knowledge-write")
+    rows = _store_rows(store)
+    assert not rows, f"a run with no crossing wrote {rows}"
+    sl.live_char_cap_census(_records(vault))
+    rows = _store_rows(store)
+    assert len(rows) == 1, f"a crossing appends exactly one row, got {rows}"
+    row = rows[0]
+    assert set(row) == CROSSING_ROW_KEYS, row
+    assert row["skill"] == "grower" and row["sha"] == sha, row
+    assert row["author"] == "lloyd-nightly-reflection-knowledge-write", row
+    assert row["body_char_delta"] > 0 and row["body_chars"] > cap, row
+    assert "grower" in row["subject"], row
+    # The row reconciles against the sha it names: `body_chars` is the COMMITTED body there,
+    # so a reader with `git show <sha>` reproduces it. The census row's own `body_chars` is
+    # the working tree, and mixing the two into one number is how a store starts narrating.
+    at_sha = _body_chars(subprocess.run(
+        ["git", "-C", str(vault), "show", f"{sha}:skills/grower/SKILL.md"],
+        check=True, capture_output=True, text=True).stdout)
+    assert row["body_chars"] == at_sha == row["body_char_delta"] + _body_chars(
+        subprocess.run(["git", "-C", str(vault), "show",
+                        f"{sha}^:skills/grower/SKILL.md"],
+                       check=True, capture_output=True, text=True).stdout), row
+    assert dt.datetime.fromisoformat(row["at"]).utcoffset() is not None, (
+        f"`{row['at']}` must be an aware ISO stamp: a naive stamp in a machine-facing "
+        "row is read as UTC by every later reader")
+    sl.live_char_cap_census(_records(vault))
+    assert len(_store_rows(store)) == 1, "the same crossing must not be appended twice"
+    # A SECOND vault whose only over-cap skill was past the cap at both of its commits,
+    # censused here: over-cap with no crossing is the 30-frozen-on-2026-11-16 shape, and the
+    # only thing that makes "the store still holds one row" a measurement rather than a
+    # repeat of the line above is a census run sitting between them that COULD have written.
+    quiet = _cap_repo(tmp_path / "quiet")
+    _commit_skill(quiet, "already-frozen", cap + 1_000, "lloyd-nightly-skills-management")
+    _commit_skill(quiet, "already-frozen", cap + 9_000, "lloyd-nightly-skills-management")
+    quiet_rows = sl.live_char_cap_census(_records(quiet))["skills"]
+    assert [r["name"] for r in quiet_rows] == ["already-frozen"], quiet_rows
+    assert quiet_rows[0]["crossed"] is False, quiet_rows[0]
+    assert len(_store_rows(store)) == 1, (
+        "a census over a corpus that is over the cap but crossed nothing appended a row")
+
+
+def test_the_crossing_store_bounds_itself_on_age_and_on_rows(tmp_path, monkeypatch):
+    """Clause 4's other half: the new store cannot grow without a horizon.
+
+    The retention sweep's own rule is that a store missing from its table is a store
+    nothing bounds, and `char-cap-crossings.jsonl` is not in that table — the cheapest
+    bound that keeps this change single-surface is to apply it on append. A row older
+    than `CROSSING_MAX_AGE_DAYS` goes, and a file longer than `CROSSING_MAX_ROWS` keeps
+    its newest `CROSSING_MAX_ROWS`: the horizon has to be measured against the row's own
+    stamp, never against the file's mtime, or a store that is appended to every day is
+    forever young and never trims.
+    """
+    store = _crossing_store(tmp_path, monkeypatch)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    now = dt.datetime.now(dt.timezone.utc)
+    stale = {"at": (now - dt.timedelta(days=sl.CROSSING_MAX_AGE_DAYS + 10)
+                    ).isoformat(), "skill": "ancient", "sha": "0" * 40,
+             "author": "nobody", "subject": "long predates this horizon",
+             "body_chars": sl.SKILL_BODY_CHAR_CAP + 1, "body_char_delta": 7}
+    filler = [{"at": now.isoformat(), "skill": f"filler-{i}", "sha": f"{i:040x}",
+               "author": "lloyd-nightly-reflection-signals", "subject": "seed",
+               "body_chars": sl.SKILL_BODY_CHAR_CAP + 1, "body_char_delta": 1}
+              for i in range(sl.CROSSING_MAX_ROWS + 40)]
+    store.write_text("".join(json.dumps(r) + "\n"
+                             for r in [stale] + filler), encoding="utf-8")
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    _commit_skill(vault, "grower", cap - 5_000, "lloyd-nightly-reflection-config")
+    _commit_skill(vault, "grower", cap + 4_000, "lloyd-nightly-reflection-signals")
+    sl.live_char_cap_census(_records(vault))
+    rows = _store_rows(store)
+    assert len(rows) == sl.CROSSING_MAX_ROWS, (
+        f"the store kept {len(rows)} rows against a bound of {sl.CROSSING_MAX_ROWS}")
+    assert "ancient" not in {r["skill"] for r in rows}, (
+        "a row past CROSSING_MAX_AGE_DAYS survived an append: the horizon is not "
+        "reading the row's own stamp")
+    assert rows[-1]["skill"] == "grower", "the fresh crossing has to survive the trim"
+
+
+# ── #4336 review round 2: the three gaps the refusal named ──────────────────────────
+#
+# Appended at the tail, not inserted above the section they complete, for the reason
+# #4332 wrote into `app/harness/protected_paths.py`: a line inserted above something a
+# document cites re-points the citation.
+
+
+def test_uncommitted_growth_is_attributed_to_the_last_commit_rather_than_invented(tmp_path):
+    """The dirty working tree, which is what `live_char_cap_census` actually reads.
+
+    The census counts the body on disk and the attribution comes from git, so between two
+    commits the two halves describe different states. Every attributed number here is a
+    COMMIT fact — the delta is the last commit's body less the commit before it, and the
+    crossing is those two commits' relation — while `body_chars` on the same row is the
+    working tree. The split is the safety property: a nightly writer with the tree dirty
+    must not have growth nobody has committed charged to whoever committed last, and an
+    on-disk body past the cap must not mint a crossing row for a commit that stayed inside
+    it. Both commits in this fixture are inside the cap, the tree then grows past it, and
+    the row reports the growth in `body_chars` while the delta stays the earlier commit's
+    own move and no crossing is claimed.
+    """
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    first = _commit_skill(vault, "grower", cap - 5_000, "lloyd-nightly-reflection-config",
+                          subject="config: 2026-11-23 pass")
+    second = _commit_skill(vault, "grower", cap - 3_000,
+                           "lloyd-nightly-reflection-knowledge-write",
+                           subject="knowledge-write: 2026-11-24 pass")
+    first_body = _body_chars(
+        subprocess.run(["git", "-C", str(vault), "show",
+                        f"{first}:skills/grower/SKILL.md"],
+                       check=True, capture_output=True, text=True).stdout)
+    committed = _body_chars(
+        subprocess.run(["git", "-C", str(vault), "show",
+                        f"{second}:skills/grower/SKILL.md"],
+                       check=True, capture_output=True, text=True).stdout)
+    assert committed <= cap, "both commits stay inside the cap; only the tree crosses"
+    skill_file = vault / "skills" / "grower" / "SKILL.md"
+    skill_file.write_text(
+        skill_file.read_text(encoding="utf-8") + "\n"
+        + "\n".join(["z" * 200] * 60) + "\n", encoding="utf-8")
+    dirty = _body_chars(skill_file.read_text(encoding="utf-8"))
+    assert dirty > cap, "the uncommitted growth has to cross the cap to be tempting"
+    row = next(s for s in sl.live_char_cap_census(_records(vault))["skills"]
+               if s["name"] == "grower")
+    assert row["body_chars"] == dirty, "the census counts the working tree, not HEAD"
+    assert (row["last_commit_sha"], row["last_commit_author"]) == (
+        second, "lloyd-nightly-reflection-knowledge-write"), row
+    assert row["prev_body_chars"] == first_body, (
+        f"prev_body_chars must be the body at the commit BEFORE the named one, read from "
+        f"git, not assumed from the size asked for: {row['prev_body_chars']} vs "
+        f"{first_body}")
+    assert row["body_char_delta"] == committed - first_body, (
+        f"the delta must be the named commit's own move ({committed} - {first_body} = "
+        f"{committed - first_body}), not the on-disk body less prev "
+        f"({dirty - first_body}), which would charge the {dirty - committed} uncommitted "
+        "chars to the last committer")
+    assert row["body_char_delta"] < dirty - first_body, (
+        "the committed move is strictly smaller than the on-disk gap, which is the whole "
+        "point of anchoring the delta to commits")
+    assert row["crossed"] is False, (
+        "the tree crossed the cap but no commit did, so no dated crossing row is owed")
+
+
+def test_the_trim_keeps_every_row_newer_than_the_horizon_even_when_they_exceed_it(
+        tmp_path, monkeypatch):
+    """The trim branch at its own numbers, at a size a fixture can afford.
+
+    `CROSSING_MAX_ROWS` is 500, and seeding 501 live rows to prove a slice is a fixture
+    nobody maintains; the shipped constant is pinned by name instead, and the slice is
+    exercised with the bound monkeypatched to 2. What has to survive is the ORDERING claim:
+    the newest rows are kept and the stale ones go, INCLUDING when the fresh rows alone
+    exceed the bound — a trim written to always leave room for history would drop the
+    crossing that triggered the write, which is the one row the store exists to hold.
+    """
+    assert sl.CROSSING_MAX_ROWS == 500, "the shipped bound is what the docstring names"
+    store = _crossing_store(tmp_path, monkeypatch)
+    monkeypatch.setattr(sl, "CROSSING_MAX_ROWS", 2)
+    store.parent.mkdir(parents=True, exist_ok=True)
+    old = {"at": (dt.datetime.now(dt.timezone.utc)
+                  - dt.timedelta(days=sl.CROSSING_MAX_AGE_DAYS - 5)).isoformat(),
+           "skill": "within-horizon-but-older", "sha": "1" * 40, "author": "yesterday",
+           "subject": "inside the age horizon, outside the row bound",
+           "body_chars": sl.SKILL_BODY_CHAR_CAP + 1, "body_char_delta": 1}
+    store.write_text(json.dumps(old) + "\n", encoding="utf-8")
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    _commit_skill(vault, "grower-a", cap - 5_000, "lloyd-nightly-reflection-config")
+    _commit_skill(vault, "grower-a", cap + 4_000, "lloyd-nightly-reflection-signals")
+    _commit_skill(vault, "grower-b", cap - 3_000, "lloyd-nightly-reflection-config")
+    _commit_skill(vault, "grower-b", cap + 6_000, "lloyd-nightly-reflection-signals")
+    assert len(_store_rows(store)) == 1
+    sl.live_char_cap_census(_records(vault))
+    rows = _store_rows(store)
+    assert len(rows) == 2, f"the bound is 2, the store holds {len(rows)}"
+    assert {r["skill"] for r in rows} == {"grower-a", "grower-b"}, (
+        f"both fresh crossings had to survive the trim and the older in-horizon row go, "
+        f"got {[r['skill'] for r in rows]}")
+    assert "within-horizon-but-older" not in {r["skill"] for r in rows}, rows
+    assert [r["skill"] for r in rows] == ["grower-b", "grower-a"], (
+        "rows are appended in census order, which is worst-first by body chars — the "
+        "census doubles as a spill queue, so the bigger body is written first")
+
+
+def test_the_store_lives_under_the_data_root_and_the_ceiling_is_untouched(tmp_path,
+                                                                          monkeypatch):
+    """Where the record goes, and the one thing this diff was forbidden to move.
+
+    Path, not prose: `char_cap_crossings_path()` must sit under the DATA ROOT at
+    `skill-lint/char-cap-crossings.jsonl` and NOT under the vault — `~/obsidian/autonomy/
+    skill-lint-report.md` regenerates nightly and was three days stale on 2026-11-16, which
+    is the whole reason this store exists, and a store inside the vault would be swept or
+    landed by rounds rather than read by the owed-check job. The data root is asked of the
+    same resolver every other store path on this box uses, so the assertion is tree-relative
+    and true in a round's worktree as well as in production.
+
+    Then the ceiling: 12,000 in `skill_lint` and 12,000 in the census output, and the
+    sentence `_char_cap_note` composes out of `over`/`count`/`corpus` still composes —
+    #4191's refusal text is assembled from those three keys, so widening the ROWS must not
+    have touched the keys the note reads.
+    """
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+    from app.data_root import resolve_data_root_for_tree
+    path = sl.char_cap_crossings_path()
+    rel = path.relative_to(resolve_data_root_for_tree())
+    assert rel.as_posix() == "skill-lint/char-cap-crossings.jsonl", rel
+    assert path.parent.parent != Path.home() / "obsidian", (
+        f"{path} sits in the vault, where a nightly report already goes stale")
+    assert sl.SKILL_BODY_CHAR_CAP == 12_000 == sl.char_cap_census([])["cap"], \
+        "the cap moved: #4336 was asked to attribute crossings, not to raise the ceiling"
+    census = {"cap": 12_000, "corpus": "live", "count": 208, "over": 30, "skills": []}
+    assert set(census) == {"cap", "corpus", "count", "over", "skills"}, \
+        "the census's own key set moved, and the refusal note is composed from it"
+    note = f"{census['over']} of {census['count']} {census['corpus']} skills are " \
+           f"already frozen against that ceiling"
+    assert note == "30 of 208 live skills are already frozen against that ceiling", note
+
+
+def test_attribution_survives_a_vault_reached_through_a_symlink(tmp_path):
+    """The seam a round's home actually is: `obsidian` symlinked into the live vault.
+
+    `_repo_owner` asks git for the owning repo and then takes a relative path, and git
+    answers with a resolved path — so a corpus reached through a link is the case where a
+    naive `skill_file.relative_to(root)` raises ValueError and every row comes back
+    silently unknown. Unknown-forever would be worse than the item's premise: the census
+    would report 28 over-cap skills with no author at all and look like a clean result. Same
+    fixture as the history node, one extra link in the path.
+    """
+    cap = sl.SKILL_BODY_CHAR_CAP
+    vault = _cap_repo(tmp_path)
+    sha = _commit_skill(vault, "grower", cap - 5_000, "lloyd-nightly-reflection-config")
+    _commit_skill(vault, "grower", cap + 4_000, "lloyd-nightly-reflection-signals")
+    link = tmp_path / "linked"
+    link.symlink_to(vault)
+    row = next(s for s in sl.live_char_cap_census(_records(link))["skills"]
+               if s["name"] == "grower")
+    assert row["last_commit_author"] == "lloyd-nightly-reflection-signals", (
+        f"attribution went unknown through a symlink: {row}")
+    assert row["last_commit_sha"] != sha and row["prev_body_chars"] is not None, row
+    assert row["crossed"] is True, row
