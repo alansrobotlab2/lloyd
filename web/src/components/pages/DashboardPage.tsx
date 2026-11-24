@@ -1100,6 +1100,21 @@ function BacklogHealthLines({ health }: { health: BacklogHealth }) {
           #{o.item_id}: {o.needs || o.what}
         </div>
       ))}
+      {/* A pending hand-run is RULED but not EXECUTED, and unlike the `outside`
+          line above it cannot be answered away by a person replying: `owed.hand_runs()`
+          keeps the row listed until the item's own receipt command exits zero, so the
+          `cmd` below is the only thing that clears it. `#4515`: the payload carried it
+          and no component read it, so the queue was invisible on the one surface a
+          human reads. `break-words` and `font-mono` sit on the cmd's own element for
+          the same reason as the block above — one unbreakable, path-heavy token — and
+          the row renders nothing at all while the queue is empty. Pinned by
+          tests/test_dashboard_hand_runs.py. */}
+      {health.owed?.hand_runs?.map((h) => (
+        <div key={`hand-run-${h.item_id}`} className="break-words text-amber-400/90">
+          #{h.item_id} by hand · {h.set.join(' · ')} ·{' '}
+          <span className="break-words font-mono">{h.cmd}</span>
+        </div>
+      ))}
       {health.decisions && <DecisionsLine d={health.decisions} />}
     </div>
   )
