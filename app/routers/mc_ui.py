@@ -25,8 +25,7 @@ from app import mc_state
 from app.paths import LLOYD_HOME, SESSIONS_DIR
 from app.sessions_io import (SESSION_SCAN_CEILING, is_background_session_name,
                              is_bench_source, is_conversation_session,
-                             is_session_head, scan_session_heads,
-                             session_head_files)
+                             scan_session_heads, session_head_files)
 # The Memory tab's file count walks the same segment set the recall searches and
 # Mission Control's memory search asks qmd for. #3160: this router used to keep
 # its own tuple of seven names — `agents` among them, which no qmd index declares
@@ -273,17 +272,45 @@ def _safe(coro_or_value):
 
 
 def _summarize_inner_voice() -> dict:
+    """Inner Voice tab brief: how big the session store is, and its IV half.
+
+    Both returned keys are full-directory denominators. `sessions_total` is EVERY
+    session head in `SESSIONS_DIR`, `iv_enabled_count` the subset of those heads
+    whose payload carries `inner_voice`. Neither is a sample and neither is a
+    newest-first window, and that is why this is the one session enumeration in this
+    module that is deliberately ceilingless: a read budget here would not trade
+    accuracy for time, it would publish a window under a label that says the whole
+    store. The two briefs #4267 did move onto `scan_session_heads` with
+    `SESSION_SCAN_CEILING` (400) — Background and Chat — report a newest-first window
+    (5 rows, and a per-source breakdown of the scan), so for them the bound already IS
+    what the number means. #4447 recorded this ruling and moved the loop onto the
+    shared `session_head_files` enumeration, the same predicate the loop used to apply
+    by hand two lines lower, so no denominator moved.
+
+    Cost is the only reason a reader would want a budget here, so it is on the record:
+    #4447's triage measured the full walk at 6.64 s over 9,762 heads with 251 sidecars
+    skipped on the live store on 2026-11-20, and its only caller is
+    `POST /api/mc/navigate` — reached through `_SUMMARIZERS["inner_voice"]` when the
+    agent moves the user to this tab, and never by the polled
+    `GET`/`POST /api/mc/state`. A cold call is worth those seconds.
+
+    Reopen condition: a ceiling may be added only once a caller wants a window and
+    `sessions_total` stops being the directory's head count — i.e. once the key says
+    it counts a window. Until then the identity
+    `sessions_total == len(sessions_io.session_head_files(SESSIONS_DIR))` holds, and
+    `tests/test_session_sidecar_denominators.py` grades it beside
+    `iv_enabled_count` on a fixture one head larger than the shared ceiling.
+    """
     snap = {}
     try:
         from app import event_log as _event_log  # late import — avoids cycles
     except Exception:
         return snap
-    # Lightweight: just count sessions with IV enabled.
+    # Every head, no read budget — the docstring is the ruling. #3815 is what the
+    # shared enumeration excludes: a reduction sidecar is not a session.
     iv_sessions = 0
     total = 0
-    for sf in SESSIONS_DIR.glob("*.json"):
-        if not is_session_head(sf.name):
-            continue              # #3815: a sidecar is not a session; see total_session_count
+    for sf in session_head_files(SESSIONS_DIR):
         total += 1
         try:
             data = json.loads(sf.read_text(encoding="utf-8"))

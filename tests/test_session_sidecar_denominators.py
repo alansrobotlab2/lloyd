@@ -472,3 +472,242 @@ def test_the_legacy_cursor_migration_seeds_no_marker_for_a_sidecar(
             f"a sidecar was filed as a distilled session: {sidecar}")
     assert queue.wm_get(sd.NAME, sd._LEGACY_CURSOR) is None, (
         "the cursor is deleted once converted, so no session can be stranded behind it")
+
+
+# ── #4447: the Inner Voice brief is ceilingless BY DECISION, and says so ────────
+#
+# `_summarize_inner_voice` is the one session enumeration in `app/routers/mc_ui.py`
+# that opens every file in the directory, and #4267's owed-check ruled on 2026-11-20
+# that it stays that way. The reason is not cost — it is meaning: `sessions_total`
+# and `iv_enabled_count` are full-directory denominators, so a read budget would not
+# make the brief cheaper, it would make the number describe a window while still
+# being labelled as the store. The other two briefs were moved onto
+# `sessions_io.scan_session_heads` with `SESSION_SCAN_CEILING` (400) precisely because
+# what they publish IS a newest-first window.
+#
+# That ruling existed nowhere in the tree: `iv_enabled_count` appeared in exactly one
+# line repo-wide (the `return` that builds it), zero test files, and the function had
+# no docstring at all. A ruling only one reader ever saw is a ruling the next reader
+# re-opens, so the four nodes below pin it four ways: the count past the shared
+# ceiling (behaviour), the second denominator (first test ever to name it), the
+# source that enumerates `session_head_files` instead of globbing (shape), and the
+# docstring that states the reopen condition (contract). The `store` fixture above is
+# 4 heads and cannot tell a 400-file budget from no budget, which is why this section
+# builds its own, bigger, directory.
+
+#: One more head than the shared budget, so a walk that adopted
+#: `SESSION_SCAN_CEILING` answers 400 here and this section's first node says so.
+IV_HEADS = 401
+
+#: Two sidecars, both carrying `"inner_voice": True` in their payload, so a reader
+#: that stopped excluding sidecars moves BOTH denominators (401→403, 101→103) rather
+#: than only one. Same payload #3815 says relief actually writes, plus the one key
+#: this brief reads.
+IV_SIDECARS = 2
+
+#: Every 4th head is flagged (indices 0, 4, …, 400 → 101 of 401). Deliberately not
+#: half, not all, and not coprime with the head count: an implementation that
+#: counted files, or heads, or sidecars instead of IV-flagged heads answers a
+#: different number, and 101 ≠ 401 ≠ 403 ≠ 0.
+IV_EVERY_4TH = 4
+
+
+def _iv_head_names():
+    """The 401 fixture head names. Name shape is free here: `is_session_head` is a
+    NAME test (not a sidecar ⇒ a head), and this brief counts every head regardless
+    of whether the name looks like a chat or a machine run."""
+    return [f"20261105_{120000 + i:06d}_iv{i:04d}" for i in range(IV_HEADS)]
+
+
+def _iv_enabled_head_names():
+    """The subset of those names whose payload carries `inner_voice` — 101 of them.
+
+    Derived from the same enumeration the fixture writes, so the assertion below
+    reads as the clause it pins ("equals the number of heads whose payload carries
+    inner_voice true") instead of as a constant nobody can re-derive.
+    """
+    return [n for i, n in enumerate(_iv_head_names()) if i % IV_EVERY_4TH == 0]
+
+
+@pytest.fixture
+def iv_store(tmp_path, monkeypatch):
+    """A sessions directory of 401 heads (101 IV-flagged) plus 2 IV-flagged sidecars.
+
+    Patched only in `app.routers.mc_ui`, where the brief binds its own
+    `SESSIONS_DIR` — the "patch it where it binds" rule the 4-head fixture states.
+    Nothing else walks the directory in these four nodes.
+    """
+    d = tmp_path / "sessions"
+    d.mkdir()
+
+    for i, sid in enumerate(_iv_head_names()):
+        body = {"session_id": sid, "title": sid, "preview": f"head {sid}",
+                "platform": "mission-control", "model": "test-model",
+                "messages": [{"role": "user", "content": "hi"}],
+                "created_at": "2026-11-05T12:00:00",
+                "last_active": "2026-11-05T12:00:00"}
+        if i % IV_EVERY_4TH == 0:
+            body["inner_voice"] = True
+        (d / f"{sid}.json").write_text(json.dumps(body), encoding="utf-8")
+
+    for name in [f"{n}{REDUCTION_SIDECAR_SUFFIX}" for n in _iv_head_names()[:IV_SIDECARS]]:
+        (d / name).write_text(json.dumps({**SIDECAR_PAYLOAD, "inner_voice": True}),
+                              encoding="utf-8")
+
+    from app.routers import mc_ui
+    monkeypatch.setattr(mc_ui, "SESSIONS_DIR", d)
+    return d
+
+
+def test_the_inner_voice_brief_opens_every_head_past_the_shared_ceiling(iv_store):
+    """Clause 1: 401 heads in, `sessions_total: 401` out — ceilingless by behaviour.
+
+    The last node is the control that makes this a test rather than a comment: the
+    same directory walked by `sessions_io.scan_session_heads` at its own default
+    budget stops at 400. So if anyone moves this brief onto the bounded walk, or
+    hands it a budget of its own, `sessions_total` answers 400 and this node fails —
+    which is the failure #4447 exists to make loud, because the number the model is
+    handed would then be a window labelled as the store.
+
+    The second assertion is the identity the ruling rests on, and the one a swap to
+    the shared listing must never break: the brief's count equals
+    `len(session_head_files(...))` over the same directory, sidecars excluded.
+    """
+    from app import sessions_io
+    from app.routers import mc_ui
+
+    out = mc_ui._summarize_inner_voice()
+    assert out["sessions_total"] == IV_HEADS, out
+    assert out["sessions_total"] == len(sessions_io.session_head_files(iv_store)), out
+    assert IV_HEADS > sessions_io.SESSION_SCAN_CEILING, sessions_io.SESSION_SCAN_CEILING
+    assert (len(list(sessions_io.scan_session_heads(iv_store)))
+            == sessions_io.SESSION_SCAN_CEILING), (
+        "the fixture no longer exceeds the shared budget, so clause 1's "
+        "'past the ceiling' has nothing to be past")
+
+
+def test_the_inner_voice_brief_counts_every_iv_flagged_head_in_the_directory(iv_store):
+    """Clause 2: `iv_enabled_count` == the 101 heads whose payload says
+    `inner_voice` — that denominator pinned for the first time (`git grep
+    iv_enabled_count -- tests` was 0 hits before this file).
+
+    It is the numerator the tab publishes beside `sessions_total`, and until now
+    nothing in the tree said what it counts. Both sidecars here are IV-flagged too,
+    so an answer of 103 means sidecars were read as sessions, and an answer of 401
+    means the IV flag was ignored and every head counted; neither failure is
+    distinguishable on the 4-head fixture, where 2 of 4 heads are flagged.
+    """
+    from app.routers import mc_ui
+
+    out = mc_ui._summarize_inner_voice()
+    assert out["iv_enabled_count"] == len(_iv_enabled_head_names()), out
+    assert out["iv_enabled_count"] < out["sessions_total"], out
+    assert len(_iv_enabled_head_names()) == 101, _iv_enabled_head_names()
+
+
+def test_the_inner_voice_denominators_reach_the_agent_through_the_navigate_route(iv_store):
+    """The seam the two numbers actually travel: `POST /api/mc/navigate` →
+    `_summarize_tab` → `_SUMMARIZERS["inner_voice"]` → `_summarize_inner_voice`, and
+    the envelope the agent's `mc_navigate` tool reads back as `detail`.
+
+    The node above calls the brief in-process; this one calls it the way the tool's
+    loopback POST does, so the registry entry, the `_safe` wrapper that turns a raise
+    into `{}`, and the route's `{tab, focus_id, detail}` shape are all on the path.
+    No frontend subscribes — `mc_state.publish_navigate` fans out to nobody, which is
+    the cold case this route usually is.
+
+    It re-asserts the same pair rather than a copy of it: a `_safe` that swallowed an
+    exception would return `{}` and fail here on the missing key, not pass.
+    """
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+
+    from app.routers import mc_ui
+
+    app = FastAPI()
+    app.include_router(mc_ui.router)
+    res = TestClient(app).post(
+        "/api/mc/navigate", json={"tab": "inner_voice", "focus_id": None})
+    assert res.status_code == 200, res.text
+    detail = res.json()["detail"]
+    assert detail["sessions_total"] == IV_HEADS, detail
+    assert detail["iv_enabled_count"] == len(_iv_enabled_head_names()), detail
+
+
+def test_the_inner_voice_brief_enumerates_the_shared_listing_and_carries_no_budget():
+    """Clause 3: the function's own source reaches `session_head_files(SESSIONS_DIR)`
+    and holds no budget of any kind.
+
+    Behaviour cannot tell a raw glob with a hand-rolled skip from the shared listing
+    — that is what the #3815 node above is for — but it is the enumeration itself
+    #4267 consolidated: the last `SESSIONS_DIR.glob("*.json")` left in this module sat
+    in this function, applying `is_session_head` by hand two lines below the place
+    that already imported the helper. So this node reads the source, which is the
+    only way to pin that the site is GONE rather than merely still correct.
+
+    The negative half is the ruling: no `SESSION_SCAN_CEILING`, no `ceiling` argument,
+    no `break`, no slice. A docstring may discuss ceilings — it is stripped from the
+    text under test so the body is what is judged.
+    """
+    import ast
+    import inspect
+    import re
+    import textwrap
+
+    from app.routers import mc_ui
+
+    code = textwrap.dedent(inspect.getsource(mc_ui._summarize_inner_voice))
+    fdef = ast.parse(code).body[0]
+    assert isinstance(fdef, ast.FunctionDef), ast.dump(fdef)
+
+    # The docstring is the function's first statement when it has one; everything
+    # after it is the body, and only the body is judged below.
+    skip = 1 if (isinstance(fdef.body[0], ast.Expr)
+                 and isinstance(fdef.body[0].value, ast.Constant)
+                 and isinstance(fdef.body[0].value.value, str)) else 0
+    lines = code.splitlines()
+    body_src = "\n".join(line
+                         for stmt in fdef.body[skip:]
+                         for line in lines[stmt.lineno - 1:stmt.end_lineno])
+
+    assert "session_head_files(SESSIONS_DIR)" in body_src, body_src
+    assert "SESSIONS_DIR.glob(" not in body_src, (
+        "the raw whole-directory glob was #4447's drift (a): the shared listing is "
+        "one enumeration for every session count in this module")
+    assert "is_session_head(" not in body_src, (
+        "the hand-rolled skip is what session_head_files replaced")
+    assert "scan_session_heads" not in body_src, (
+        "the bounded walk is for windows; this brief counts the directory")
+    assert "SESSION_SCAN_CEILING" not in body_src, body_src
+    assert re.search(r"\bceiling\b", body_src, re.IGNORECASE) is None, body_src
+    assert not [n for n in ast.walk(fdef) if isinstance(n, ast.Break)], (
+        "a break is how a budget enters a loop quietly")
+    assert not [n for n in ast.walk(fdef) if isinstance(n, ast.Slice)], (
+        "a slice is how a window enters a count quietly")
+
+
+def test_the_inner_voice_brief_docstring_records_the_ceilingless_ruling():
+    """Clause 4: the docstring states the ruling in words a later reader can grep,
+    and names the condition under which it may be reopened.
+
+    Drift (b) of #4447 was that the decision lived only in #4267's owed entry:
+    `architecture/mission-control.md` records the ceiling for the Background and Chat
+    briefs and never mentioned this one, which is exactly why the next reader of a
+    9,700-file loop reaches for a budget. So the docstring is graded here as text, on
+    the four things it must say: what the two keys are, that the walk is
+    deliberately ceilingless, who calls it, and when a ceiling becomes acceptable.
+    """
+    import inspect
+
+    from app.routers import mc_ui
+
+    doc = inspect.getdoc(mc_ui._summarize_inner_voice) or ""
+    for phrase in ("sessions_total", "iv_enabled_count",
+                   "full-directory denominator", "ceilingless",
+                   "POST /api/mc/navigate"):
+        assert phrase in doc, (phrase, doc)
+    assert "Reopen condition" in doc, doc
+    assert "window" in doc and "head count" in doc, (
+        "the reopen condition must say when a ceiling becomes acceptable: "
+        "once a caller wants a window and sessions_total stops being the "
+        "directory's head count")
