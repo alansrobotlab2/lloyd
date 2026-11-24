@@ -3368,8 +3368,25 @@ def run_side_copy_route(name: str, *, swap: bool, dry_run: bool, as_json: bool) 
 #: The two real hand builds measured `elapsed_s` 2149.8 s and 2197.0 s, so this is the
 #: observed ~36 minutes plus ~4 of slack — and it is the quantity the window guard adds
 #: to the start instant (#3460). It is not a timeout: nothing kills a build that overruns
-#: it, the guard only decides whether the run may begin.
+#: it, the guard only decides whether the run may begin. Since #4540 it is a SECOND thing
+#: as well: the budget a FRESH build's projected cost is compared against before the route
+#: is called, which is the first time this number has ever been checked against a measured
+#: cost rather than only against the clock. That matters for what the window guard PRINTS:
+#: for a corpus this size the real build is nearer 4,965 s, so its "would end HH:MM" is
+#: fiction for a fresh copy even though the bound now stops such a copy being started here.
 SCHEDULED_BUILD_BUDGET_S = 2400
+
+#: The one committed measurement of a WHOLE fresh side-copy build on this corpus, and the
+#: vectors it covered: 4,272.0 s at 78,980 live vectors = 0.054089642947581666 s per vector.
+#: Transcribed on 2026-11-24 from the route's own artifact,
+#: `~/lloyd-data/_pipeline/reflection/qmd-side-copy-rebuild-20261108-2026-11-08T050033.json`
+#: (`elapsed_s`, `side_after.vectors_live`) — that file is runtime data under the retention
+#: sweep, so the figure lives here rather than in a fixture, the way the two committed
+#: 2026-10 hand builds (2149.8 s, 2197.0 s) live in `tests/fixtures/`. It is a RATE, not a
+#: duration, because the corpus grows ~1,000 vectors a night: 91,791 live on 2026-11-24,
+#: which prices a fresh rebuild at 4,964.9 s against a 2,400 s budget.
+SIDE_COPY_BUILD_WITNESS_ELAPSED_S = 4272.0
+SIDE_COPY_BUILD_WITNESS_VECTORS_LIVE = 78_980
 
 #: The local hours a scheduled build must not still be running in: the nightly window
 #: [22, 23, 0, 1, 2, 3, 4] the reflection chain owns (`app/autonomy.py`'s
@@ -3383,6 +3400,15 @@ SCHEDULED_BUILD_WINDOW_HOURS = frozenset({22, 23, 0, 1, 2, 3, 4})
 #: scheduled run that finds a copy already waiting. It is the route's own usage form.
 HAND_SWAP_COMMAND = ("python scripts/maintenance/qmd_index_maintenance.py"
                      " --rebuild-side-copy {name} --swap")
+
+#: The BUILD half's usage form, printed by #4540's bound when a fresh rebuild is too big for
+#: this job to start. `HAND_SWAP_COMMAND` is build-and-swap for a copy that already exists;
+#: this is the build alone, for the copy that does not, and the person running it is the one
+#: thing that makes an over-budget build survivable — a terminal run has no 3,570 s pool
+#: timer on it, so it finishes. Check for a build in flight first
+#: (`pgrep -f qmd_index_maintenance`); two at once share one embed lock.
+HAND_BUILD_COMMAND = ("python scripts/maintenance/qmd_index_maintenance.py"
+                      " --rebuild-side-copy {name}")
 
 
 def scheduled_side_copy_name(at: datetime) -> str:
@@ -3472,7 +3498,36 @@ def scheduled_build_window(at: datetime) -> dict:
     }
 
 
-def scheduled_side_copy_build(started: datetime) -> dict:
+def fresh_build_projection(vectors_live) -> dict | None:
+    """What a FRESH rebuild would cost, priced off the committed witness rate.
+
+    `rate_s_per_vector x vectors_live`, where the rate is
+    `SIDE_COPY_BUILD_WITNESS_ELAPSED_S / SIDE_COPY_BUILD_WITNESS_VECTORS_LIVE` and
+    `vectors_live` is the count THIS run just measured — the same number its report already
+    carries under `before.vectors_live`. The window guard above asks only where a build
+    would END; this asks whether it would FINISH, which is the question that matters now
+    that the corpus (~91,800 vectors on 2026-11-24) prices a build at twice the budget. The
+    two together return the four numbers a reader needs to re-derive the answer from the
+    report alone.
+
+    Returns None when the run measured no live vectors. An unmeasured index is not a cheap
+    one — but the bound's whole claim is a build it can PROVE will not fit, and a
+    measurement gap proves nothing, so the caller builds as it does today and says the
+    projection was unavailable rather than inventing a second silent skip.
+    """
+    try:
+        live = int(vectors_live)
+    except (TypeError, ValueError):
+        return None
+    if live <= 0:
+        return None
+    rate = (SIDE_COPY_BUILD_WITNESS_ELAPSED_S
+            / SIDE_COPY_BUILD_WITNESS_VECTORS_LIVE)
+    return {"rate_s_per_vector": rate, "vectors_live": live,
+            "projected_s": rate * live, "budget_s": SCHEDULED_BUILD_BUDGET_S}
+
+
+def scheduled_side_copy_build(started: datetime, vectors_live=None) -> dict:
     """Launch the BUILD half of the side-copy route from the nightly run (#3460).
 
     #3071's 2026-10-25 ruling accepts a ~2-3-week rebuild only if it stops being a
@@ -3498,6 +3553,20 @@ def scheduled_side_copy_build(started: datetime) -> dict:
         `need_capacity` is false the run's own verdict is still healthy, and a red
         nightly for a bonus build would be the boy-who-cried-wolf that #1897's red
         verdict exists to be and this one must not.
+      * it never starts a FRESH build it can price past its own budget (#4540). The route
+        is called IN-PROCESS — `git grep -n "Popen\\|start_new_session\\|nohup" --
+        scripts/maintenance/qmd_index_maintenance.py` is empty, so a build has exactly the
+        lifetime of the run that asked for it — and task #81's job has an effective ceiling
+        of 3,570 s however large its declared `timeout_seconds` is (`app/autonomy.py`'s
+        clamp: `min(declared, max_duration - 30)` against the 3,600 s scheduled-task
+        source). A killed build is not a red run: `_write_report` is reached only after
+        the build block in `main()`, so the night loses its prune record, its verdict and
+        its dated report too, and the next in-band night mints the same copy and dies at
+        the same place. So the fresh branch prices the copy first
+        (`fresh_build_projection`) and, past the budget, refuses with the numbers and the
+        command a person runs where no timer applies. A held copy is still topped up on
+        the same night: recent top-ups measured 123.6-347.2 s, minutes, nowhere near the
+        bound, which is why the bound sits in the fresh branch and not above it.
 
     A copy this route already built under THIS NIGHT's name is not rebuilt: the run prints
     the exact `--swap` command instead and does nothing else, which is the payoff the split
@@ -3555,6 +3624,35 @@ def scheduled_side_copy_build(started: datetime) -> dict:
               f"capacity cycle is on disk, so that name is topped up under the route "
               f"rather than a fresh rebuild minted ({window['reason']})")
     else:
+        # #4540's bound, in the FRESH branch only and after the held-copy lookup, so a
+        # top-up of a copy that already exists is never held up by the price of a build it
+        # is not making. Recorded before the decision either way: an under-budget night
+        # gets the same four numbers in its report, which is what lets a reader see that
+        # the bound ran and did not fire, rather than distinguishing it from a version of
+        # this script that had none.
+        projection = fresh_build_projection(vectors_live)
+        out["projection"] = projection
+        if projection is not None and projection["projected_s"] > SCHEDULED_BUILD_BUDGET_S:
+            out["refused"] = (
+                f"a fresh rebuild of {projection['vectors_live']:,} live vectors projects "
+                f"to {projection['projected_s']:,.0f} s at the committed witness rate of "
+                f"{projection['rate_s_per_vector']:.6f} s/vector, over this route's "
+                f"{SCHEDULED_BUILD_BUDGET_S} s build budget: nothing was started. The "
+                f"build is an in-process call, so this run's timer would kill it before it "
+                f"finished and take the night's prune, verdict and report with it. Start it "
+                f"where no timer applies (after `pgrep -f qmd_index_maintenance` says none "
+                f"is in flight): {HAND_BUILD_COMMAND.format(name=name)}")
+            out["hand_build"] = HAND_BUILD_COMMAND.format(name=name)
+            print(f"  side copy build REFUSED  fresh {name}: "
+                  f"{projection['vectors_live']:,} live vectors project to "
+                  f"{projection['projected_s']:,.0f} s against the "
+                  f"{SCHEDULED_BUILD_BUDGET_S} s budget. A person starts it: "
+                  f"{out['hand_build']}")
+            return out
+        if projection is None:
+            out["projection_unmeasured"] = (
+                "no live-vector count was measured, so the fresh build could not be "
+                "priced; it was started as before")
         print(f"  side copy BUILD     {window['reason']}; building {name} (about 36 "
               f"minutes, no service stopped, exit code unmoved)")
     # `build_launched` means "this run asked the route to build", so it is set before
@@ -3880,7 +3978,11 @@ def main() -> int:
     # block is present on the runs whose decision is live rather than on every run — a
     # dry run records no decision because it makes none.
     if report["capacity_approaching"] and not args.dry_run:
-        report["side_copy_build"] = scheduled_side_copy_build(started)
+        # #4540: the bound prices a fresh build off the vector count THIS run measured —
+        # the same figure that lands in its report as `before.vectors_live` — so the
+        # projection in the block and the report's own measurement cannot disagree.
+        report["side_copy_build"] = scheduled_side_copy_build(
+            started, before.get("vectors_live"))
         # #3978 (Alan's ruling on #3119): the same run then takes the SWAP for the copy it
         # just made, when its own measured occupancy is below the ceiling. ABOVE the work
         # gate for #2709's reason — the nights that need a swap are exactly the nights that

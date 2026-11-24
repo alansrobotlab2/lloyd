@@ -3875,7 +3875,8 @@ def _run_over_shape(monkeypatch, tmp_path, shape: dict, capsys,
     # it (OCT_20_SHAPE is approaching), and this helper's subject is the exit code and
     # the printed summary, not the build. `scheduled_side_copy_build` and the route
     # behind it are #3460's own nodes' subject, driven in-band there.
-    monkeypatch.setattr(m, "scheduled_side_copy_build", lambda started: {
+    monkeypatch.setattr(m, "scheduled_side_copy_build",
+                        lambda started, vectors_live=None: {
         "name": m.scheduled_side_copy_name(started), "build_launched": False,
         "stubbed": "this helper's subject is the exit code, not the build (#3460)"})
     if not probe_via_sh:
@@ -7895,7 +7896,9 @@ def test_a_capacity_approaching_nightly_builds_the_side_copy_exactly_once_and_sw
     at = _local_wallclock(5, 1)
     swaps: list[dict] = []
     rc, report, out, shell, builds, err = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=at, swap_recorder=swaps)
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=at, swap_recorder=swaps)
+    # #4540: shape=OCT_20_UNDER_BUDGET — the artifact's 60,505 live vectors now price a
+    # fresh build past the budget, so this node's rail is pinned on a corpus that fits it.
 
     assert report["capacity_approaching"] is True and report["need_capacity"] is False
     assert builds == [f"rebuild-{at:%Y%m%d}"], (
@@ -7980,11 +7983,13 @@ def test_a_0501_start_proceeds_and_a_tty_run_leaves_the_build_to_the_person(
     the flag instead — the same measured property #2458's rail reads.
     """
     rc, report, out, _, builds, _err = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1))
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=_local_wallclock(5, 1))
+    # #4540: shape=OCT_20_UNDER_BUDGET — the artifact's 60,505 live vectors now price a
+    # fresh build past the budget, so this node's rail is pinned on a corpus that fits it.
     assert builds and rc == 0, (builds, rc)
 
     rc_tty, tty_report, tty_out, _, tty_builds, _terr = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1), tty=True)
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=_local_wallclock(5, 1), tty=True)
     assert tty_builds == [], f"a terminal got a 36-minute build: {tty_builds}"
     assert "interactive terminal" in tty_report["side_copy_build"]["skipped"]
     assert "interactive terminal" in tty_out, tty_out
@@ -8001,7 +8006,9 @@ def test_the_scheduled_build_runs_no_supervisorctl_command_at_all(monkeypatch,
     the copy exists instead of an in-place rebuild.
     """
     rc, report, _, shell, builds, _serr = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1))
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=_local_wallclock(5, 1))
+    # #4540: shape=OCT_20_UNDER_BUDGET — the artifact's 60,505 live vectors now price a
+    # fresh build past the budget, so this node's rail is pinned on a corpus that fits it.
     assert builds, "the build did not run, so this asserted nothing about it"
     assert shell == [], f"the scheduled build ran subprocesses: {shell}"
     assert rc == 0
@@ -8023,11 +8030,13 @@ def test_the_build_moves_the_exit_code_on_no_outcome_of_four(monkeypatch, tmp_pa
     # four runs share one tmp_path and each still judges its own bytes.
     skipped_rc, skipped, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys,
                                                    at=at, tty=True)[:4]
-    run_rc, ran, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys, at=at)[:4]
+    run_rc, ran, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=at)[:4]
+    # #4540: shape=OCT_20_UNDER_BUDGET — the artifact's 60,505 live vectors now price a
+    # fresh build past the budget, so this node's rail is pinned on a corpus that fits it.
     refused_rc, refused, _, _ = _scheduled_nightly(monkeypatch, tmp_path, capsys,
                                                    at=_local_wallclock(23, 0))[:4]
     failed_rc, failed, f_out, _ = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=at,
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=at,
         build_raises=RuntimeError("node died mid-embed"))[:4]
 
     assert [skipped_rc, run_rc, refused_rc, failed_rc] == [0, 0, 0, 0]
@@ -8235,7 +8244,9 @@ def test_the_scheduled_name_is_derived_from_the_run_date_so_a_hand_copy_cannot_c
     at = _local_wallclock(5, 1)
     name = f"rebuild-{at:%Y%m%d}"
     rc, report, out, shell, builds, err = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=at, spy=False, bare_copy=name)
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=at, spy=False, bare_copy=name)
+    # #4540: shape=OCT_20_UNDER_BUDGET — the artifact's 60,505 live vectors now price a
+    # fresh build past the budget, so this node's rail is pinned on a corpus that fits it.
 
     block = report["side_copy_build"]
     assert block["name"] == name == m.scheduled_side_copy_name(at), block
@@ -8685,7 +8696,11 @@ def test_a_nightly_at_or_above_the_swap_ceiling_swaps_nothing_and_records_the_me
     at = _local_wallclock(5, 1)
     swaps: list[dict] = []
     rc, report, out, shell, builds, err = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=at, shape=NOV_08_SHAPE,
+        monkeypatch, tmp_path, capsys, at=at,
+        # NOV_08_SHAPE's occupancy, the under-budget vector count — spelled key by key
+        # because merging OCT_20_UNDER_BUDGET wholesale would carry OCT_20_SHAPE's `vec0`
+        # (0.3285) over the 0.4889 this node's swap claim is about.
+        shape={**NOV_08_SHAPE, "vectors_live": 40_000, "vectors_total": 40_037},
         swap_behaviour="refuse_on_contact", swap_recorder=swaps)
     listing = _stat_listing(m.INDEX.parent)
 
@@ -8893,7 +8908,9 @@ def test_a_scheduled_swap_that_fails_its_post_check_makes_the_nightly_run_red(
     """
     at = _local_wallclock(5, 1)
     rc, report, out, shell, builds, err = _scheduled_nightly(
-        monkeypatch, tmp_path, capsys, at=at, swap_behaviour="failed_check")
+        monkeypatch, tmp_path, capsys, shape=OCT_20_UNDER_BUDGET, at=at, swap_behaviour="failed_check")
+    # #4540: shape=OCT_20_UNDER_BUDGET — the artifact's 60,505 live vectors now price a
+    # fresh build past the budget, so this node's rail is pinned on a corpus that fits it.
 
     assert rc == 1, f"expected the failed swap to redden the run, got {rc}"
     swap = report["side_copy_swap"]
@@ -8968,3 +8985,252 @@ def test_a_nightly_below_the_ceiling_swaps_the_copy_it_topped_up_not_a_new_one(
     swap = report["side_copy_swap"]
     assert swap["swapped"] is True and swap["name"] == held, swap
     assert swaps == [{"name": held, "auto_restore": True}], swaps
+
+
+# --- #4540: a fresh re-embed the run cannot outlive is refused before it starts ---------
+#
+# Task #81 declares `timeout_seconds: 3000` and `app/autonomy.py` clamps a declared timeout
+# to `min(declared, max_duration - 30)` for the scheduled-task source
+# (`workers.sources.scheduled-task.max_duration_seconds` = 3600), so the effective ceiling is
+# 3,570 s for ANY value of the task's own field and option 1 of the item is a no-op. That is
+# still ~1,400 s short of a fresh build at today's corpus: the committed witness rate
+# (4,272.0 s / 78,980 live vectors = 0.054089642947581666 s/vector, re-read on 2026-11-24
+# from the route's artifact
+# `~/lloyd-data/_pipeline/reflection/qmd-side-copy-rebuild-20261108-2026-11-08T050033.json`)
+# prices 2026-11-24's 91,791 live vectors at 4,964.9 s. And the build cannot be detached:
+# `git grep -n "Popen\|start_new_session\|nohup" --
+# scripts/maintenance/qmd_index_maintenance.py` is empty, so `run_side_copy_route` runs
+# in-process and dies with the run — before `_write_report`, whose calls sit after the build
+# block, so the cancelled night leaves no dated report at all. The bound that replaces that
+# silent death lives in the FRESH branch of `scheduled_side_copy_build`, after the
+# held-copy lookup: a top-up of a copy that already exists is priced by its own recent
+# measurements (123.6 s, 155.3 s, 186.5 s, 207.5 s, 218.7 s, 229.9 s, 266.3 s, 347.2 s), not
+# by the price of a build it is not making.
+
+#: OCT_20_SHAPE's occupancy with a corpus whose projected fresh build FITS the budget:
+#: 40,000 x 0.054089642947581666 = 2,163.6 s against a budget of 2,400. #4540 turns the
+#: transcribed 60,505-vector night into a refusal (3,272.7 s), so the nodes whose clause is
+#: about a different rail — one build per night, the date-derived name, the swap taking the
+#: copy it built — run under this shape rather than asserting a refusal they are not about.
+#: `vec0.occupancy` stays at the artifact's 0.3285 because that key, not the vector count,
+#: is what makes a night `capacity_approaching`.
+OCT_20_UNDER_BUDGET = {**OCT_20_SHAPE, "vectors_live": 40_000, "vectors_total": 40_037}
+
+#: 2026-11-24's measured live-vector count (`before.vectors_live` in that date's report),
+#: the night this was filed. The occupancy that night was 0.5909 — NOT yet approaching,
+#: which is why the shapes below keep the artifact's 0.3285 to reach a build night at all
+#: and move only the vector count.
+OVER_BUDGET_LIVE_VECTORS = 91_791
+
+#: 0.054089642947581666 x 91,791, the projected cost of the fresh build on that corpus.
+OVER_BUDGET_PROJECTED_S = 4964.9
+
+#: The largest occupancy-neutral corpus that still BUILDS. The true crossing is
+#: 2,400 / 0.054089642947581666 = 44,370.79 live vectors, so 44,370 projects to
+#: 2,399.96 s and the bound, being strictly greater-than, lets it build; 44,371 projects
+#: to 2,400.01 s and is refused.
+THRESHOLD_LIVE_VECTORS = 44_370
+REFUSED_LIVE_VECTORS = 44_371
+
+
+def _over_budget_shape() -> dict:
+    """The 2026-11-24 corpus on a build night's occupancy."""
+    return {**OCT_20_SHAPE, "vectors_live": OVER_BUDGET_LIVE_VECTORS,
+            "vectors_total": 91_967}
+
+
+def test_a_fresh_rebuild_that_cannot_fit_the_budget_starts_nothing_and_says_why(
+        monkeypatch, tmp_path, capsys):
+    """Clause 1: zero calls to the route, and a refusal naming the seconds and the budget.
+
+    The state is the live one: the 2026-11-20 swap renamed the last held copy, so
+    `newest_held_side_copy` returns None and the fresh branch is the only branch — which is
+    what the night of 2026-11-27 will meet. 91,791 live vectors project to 4,964.9 s against
+    `SCHEDULED_BUILD_BUDGET_S` = 2400, so the function must return before the route is
+    reached: `builds` is the list `rebuild_side_copy` was called with, and it has to be
+    empty. The refusal text carries both quantities a reader needs to check the arithmetic,
+    and the swap half takes nothing because it takes only a `built` or `reused` name.
+    """
+    at = _local_wallclock(5, 1)
+    swaps: list[dict] = []
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, shape=_over_budget_shape(),
+        swap_recorder=swaps)
+
+    assert builds == [], f"the run asked for a re-embed it cannot outlive: {builds}"
+    block = report["side_copy_build"]
+    assert block["build_launched"] is False, block
+    assert "refused" in block, block
+    assert "built" not in block and "reused" not in block, block
+    assert "4,965" in block["refused"], block["refused"]
+    assert "2400 s build budget" in block["refused"], block["refused"]
+    assert "side copy build REFUSED" in out, out
+    assert swaps == [] and report["side_copy_swap"].get("swapped") is not True, (
+        f"a refused build still swapped something: {report['side_copy_swap']}")
+    assert rc == 0, f"a bonus-build refusal red the nightly: exit {rc}"
+
+
+def test_the_fresh_build_projection_is_derived_and_re_derivable_from_the_report(
+        monkeypatch, tmp_path, capsys):
+    """Clause 2: the number is computed from the witness rate x this run's own measurement.
+
+    Two directions on purpose. From the constants down: 4,272.0 / 78,980 is the rate, the
+    rate x 91,791 is 4,964.9 s, and a run whose report says one of those numbers and not the
+    other has a bug in the projection rather than in the corpus. From the report back up:
+    the block must carry all four quantities — rate, vectors, projection, budget — because
+    the owed post-landing check reads the dated JSON a week from now, not this file.
+
+    `fresh_build_projection(None)` returning None is the other half of the same clause: an
+    unmeasured index is not a cheap one, but nothing is PROVED about its cost either, so the
+    build goes ahead as today and says so, rather than a measurement gap becoming a second
+    silent skip.
+    """
+    rate = (m.SIDE_COPY_BUILD_WITNESS_ELAPSED_S
+            / m.SIDE_COPY_BUILD_WITNESS_VECTORS_LIVE)
+    assert m.SIDE_COPY_BUILD_WITNESS_ELAPSED_S == 4272.0
+    assert m.SIDE_COPY_BUILD_WITNESS_VECTORS_LIVE == 78_980
+    assert rate == pytest.approx(0.054089642947581666, rel=1e-12)
+    assert m.fresh_build_projection(OVER_BUDGET_LIVE_VECTORS)["projected_s"] == (
+        pytest.approx(OVER_BUDGET_PROJECTED_S, abs=0.05))
+    assert m.fresh_build_projection(None) is None
+    assert m.fresh_build_projection(0) is None
+    assert m.fresh_build_projection("not a count") is None
+    # The two sides of the crossing are pinned by which side of the budget they fall on,
+    # not by an equality: 44,370 live vectors project to 2,399.96 s and build; 44,371
+    # project to 2,400.01 s and are refused.
+    assert m.fresh_build_projection(THRESHOLD_LIVE_VECTORS)["projected_s"] < 2400.0
+    assert m.fresh_build_projection(REFUSED_LIVE_VECTORS)["projected_s"] > 2400.0
+
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=_local_wallclock(5, 1),
+        shape=_over_budget_shape())
+    proj = report["side_copy_build"]["projection"]
+    assert proj["rate_s_per_vector"] == pytest.approx(rate, rel=1e-12), proj
+    assert proj["vectors_live"] == OVER_BUDGET_LIVE_VECTORS, proj
+    assert proj["budget_s"] == m.SCHEDULED_BUILD_BUDGET_S, proj
+    assert proj["projected_s"] == pytest.approx(
+        proj["rate_s_per_vector"] * proj["vectors_live"], rel=1e-12), proj
+
+
+def test_the_bound_refuses_only_the_over_budget_fresh_night_and_moves_no_exit_code(
+        monkeypatch, tmp_path, capsys):
+    """Clause 3, all three paths of one night in one node: built, reused, refused.
+
+    * under budget and no held copy: the fresh build still happens, named for the run date,
+      and `projection` is recorded so the reader can see the bound ran and did not fire.
+    * over budget but a marker-bearing copy from EARLIER in the cycle is on disk: that copy
+      is still topped up under its own name — the bound sits in the fresh branch, and a
+      top-up's own measured cost (123.6-347.2 s across the eight recent ones) is nowhere
+      near it. `projection` is absent here by design: it prices a build that is not
+      happening, and a number for a build that did not run in a report that also says
+      `reused` is exactly the kind of figure a later reader has to un-invent.
+    * over budget with no held copy: refused (pinned in detail by the node above).
+
+    `rc == 0` on all three is the rail #3460 clause 3 already had and this re-pins for the
+    new path: a bonus build that declines must not red a healthy nightly.
+    """
+    at = _local_wallclock(5, 1)
+    tonight = f"rebuild-{at:%Y%m%d}"
+    held = "rebuild-20261101"
+
+    under_rc, under, _u, _s, under_builds, _e = _scheduled_nightly(
+        monkeypatch, tmp_path / "under", capsys, at=at, shape=OCT_20_UNDER_BUDGET)
+    assert under_builds == [tonight], under_builds
+    assert under["side_copy_build"]["built"] == tonight, under["side_copy_build"]
+    assert under["side_copy_build"]["projection"]["vectors_live"] == 40_000
+    assert under["side_copy_build"]["projection"]["projected_s"] < 2400
+    assert under_rc == 0, under_rc
+
+    topup_rc, topup, _t, _s2, topup_builds, _e2 = _scheduled_nightly(
+        monkeypatch, tmp_path / "held", capsys, at=at, shape=_over_budget_shape(),
+        copy_present=held)
+    assert topup_builds == [held], (
+        f"a held copy was not topped up despite the bound: {topup_builds}")
+    assert topup["side_copy_build"]["reused"] == held, topup["side_copy_build"]
+    assert "refused" not in topup["side_copy_build"], topup["side_copy_build"]
+    assert "projection" not in topup["side_copy_build"], (
+        f"a top-up recorded a fresh-build price: {topup['side_copy_build']}")
+    assert topup_rc == 0, topup_rc
+
+    # Its own cache dir: the held copy seeded for the night above lives in `tmp_path/held`
+    # and would answer this night's lookup, which is the opposite of what this path claims.
+    over_rc, over, _o, _s3, over_builds, _e3 = _scheduled_nightly(
+        monkeypatch, tmp_path / "refused", capsys, at=at, shape=_over_budget_shape())
+    assert over_builds == [] and "refused" in over["side_copy_build"], over["side_copy_build"]
+    assert over_rc == 0, over_rc
+
+
+def test_the_refusing_night_still_writes_its_dated_report_with_the_projection_in_it(
+        monkeypatch, tmp_path, capsys):
+    """Clause 4: the report survives, which is what today's cancelled run loses.
+
+    `_write_report` is reached only AFTER the build block in `main()` — its two calls sit at
+    the end of the no-work and mutating branches — so a build killed at the run's effective
+    3,570 s ceiling writes nothing for that date: the next night reads a stale occupancy and
+    the prune that ran is unrecorded. This node asserts the file exists on disk by the
+    date-named path a reader would go looking at, and that the refusal is in the BYTES and
+    not merely in a dict the fixture happens to return, because the owed post-landing check
+    is a grep of that file a week from now.
+
+    The report's other verdicts ride along unharmed — `capacity_approaching` true,
+    `need_capacity` false — which is the point of refusing instead of trying: the nightly
+    still reports the index.
+    """
+    at = _local_wallclock(5, 1)
+    rc, report, out, shell, builds, err = _scheduled_nightly(
+        monkeypatch, tmp_path, capsys, at=at, shape=_over_budget_shape())
+
+    path = m.REPORT_DIR / f"{m.REPORT_PREFIX}{at:%Y-%m-%d}.json"
+    assert path.exists(), (
+        f"the refusing night wrote no dated report; {m.REPORT_DIR} holds "
+        f"{sorted(p.name for p in m.REPORT_DIR.iterdir())}")
+    raw = path.read_text(encoding="utf-8")
+    assert '"side_copy_build"' in raw and '"projection"' in raw, raw[:400]
+    assert "91791" in raw and "4964" in raw and '"budget_s": 2400' in raw, raw[:600]
+    assert report["capacity_approaching"] is True and report["need_capacity"] is False, (
+        {k: report[k] for k in ("capacity_approaching", "need_capacity")})
+    assert rc == 0, rc
+
+def test_the_task_81_body_states_the_ceiling_the_pool_clamp_actually_gives():
+    """Clause 5: the task-81 body's 3,570 s is the clamp, not folklore.
+
+    That body is documentation, and a documentation figure goes stale silently:
+    `timeout_seconds: 5700` sat in its front matter as a size no run could ever honour. So
+    the number the body now carries is checked against the two things that produce it —
+    `_POOL_TIMEOUT_MARGIN` in `app/autonomy.py` and
+    `workers.sources.scheduled-task.max_duration_seconds` in `config.yaml`, the fleet-wide
+    pool timer — and against the body's own wording. Raise the source, shrink the margin, or
+    delete the sentence, and this goes red rather than leaving the body to teach a next
+    reader a ceiling that no longer exists.
+
+    Reads the body through `AUTONOMY_DIR`, the path the suite already redirects, so it
+    travels with a checkout; skipped where no task file is installed, because a missing
+    file is a deployment fact and not a wrong figure.
+    """
+    import re
+
+    from app.autonomy import _POOL_TIMEOUT_MARGIN
+    from agent_mcp.autonomy import AUTONOMY_DIR
+
+    import yaml
+    cfg = yaml.safe_load((Path(__file__).resolve().parents[1] / "config.yaml").read_text())
+    cap = cfg["workers"]["sources"]["scheduled-task"]["max_duration_seconds"]
+    ceiling = int(cap) - _POOL_TIMEOUT_MARGIN
+    assert ceiling == 3_570, ceiling
+
+    body_path = AUTONOMY_DIR / "81-qmd-index-maintenance.md"
+    if not body_path.exists():
+        pytest.skip(f"no installed task body at {body_path}")
+    body = body_path.read_text(encoding="utf-8")
+
+    assert ("min(timeout_seconds, workers.sources.scheduled-task.max_duration_seconds - 30)"
+            in body), "the body no longer states the clamp as an expression"
+    assert "3,570" in body, body[:200]
+    flat = " ".join(body.split())
+    assert "timeout_seconds" in flat and "changes nothing" in flat, (
+        "the body no longer says in one sentence that raising the declared field cannot "
+        "lift the ceiling — the claim that keeps option 1 from being re-proposed")
+    declared = re.search(r"^timeout_seconds:\s*(\d+)$", body, re.M)
+    assert declared and int(declared.group(1)) <= ceiling, (
+        f"the body explains a clamp while the front matter climbed back above it: "
+        f"timeout_seconds={declared and declared.group(1)}, ceiling {ceiling}")
