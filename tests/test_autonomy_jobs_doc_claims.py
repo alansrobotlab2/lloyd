@@ -3859,19 +3859,44 @@ DIGESTER_SKILL = Path.home() / "obsidian" / "skills" / "documentation-digester" 
 PROBES_HEADER = "## Probes That Read As Verdicts But Are Not"
 
 
-def _probes_section() -> str:
+def _probes_section(text: str | None = None) -> str:
     """§Probes That Read As Verdicts But Are Not, raw, to the next heading.
 
-    Raw and not `_flat`, because the bullet is the unit of clause 1 — a flattened
-    section has no `\\n- ` left to split on, and a test that split it anyway would
-    find one "bullet" containing everything and pass on any wording. Callers flatten
-    each bullet themselves before matching a wrapped sentence inside it.
+    The cut is **line-anchored**: the heading counts only where it opens its own
+    line, the way `_cadence_rows` reads `## <Group>:` under `re.M`. A whole-file
+    `split(PROBES_HEADER, 1)` cannot tell a heading from the same words quoted in
+    prose, and this skill quotes them on purpose — #4529 caught the Action-Items
+    prose naming §Probes inside backticks at `SKILL.md:231`, 36 lines above the real
+    heading at `:267`, and the first-occurrence split stopped there and handed back
+    the 221 characters of prose that follow it instead of the 61-line section both
+    #2482 rules live in. Both nodes went red with both rules intact. An inline
+    mention is preceded by a backtick, never a bare newline, so `re.M`'s `^` walks
+    past it. Taking the *last* occurrence passes on today's file too and is wrong
+    the first time a second mention lands below the heading: the line start is the
+    property, "last" is a coincidence.
+
+    The presence guard is anchored for the same reason the guard exists at all —
+    `PROBES_HEADER in text` is satisfied by the quoted mention alone, so a guard
+    that is not anchored feeding an anchored cut raises `IndexError` on a deleted
+    heading, a traceback where a named message is the entire point of the check
+    (#4529's hazard (a)).
+
+    `text` is a parameter, not a live read, so the seeded nodes below run the
+    identical reader over a copy of the skill whose heading has been unanchored or
+    deleted — #2806's seeded heading and #2833's re-mark guard — with the live file
+    as the default. Raw and not `_flat`, because the bullet is the unit of clause 1
+    — a flattened section has no `\\n- ` left to split on, and a test that split it
+    anyway would find one "bullet" containing everything and pass on any wording.
+    Callers flatten each bullet themselves before matching a wrapped sentence inside
+    it.
     """
-    text = DIGESTER_SKILL.read_text(encoding="utf-8")
-    assert PROBES_HEADER in text, (
-        f"{DIGESTER_SKILL} no longer carries {PROBES_HEADER!r}, the section every "
-        "probe-lie rule lives in — #2482's filing rule has no home")
-    return text.split(PROBES_HEADER, 1)[1].split("\n## ", 1)[0]
+    if text is None:
+        text = DIGESTER_SKILL.read_text(encoding="utf-8")
+    found = re.search(rf"^{re.escape(PROBES_HEADER)}[ \t]*$", text, re.M)
+    assert found, (
+        f"{DIGESTER_SKILL} no longer carries {PROBES_HEADER!r} on a line of its own, "
+        "the section every probe-lie rule lives in — #2482's filing rule has no home")
+    return text[found.end():].split("\n## ", 1)[0]
 
 
 @live_vault
@@ -3929,6 +3954,199 @@ def test_a_task_id_cited_by_the_digester_must_resolve_before_it_is_called_a_gate
     assert "0 files" in rule, (
         "the standing control — no wake-word autonomy task exists, live or archived — "
         "is what makes this rule checkable rather than advice")
+
+
+# ── #4529 — the cut above is a heading, not the heading's words anywhere ───────
+#
+# `documentation-digester` cites its own section names in prose, which is this
+# runbook's style; the file has carried `PROBES_HEADER` twice since vault commit
+# `f1ea2a577` — inline inside backticks in §Action Items at `SKILL.md:231`, and the
+# real heading at `:267`. A first-occurrence split over a whole-file read stopped at
+# the first and returned 221 characters of prose, so both #2482 nodes reported their
+# rule deleted while `grep -c` still returned 1 for each. These nodes hold the
+# anchored reader: the synthetic pair runs inside the gate, the `live_vault` pair
+# grades it against the file the nightly skills pass actually rewrites.
+
+
+def _seed_skill(heading: str | None, *, with_inline: bool = True) -> str:
+    """A skill body in the digester's shape, for running the reader over a copy.
+
+    §Action Items prose that names §Probes in backticks, then `heading` as the whole
+    line where the real heading would be, then the probe-lie intro, five bullets and a
+    following section. `heading` is a string the caller controls — `PROBES_HEADER`, a
+    backtick-wrapped copy of it, or `None` for a file whose heading has gone — so each
+    node seeds exactly the one state it is asking about while the prose mention stays
+    as the nightly writer left it. #2806's seeded heading and #2833's re-mark guard
+    established the pattern: the reader under test reads the seed, not the live file.
+    """
+    seed = "# SKILL: seeded-digester\n\n## Action Items\n\nNothing here is a probe.\n\n"
+    if with_inline:
+        seed += (
+            "It is a different test from the one under\n"
+            f"`{PROBES_HEADER}` requiring a filed claim to carry the command line\n"
+            "that produced it, and a change can carry that line and still not execute "
+            "on this box.\n\n"
+        )
+    if heading is not None:
+        seed += heading + "\n\n"
+    seed += "Five ways this pass's own probes lie, each with the control that catches " \
+            "it:\n\n"
+    for n in range(1, 6):
+        seed += (f"- **probe {n} reads as a verdict** — the control that catches it, "
+                 "carrying the command line that produced it.\n")
+    return seed + "\n## Prose Rules\n\nNothing to read here.\n"
+
+
+def test_an_inline_mention_of_the_probes_heading_cannot_steal_the_section():
+    """#4529 clause 3, on a seeded skill: the slice is the section, not the prose.
+
+    The seed is `documentation-digester` in miniature — the mention three lines above
+    the heading, five bullets under it, another `## ` section after them. The
+    first-occurrence split is asserted to come back with the wrong answer on that same
+    seed, which is what makes the seed a witness rather than a decoration: a node that
+    only ran the fixed reader over text the broken reader handled just as well could
+    never fail.
+    """
+    seed = _seed_skill(PROBES_HEADER)
+    stolen = seed.split(PROBES_HEADER, 1)[1].split("\n## ", 1)[0]
+    assert "Five ways this pass's own probes lie" not in stolen, (
+        "the seed stopped being adversarial: a first-occurrence split now finds the "
+        "section by itself, so this node can no longer tell the two readers apart")
+    section = _probes_section(seed)
+    assert section.startswith("\n"), (
+        "the slice does not begin just after the heading line, so the cut is not at a "
+        f"heading occupying its own line: {section[:60]!r}")
+    assert "Five ways this pass's own probes lie" in _flat(section), (
+        "the located section is not the one that carries the probe-lie intro")
+    bullets = [b for b in section.split("\n- ")[1:] if b.strip()]
+    assert len(bullets) == 5, (
+        f"the located section holds {len(bullets)} bullets, not the seeded 5, so it is "
+        "not the whole section from its heading to the next one")
+    assert "not execute on this box" not in section, (
+        "the slice still runs through the prose that follows the inline mention")
+    assert "\n## " not in section, "the slice runs past the next `## ` heading"
+
+
+def test_a_prose_mention_alone_cannot_satisfy_the_heading_guard():
+    """#4529 clauses 2 and 4: an unanchored heading fails the guard, not the cut.
+
+    The same seed with the heading pushed off column 1 by the backtick a prose mention
+    would put there, so the file names §Probes twice and neither time on a line of its
+    own. `PROBES_HEADER in seed` is still true, and that is the trap #4529 named: a
+    guard written that way passes and then hands the work to a cut that cannot find its
+    heading, which answers with an `IndexError` on `[0]` of a one-element split. A
+    named message is the whole value of this helper — a skill rewrite has to read as
+    "§Probes has gone missing", never as a traceback.
+    """
+    seed = _seed_skill(f"`{PROBES_HEADER}`")
+    assert PROBES_HEADER in seed, (
+        "the seed lost its prose mention, so the presence guard is no longer being "
+        "asked the question it has to answer")
+    assert re.search(rf"^{re.escape(PROBES_HEADER)}[ \t]*$", seed, re.M) is None, (
+        "the seeded heading still stands on its own line, so there is no heading "
+        "named-in-prose for the guard to refuse")
+    with pytest.raises(AssertionError, match="no longer carries") as raised:
+        _probes_section(seed)
+    assert "#2482's filing rule has no home" in str(raised.value), (
+        "the reader failed with an AssertionError that is not its named message")
+
+
+def test_a_skill_with_no_probes_heading_fails_with_the_named_message():
+    """#4529 clause 4, on a seeded skill: the heading absent altogether.
+
+    The event the message exists for — #2482's rules leaving the skill — and the half
+    of it that an unanchored `in` test also gets right, so it is pinned rather than
+    assumed: an anchored guard must refuse with the same words, not with silence and
+    not with a different exception. `pytest.raises(AssertionError)` is the "other
+    traceback" check, since an `IndexError` escaping here fails the node.
+    """
+    seed = _seed_skill(None, with_inline=False)
+    assert PROBES_HEADER not in seed, "the seed still carries the heading literal"
+    with pytest.raises(AssertionError, match="no longer carries") as raised:
+        _probes_section(seed)
+    assert "#2482's filing rule has no home" in str(raised.value), (
+        "a missing heading failed with an unnamed assertion")
+
+
+@live_vault
+def test_the_live_skill_copy_with_its_real_heading_unanchored_fails_loudly():
+    """#4529 clause 2, on a copy of the live skill rather than a synthetic shape.
+
+    Reads `DIGESTER_SKILL`, wraps its real heading in backticks so the heading is no
+    longer present at a line start, and leaves the `:231` mention exactly as it is: the
+    file then names §Probes twice, both times inline. The skill itself is only read —
+    clause 5 is that nothing here writes it.
+    """
+    text = DIGESTER_SKILL.read_text(encoding="utf-8")
+    real = re.search(rf"^{re.escape(PROBES_HEADER)}[ \t]*$", text, re.M)
+    assert real, (
+        f"{DIGESTER_SKILL} has no {PROBES_HEADER!r} on a line of its own left to "
+        "unanchor, so this node has no seed — re-measure #4529 against the live skill")
+    seed = (text[:real.start()] + "`" + text[real.start():real.end()] + "`"
+            + text[real.end():])
+    assert PROBES_HEADER in seed, (
+        "unanchoring the heading removed the literal instead of moving it off the line "
+        "start, which is not the state clause 2 asks for")
+    assert re.search(rf"^{re.escape(PROBES_HEADER)}[ \t]*$", seed, re.M) is None, (
+        "the copy still holds a heading on its own line, so the guard is not being "
+        "asked to refuse a heading named in prose")
+    with pytest.raises(AssertionError, match="no longer carries"):
+        _probes_section(seed)
+
+
+@live_vault
+def test_the_live_section_is_the_rules_section_and_not_the_inline_prose():
+    """#4529 clause 3, on the live file: what the reader returns today.
+
+    Before the fix this call returned the 221 characters of §Action Items prose after
+    `:231`, which is how both #2482 nodes came to report a deleted rule that `grep -c`
+    still found once. The shape is what distinguishes the two answers — the slice
+    begins at the end of a heading line, carries the intro and its five bullets, and
+    stops at the next `## `. Nothing above the bullet floor #2482 clause 1 already
+    owns is counted, because the nightly skills pass may legitimately add a sixth
+    probe-lie.
+    """
+    section = _probes_section()
+    assert section.startswith("\n"), (
+        "the live section does not begin just after a heading on its own line: "
+        f"{section[:80]!r}")
+    assert "Five ways this pass's own probes lie" in _flat(section), (
+        "the located section is not §Probes: its intro is not in it")
+    bullets = [b for b in section.split("\n- ")[1:] if b.strip()]
+    assert len(bullets) >= 5, (
+        f"the located section holds {len(bullets)} bullets, so it is not the section "
+        "from its heading to the next one — four is the pre-#2482 state")
+    assert "command line that produced it" in _flat(bullets[4]), (
+        "the fifth bullet of the located section is not the artifact rule, so the "
+        "slice stops short of the end of §Probes")
+    assert "not execute on this box" not in section, (
+        "the slice is the prose after the inline mention again — #4529's stolen cut")
+    assert "\n## " not in section, "the live section runs past its next `## ` heading"
+
+
+@live_vault
+def test_the_skill_the_anchored_reader_relies_on_is_still_the_one_that_shipped_the_bug():
+    """#4529 clause 5, as far as a node can reach it: the guarded prose did not move.
+
+    The half of the clause that says *this diff* leaves `SKILL.md` byte-unchanged is
+    settled by the round's own path list, not here — the vault is a second tree that no
+    `~/lloyd` diff can contain at all. What is checkable is the other half: each of the
+    two rules the #2482 nodes guard still appears exactly once in the file and still
+    inside the section the anchored reader locates, so those nodes are green because
+    the rules are there and not because a prose edit moved a rule or removed the
+    mention. Deliberately not pinned: how many times `PROBES_HEADER` occurs. The inline
+    mention is the nightly writer's own prose, deleting it would be a legitimate edit,
+    and a fix that needed the defect to survive would not be a fix.
+    """
+    text = DIGESTER_SKILL.read_text(encoding="utf-8")
+    section = _flat(_probes_section())
+    for rule in ("Five ways this pass's own probes lie",
+                 "Resolve a cited task id before calling it a live gate"):
+        assert text.count(rule) == 1, (
+            f"{rule!r} occurs {text.count(rule)} times in {DIGESTER_SKILL}; the #2482 "
+            "nodes read it out of §Probes, so a copy elsewhere means the guarded rule "
+            "moved rather than stayed")
+        assert rule in section, f"{rule!r} is not in the located §Probes"
 
 
 # ── #2630 — the seven watch-the-machinery jobs get entries; the digests lose rows ─
