@@ -290,3 +290,227 @@ def test_the_index_glance_map_names_every_gpu_2_candidate():
     assert not unnamed, f"index.md's GPU 2 row omits {unnamed} of {pinned}: {row!r}"
 
 
+# --- #4473: qmd's card, derived across BOTH surfaces a runner can set it ------
+
+SYSTEMD = ROOT / "agent-services" / "systemd"
+QMD_DAEMON_CONF = CONF_D / "agent-qmd-daemon.conf"
+CLEANUP_UNIT = SYSTEMD / "lloyd-qmd-cleanup.service"
+
+#: Where a qmd runner lives, and the glob that names it. Globs rather than a list,
+#: because #4473 is exactly the drift a list permits. `a372c876` (2026-11-10, "move
+#: qmd's whole stack onto the 3090 at index 4") rewrote `agent-qmd-daemon.conf` and
+#: `agent-qmd-watcher.conf` and never touched the nightly cleanup unit, and the only
+#: guard in the tree — `_derived_cards` above — iterates `conf.d/*.conf`, so the file
+#: that went stale was never opened by anything that could have noticed it. A fourth
+#: qmd runner has to be swept the day it appears, not the day someone remembers this.
+QMD_RUNNER_SURFACES = {CONF_D: "agent-qmd-*.conf", SYSTEMD: "lloyd-qmd-*"}
+
+#: supervisord spells the key `environment=` and systemd spells it `Environment=`.
+#: Both spellings in one reader, because a reader that recognises only one of them is
+#: the same blind spot redrawn — and every line, because systemd applies all its
+#: `Environment=` keys where an INI reader keeps the last one.
+_ENV_KEY = re.compile(r"^\s*(?:environment|Environment)\s*=")
+
+#: The assignment qmd's runners use on both surfaces. `GPU="2"` — supervisord's local
+#: spelling, what `_PIN` above exists to read — names no qmd runner today, and one
+#: that started using it would be reported by `_runner_pin` as a runner with no pin.
+#: The value ends at a comma as well as at whitespace because supervisord joins its
+#: pairs with commas: `CUDA_VISIBLE_DEVICES="4",LD_LIBRARY_PATH="…"` is one field, not
+#: a card list, and a value that ran to the end of the line read every later variable
+#: as a card.
+_CUDA_ASSIGN = re.compile(r"CUDA_VISIBLE_DEVICES=([^\s,]+)")
+
+#: The lines that make a file actually run something, on either surface.
+_EXEC_KEY = re.compile(r"^\s*(?:ExecStart|command)\s*=")
+
+
+def _env_declarations(text: str) -> list[str]:
+    """Every environment-setting line in a runner file, on either surface.
+
+    Both surfaces and every line are needed at once: `lloyd-qmd-cleanup.service`
+    splits its environment over three `Environment=` lines with the card on neither
+    the first nor the last, so a reader scoped to one spelling or one line reads a
+    runner while missing the part of it that matters. `_env_line` above is the
+    conf-surface reader #1447 and #2698 needed and is left alone; this is the one
+    #4473 needed."""
+    return [ln.strip() for ln in text.splitlines() if _ENV_KEY.match(ln)]
+
+
+def _cuda_cards_in(text: str) -> set[str]:
+    """Every card INDEX a `CUDA_VISIBLE_DEVICES=` assignment names in `text`.
+
+    Quotes stripped, so supervisord's `CUDA_VISIBLE_DEVICES="4"` and systemd's bare
+    `CUDA_VISIBLE_DEVICES=4` parse alike; comma lists split, because
+    `CUDA_VISIBLE_DEVICES=0,1` names two cards and a guard that read it as one would
+    miss which one it is talking about; and only digit tokens count, because a UUID
+    pin (`agent-tts-omni.conf`, read by `UUID_TO_CARD` above) is not an index and
+    guessing at one here would be a second, lazier resolution of the same question.
+    Whole-file, because the clause this serves is about the retired index surviving
+    anywhere under `agent-services/systemd/`."""
+    return {card for m in _CUDA_ASSIGN.finditer(text.replace('"', ""))
+            for card in m.group(1).split(",") if card.isdigit()}
+
+
+def _runner_pin(text: str) -> str | None:
+    """The one card a runner's own environment declarations pin, or None when they
+    pin none. Scoped to the declarations and not to the file:
+    `test_the_derivation_reads_the_environment_line_not_its_prose` above is the
+    measured reason a whole-file scan is the wrong instrument for a pin.
+
+    More than one card raises rather than resolves: every node in this section asks
+    which card qmd is on, and a runner that spreads across two has made that question
+    ambiguous — that is a rewrite of these nodes on purpose, not a guess to be filed
+    as a pass."""
+    cards = _cuda_cards_in("\n".join(_env_declarations(text)))
+    assert len(cards) <= 1, (
+        f"a runner pins {sorted(cards)}: this section asks which card qmd runs on, so a "
+        "multi-card runner needs the question restated rather than answered arbitrarily")
+    return next(iter(cards)) if cards else None
+
+
+def _qmd_runners() -> dict[str, str]:
+    """`{file name: card index}` for every qmd runner, gathered from both surfaces.
+
+    A file that runs nothing is excluded by its shape rather than by its name:
+    `lloyd-qmd-cleanup.timer` only schedules the unit and systemd gives a timer no
+    process of its own, so there is no environment for a timer to pin — asserted
+    rather than assumed, so the exclusion cannot quietly become an omission. Anything
+    that does run something must pin a card, because a runner with no pin inherits
+    whatever card its caller happened to have."""
+    runners: dict[str, str] = {}
+    for directory, pattern in QMD_RUNNER_SURFACES.items():
+        for path in sorted(directory.glob(pattern)):
+            text = path.read_text(encoding="utf-8")
+            if not any(_EXEC_KEY.match(ln) for ln in text.splitlines()):
+                assert not _env_declarations(text), (
+                    f"{path.name} runs nothing yet sets an environment — this exclusion "
+                    "is for timers, not for a runner that lost its pin")
+                continue
+            pin = _runner_pin(text)
+            assert pin is not None, (
+                f"{path.name} runs qmd with no card pinned in its environment")
+            runners[path.name] = pin
+    assert runners, "no qmd runner pins a card on either surface: the glob or the parse is broken"
+    return runners
+
+
+def _off_card(runners: dict[str, str]) -> dict[str, str]:
+    """`{name: card}` for every qmd runner disagreeing with the daemon's card. The
+    daemon is the reference because it is the long-lived process holding qmd's
+    embedder and reranker — the one the 2026-11-10 move was making room for."""
+    home = runners["agent-qmd-daemon.conf"]
+    return {name: card for name, card in runners.items() if card != home}
+
+
+def test_qmd_runners_are_swept_from_both_surfaces_and_agree_on_one_card():
+    """Clause 2. qmd is one stack, so the predicate is one card, and the denominator
+    is a glob over both surfaces because the drift this node exists for was a file on
+    the surface no guard read. Today's three runners are a floor, not a ceiling: a
+    fourth runner is swept, not rejected."""
+    runners = _qmd_runners()
+    confs = {n for n in runners if n.endswith(".conf")}
+    units = {n for n in runners if n.endswith(".service")}
+    assert confs and units, f"the sweep reached only one surface: {sorted(runners)}"
+    assert {"agent-qmd-daemon.conf", "agent-qmd-watcher.conf",
+            "lloyd-qmd-cleanup.service"} <= set(runners), sorted(runners)
+    off = _off_card(runners)
+    assert not off, (
+        f"these qmd runners are on another card than agent-qmd-daemon.conf: {off}. The "
+        "exposure is latent rather than current — cleanup binds no model today — but the "
+        "day it loads the embedder or reranker, an off-card runner puts 6+ GiB on the "
+        "desktop card a372c876 moved qmd off precisely to stop doing.")
+
+
+def test_the_sweep_goes_red_when_the_unit_slips_back_off_the_daemons_card():
+    """The node above has to be able to fail, and fail the way the real drift looked:
+    the unit naming card 0 while both confs stay on the daemon's card. The drift is
+    cut into the unit's text in memory, so the shipped unit is never edited to prove a
+    test works, and the cut is asserted to bite — the same control
+    `test_the_map_harvester_notices_a_deleted_card_line` runs."""
+    runners = _qmd_runners()
+    card = runners["agent-qmd-daemon.conf"]
+    text = CLEANUP_UNIT.read_text(encoding="utf-8")
+    drifted = re.sub(rf"CUDA_VISIBLE_DEVICES={card}", "CUDA_VISIBLE_DEVICES=0", text)
+    assert drifted != text, (
+        f"the unit no longer sets CUDA_VISIBLE_DEVICES={card} where this cut expects it, "
+        "so the control below proves nothing")
+    assert _runner_pin(drifted) == "0", "the drifted text does not read as card 0"
+    off = _off_card({**runners, CLEANUP_UNIT.name: _runner_pin(drifted)})
+    assert off == {CLEANUP_UNIT.name: "0"}, off
+
+
+def test_the_conf_only_guard_could_not_have_seen_this_drift():
+    """Not a hypothesis: the guard that went green on the 2026-11-10 move is
+    `_derived_cards` above, and these are its blind spots measured on the file that
+    rotted. Its directory is `conf.d`, so a unit is never opened; and handed the text
+    anyway, `_PIN` demands a quoted value while systemd writes the pin bare. Both
+    assertions fail the moment someone widens the old reader, which is the point — the
+    hole gets closed, not duplicated around."""
+    text = CLEANUP_UNIT.read_text(encoding="utf-8")
+    assert _env_line(text) == "", "the conf-surface reader now sees this unit: the trap moved"
+    assert _PIN.search(text) is None, "the quoted-only pin regex now matches a systemd line"
+    assert "lloyd-qmd-cleanup" not in {c for v in _derived_cards().values() for c in v}
+    assert _runner_pin(text) == _qmd_runners()["agent-qmd-daemon.conf"]
+
+
+def test_the_cleanup_unit_pins_the_card_the_qmd_daemon_conf_pins():
+    """Clause 1. One card for the unit and the daemon conf, DERIVED rather than
+    compared to a literal: the daemon conf is where qmd's card lives, so a hard-coded
+    4 in this node would only re-create the drift the next time qmd moves."""
+    unit_card = _runner_pin(CLEANUP_UNIT.read_text(encoding="utf-8"))
+    daemon_card = _runner_pin(QMD_DAEMON_CONF.read_text(encoding="utf-8"))
+    assert unit_card == daemon_card, (
+        f"lloyd-qmd-cleanup.service runs qmd on card {unit_card} while "
+        f"agent-qmd-daemon.conf runs it on card {daemon_card}")
+
+
+def test_no_cuda_visible_devices_zero_survives_under_agent_services_systemd():
+    """Clause 1's second half, taken literally. `0` is not "none" — it is a specific
+    card, the 3090 the desktop sits on with 3653 MiB in use as this item was filed,
+    which is the card qmd was moved off. Whole files, so a comment that spells the
+    retired assignment trips this too; `GPU 0` is the spelling for prose."""
+    offenders = sorted(
+        str(p.relative_to(SYSTEMD)) for p in SYSTEMD.rglob("*")
+        if p.is_file() and "0" in _cuda_cards_in(p.read_text(encoding="utf-8",
+                                                              errors="replace")))
+    assert not offenders, (
+        f"these files under agent-services/systemd/ still assign CUDA_VISIBLE_DEVICES to "
+        f"card 0: {offenders}. qmd's card is derived from agent-qmd-daemon.conf; a unit "
+        "naming a card of its own is how #4473 happened.")
+
+
+def test_the_cleanup_unit_keeps_every_device_free_cuda_variable():
+    """Clause 3. The card index was the only wrong thing about this unit's
+    environment; the rest is load-bearing while it binds no model. The fork's CLI
+    imports its llama.cpp bindings at module load and disposes them on the shared exit
+    path (`qmd/src/cli/qmd.ts`, in the gitignored fork clone, not in this repo's
+    tree), so the library paths are what let that import resolve on a job that
+    currently succeeds every night. These five strings are asserted because the fix
+    shape this item rejected was the one that deleted them."""
+    env = "\n".join(_env_declarations(CLEANUP_UNIT.read_text(encoding="utf-8")))
+    for decl in ("CUDA_DEVICE_ORDER=PCI_BUS_ID", "QMD_LLAMA_GPU=cuda",
+                 "LD_LIBRARY_PATH=/usr/lib:/opt/cuda/lib64",
+                 "CUDA_PATH=/opt/cuda", "CUDA_HOME=/opt/cuda"):
+        assert decl in env, f"{decl!r} is no longer in the unit's environment: {env!r}"
+
+
+def test_the_cleanup_unit_names_its_card_and_says_cleanup_loads_no_model():
+    """Clause 4. The comment is the half a future card move has to rewrite, so it is
+    checked against the derived card instead of a literal: move qmd's card and this
+    unit's own sentence goes red with the confs, which is the sweep the item asked for
+    turned into a node."""
+    unit = CLEANUP_UNIT.read_text(encoding="utf-8")
+    card = _qmd_runners()[CLEANUP_UNIT.name]
+    comments = "\n".join(ln for ln in unit.splitlines() if ln.lstrip().startswith("#"))
+    assert re.search(rf"GPU {card}\b", comments), (
+        f"nothing in the unit's comments names GPU {card}, the card its own "
+        "Environment= line sets")
+    assert "qmd cleanup" in comments and "binds no model" in comments and "today" in comments, (
+        f"the comment must say that qmd cleanup binds no model today: {comments!r}")
+    assert "conf.d" in comments, (
+        "the comment must name the other surface a card move sweeps: the unit is one of "
+        "the files that set qmd's card, not the only one")
+    assert "tests/test_gpu_placement_comments.py" in comments, (
+        "the comment must point at the node that derives the card across both surfaces")
+
+

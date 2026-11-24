@@ -9,7 +9,15 @@ Documentation=file:///home/alansrobotlab/lloyd/qmd/WORKLOG.md
 [Service]
 Type=oneshot
 Environment=HOME=%h
-Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=0 QMD_LLAMA_GPU=cuda
+# GPU 4: the card agent-qmd-daemon.conf and agent-qmd-watcher.conf name in
+# supervisor's conf.d, and the card qmd's whole stack moved to on 2026-11-10
+# (a372c876). `qmd cleanup` binds no model today — it walks the index and
+# VACUUMs, so nothing here opens a device — but the CUDA variables below stay
+# because the fork imports its llama.cpp bindings at module load and needs the
+# library paths to resolve. A card move is a sweep over conf.d and this unit
+# together: tests/test_gpu_placement_comments.py derives the card from all three
+# files and goes red on a mismatch.
+Environment=CUDA_DEVICE_ORDER=PCI_BUS_ID CUDA_VISIBLE_DEVICES=4 QMD_LLAMA_GPU=cuda
 Environment=LD_LIBRARY_PATH=/usr/lib:/opt/cuda/lib64 CUDA_PATH=/opt/cuda CUDA_HOME=/opt/cuda
 ExecStart=/usr/bin/node %h/lloyd/qmd/dist/cli/qmd.js cleanup
 TimeoutStartSec=600
