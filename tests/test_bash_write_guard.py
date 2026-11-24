@@ -1101,3 +1101,154 @@ def test_the_mover_wording_check_is_shown_able_to_fail():
         "the old-id pattern would not have caught the id #4158 re-names"
     assert not OLD_MOVER_NODE_ID.search(MOVER_NODE_ID), \
         "the old-id pattern matches the new node id, so the repo-wide node is a false red"
+
+
+# ── #4332: the placement comments state the rule, not a census of who cites it ─────
+#
+# Three comments in `app/harness/protected_paths.py` carry a tally: the read deny-set's
+# header, the #3701 fourth-policy header and the #3737 witness header each say HOW MANY
+# documents cite the guard by line number. The tally is wrong in both directions — the
+# architecture documents the read-side header names by hand cite `::SYMBOL` since #1760,
+# while the vault backlog notes that really do cite by line number are named by none of
+# them — and it is not measurable from inside a module anyway, so it rots the day somebody
+# files a note. What those sentences were standing in for is a rule, not a number: new code
+# and new comments land at the tail of that file, and an insertion never goes above a line
+# a document may have cited, because that silently re-points the citation. A rule is
+# checkable by whoever edits the file; a census is not. These nodes pin the rule's presence
+# and the tally's absence over the same three blocks, sliced by marker text exactly as
+# `_mover_wording_blocks` above slices — a line-number slice would BE the fragility.
+
+#: The three placement blocks, each sliced between two marker sentences the re-word keeps.
+#: Keyed by what a block is, so a failure names the sentence its author has to re-word. The
+#: same three marker pairs are read by the anchor node in
+#: `tests/test_architecture_coverage_doc_claims.py`, which pins that the blocks stayed
+#: comment-only; a re-section here has to move there too.
+PLACEMENT_BLOCKS: tuple[tuple[str, str, str], ...] = (
+    ("the read deny-set's header",
+     "# alone. Its header sits below line 264",
+     "# The write deny-set above answers"),
+    ("the #3701 fourth-policy header",
+     "# This is the module's FOURTH policy",
+     "# Why the vault tree cannot simply"),
+    ("the #3737 witness header",
+     "# Appended after `bash_vault_write_denial`",
+     "# What follows is one sentence"),
+)
+
+#: A tally of citing documents, in every spelling that survives a comment wrap. The wrap is
+#: the whole point: two of the three sites ended a comment line with `four` and opened the
+#: next with `# documents`, so the two words share no line and a per-line grep cannot see
+#: them. The item's own grep-shaped instrument is pattern one, so re-wording the single
+#: visible site cannot pass for re-wording all three.
+CITING_TALLIES: tuple[tuple[str, re.Pattern[str]], ...] = (
+    ("the count #4332 was filed about",
+     re.compile(r"four\s+(?:other\s+)?(?:#\s*)?documents", re.I)),
+    ("a tally of citing documents, notes or citations",
+     re.compile(r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|both|several|\d+)"
+                r"\b\s+(?:other\s+)?(?:#\s*)?(?:documents?|notes?|citations?)\b", re.I)),
+)
+
+#: Two of the three tallies exactly as they shipped, `four` closing one comment line and
+#: `# documents` opening the next. Never live prose: they are the strings the wrap-tolerant
+#: pattern is shown catching, because a scan that reports zero for every input also reports
+#: zero for the file it is grading.
+SHIPPED_WRAP_TALLIES: tuple[str, ...] = (
+    "for a documentary reason: four\n"
+    "# documents on this box cite this file BY LINE NUMBER",
+    "for the reason that block's header gives: four\n"
+    "# documents cite this file by line number",
+)
+
+#: The two halves of the rule the re-word must state, plus where it says new code goes. Each
+#: is wrap-tolerant for the reason the tallies are: comment text wraps, and a pattern that
+#: cannot cross a newline is precisely how the count hid from the shipped check.
+PLACEMENT_APPENDS = re.compile(r"(?i)\b(?:appends|appended|appending)\b")
+PLACEMENT_INSERTS = re.compile(r"(?i)\b(?:insert|inserts|inserted|insertion|inserting)\b")
+PLACEMENT_TAIL = re.compile(r"(?i)\btail\b|end\s+of\s+the\s+file|at\s+the\s+end")
+
+#: A hand-named citing document, `some/note.md`. The enumeration rotted right alongside the
+#: count, so it left with it and stays out.
+PLACEMENT_DOC_NAMES = re.compile(r"[A-Za-z0-9_./-]+\.md\b")
+
+
+def test_no_placement_comment_in_the_guard_counts_the_documents_that_cite_it():
+    """Clause 1: the tally is gone at all three sites, including the two that hide in a wrap.
+
+    The instrument matters, so it is quoted. The check this item shipped with,
+    `git grep -nE 'four (other )?documents' -- app/harness/protected_paths.py`, found 1 site
+    where a wrap-tolerant read of the same file found 3 — at lines 299, 1415 and 1517 —
+    because `four` sat at the end of a comment line and `# documents` at the start of the
+    next, so `documents` never appeared on a line with `four` at all. A round that re-worded
+    only the visible site would have turned that check green over two rot counts. So this
+    node reads the file whole and matches across the newline, then shows the pattern biting
+    on the shipped wrapped spellings: the zero it asserts is a measurement, not the shape of
+    a scan that cannot find anything.
+    """
+    text = _GUARD_TEXT.read_text(encoding="utf-8")
+    assert len(text) > 20_000, \
+        "the guard read empty, so every absence below would pass vacuously"
+    shipped_pattern = CITING_TALLIES[0][1]
+    for shipped in SHIPPED_WRAP_TALLIES:
+        assert shipped_pattern.search(shipped), (
+            f"the wrap-tolerant pattern no longer catches a tally that shipped wrapped "
+            f"({shipped[:44]!r}), so the zero asserted below would prove nothing")
+    for label, rx in CITING_TALLIES:
+        hit = rx.search(text)
+        assert not hit, (
+            f"app/harness/protected_paths.py still carries {label}: {hit.group(0)!r} at "
+            f"line {text[:hit.start()].count(chr(10)) + 1}. Documents do cite this file by "
+            "line number and no code round can re-point them, so the placement comments "
+            "have to state the rule instead of a tally nobody inside the file can measure")
+
+
+def test_each_placement_comment_states_the_tail_rule_and_names_no_census():
+    """Clause 2: every block says where new code goes, and none of them lists who cites it.
+
+    Required in each block: an appending verb, an inserting verb and the tail of the file —
+    together the rule an editor can apply, which is that new code is appended and never
+    inserted above a line something may have cited. Banned in each block: a tally of citing
+    documents, in either spelling in `CITING_TALLIES`, and any `.md` path named as one of
+    those citers. The enumeration is banned because it was as wrong as the number it went
+    with: the architecture documents the read-side header used to name converted to
+    `::SYMBOL` citations in #1760, and the vault notes that cite by line number were never
+    in the list at all.
+    """
+    guard = _GUARD_TEXT.read_text(encoding="utf-8")
+    for label, start, end in PLACEMENT_BLOCKS:
+        block = _block(guard, start, end, f"placement block ({label})")
+        missing = [name for name, rx in (("an appending verb", PLACEMENT_APPENDS),
+                                        ("an inserting verb", PLACEMENT_INSERTS),
+                                        ("the tail of the file", PLACEMENT_TAIL))
+                   if not rx.search(block)]
+        assert not missing, (
+            f"{label} no longer states the placement rule — it lacks {missing}. The tally "
+            "came out of this block, so the rule has to be what is left in it")
+        for tally_label, rx in CITING_TALLIES:
+            hit = rx.search(block)
+            assert not hit, f"{label} still carries {tally_label}: {hit.group(0)!r}"
+        named = PLACEMENT_DOC_NAMES.findall(block)
+        assert not named, (
+            f"{label} names {named} as citing documents: an enumeration is exactly as stale "
+            "as the count it travelled with, because the next note filed changes it")
+
+
+def test_the_tally_was_stripped_without_moving_what_the_guard_enforces():
+    """Clause 5: the prose came out; the shapes the guard refuses and the ruling did not.
+
+    The tally lived in comments, so comments are all that may move. Read from the imported
+    guard rather than from its text, because what is at risk is what the two lanes actually
+    enforce: `VAULT_BASH_WRITE_SHAPES` still refuses exactly the one redirect shape, and the
+    #3737 end-of-file header the tally sat inside still carries all four `RULING_WORDS` —
+    #3956, 2026-11-15, RULED, redirect-only — the same set
+    `test_the_mover_ruling_is_worded_as_settled_in_every_block_that_carries_it` pins.
+    Stripping a sentence out of that block would otherwise read as a clean comment edit
+    while quietly un-settling a ruling owed-check closed on 2026-11-15.
+    """
+    assert PP.VAULT_BASH_WRITE_SHAPES == ("a redirect into",), (
+        "the vault Bash write lane's refused shapes moved: a comment-only round may neither "
+        "widen nor narrow what `bash_vault_write_denial` refuses")
+    header = _mover_wording_blocks()["the #3737 end-of-file header"]
+    missing = [w for w in RULING_WORDS if w not in header]
+    assert not missing, (
+        f"the #3737 header lost {missing} while #4332 stripped its count, so the mover "
+        "ruling is no longer stated as settled in the block that carries it")

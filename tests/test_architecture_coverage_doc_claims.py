@@ -14848,8 +14848,9 @@ _MOVER_RULING_REGIONS: dict[str, str] = {
 #: carry. A line-number-only check could be satisfied by any in-range number; this is the
 #: half that makes the check mean something.
 _MOVER_RULING_CITATIONS: tuple[tuple[str, int, str, re.Pattern[str]], ...] = (
-    ("app/harness/protected_paths.py", 300, "the header that says four documents cite "
-     "this file by line number", re.compile(r"cite this file by line number")),
+    ("app/harness/protected_paths.py", 300, "the header that states the tail-placement rule "
+     "for documents citing this file by line number",
+     re.compile(r"cite this file by line number")),
     ("scripts/automod/backlog.py", 1426, "the witness-artifact directory constant",
      re.compile(r"^WITNESS_ARTIFACT_DIR\s*=")),
     ("scripts/automod/vault_round.py", 1934, "the refusal of a path that is not "
@@ -15648,3 +15649,73 @@ def test_the_dispatch_check_step_states_which_labels_only_the_hook_lane_refuses(
         _plain("2. **The destructive-command check.** The dispatch pass skips "
                "`_HOOK_ONLY_LABELS`, so only the hook lane refuses them. See "
                "`tests/test_safety_lane_parity.py`."))
+
+
+# ── #4332: the guard's line-cited anchors survive a comment-only re-word ────────────
+#
+# `app/harness/protected_paths.py` is cited by line number from documents a code round
+# cannot edit, and #4332 strips a stale tally of those citers out of three of its comments.
+# Stripping prose is only safe if it is net-zero, and "net-zero" is only worth asserting
+# where a citer actually reads. Two anchors are graded by something other than this node:
+# the claim row in `_MOVER_RULING_CITATIONS` reads physical line 300, and a vault review
+# note reads line 222, where `PROTECTED_SHELL_RO_ROOTS` is defined. Both are read here at
+# their absolute line, which is the same measurement their citers make — so the re-word
+# cannot pass by moving the sentence it kept and leaving the citation pointing elsewhere.
+
+#: The three placement blocks #4332 re-worded, sliced by the marker sentences it kept. The
+#: twin of `PLACEMENT_BLOCKS` in `tests/test_bash_write_guard.py`, duplicated rather than
+#: imported because these two rails stay independent files on purpose: one reads the
+#: guard's wording, this one reads its lines. A re-section of the guard reddens both, which
+#: is the point of pinning the same boundaries twice.
+_PLACEMENT_REGIONS: tuple[tuple[str, str, str], ...] = (
+    ("the read deny-set's header",
+     "# alone. Its header sits below line 264",
+     "# The write deny-set above answers"),
+    ("the #3701 fourth-policy header",
+     "# This is the module's FOURTH policy",
+     "# Why the vault tree cannot simply"),
+    ("the #3737 witness header",
+     "# Appended after `bash_vault_write_denial`",
+     "# What follows is one sentence"),
+)
+
+
+def test_the_guard_s_line_cited_anchors_survive_the_count_being_stripped():
+    """Clauses 3 and 4: the two cited lines hold their text, and the edit touched no code.
+
+    Physical line 300 still carries the phrase the claim row matches, and physical line 222
+    still defines `PROTECTED_SHELL_RO_ROOTS` — the two places anything outside this repo
+    points at, one graded by the mover rail above and one read only by a vault note, which
+    is why the second needs a node. Then the two halves of the re-word's own claim. The
+    `:300` self-citation is re-scanned with the extractor the mover rail uses, so a
+    re-word that quietly dropped it fails here rather than in the dead-row arm two lines
+    away. And comment-only: every line inside the three re-worded blocks is a comment line,
+    so no statement moved and no line count changed in the regions that were edited. The
+    guard's enforced behaviour is `tests/test_bash_write_guard.py`'s to pin, not this node's.
+    """
+    src = (ROOT / "app/harness/protected_paths.py").read_text(encoding="utf-8")
+    lines = src.splitlines()
+    assert len(lines) > 1500, "the guard read truncated, so the anchors below are meaningless"
+    assert lines[221].startswith("PROTECTED_SHELL_RO_ROOTS"), (
+        f"line 222 now reads {lines[221][:60]!r}: a vault review note cites "
+        "`protected_paths.py:222` for this definition, and #4332's re-word must not shift it")
+    assert "cite this file by line number" in lines[299], (
+        f"line 300 no longer carries the claim the mover rail's row reads "
+        f"({lines[299][:70]!r}) — the re-word may drop a tally, not the sentence cited")
+    cited = _mover_comment_citations()
+    assert ("app/harness/protected_paths.py", 300) in cited, (
+        "the #3701-header-to-EOF region no longer cites `:300`, so the rail's own claim row "
+        "for that line has gone ungraded and dead")
+    for label, start, end in _PLACEMENT_REGIONS:
+        try:
+            lo, hi = src.index(start), src.index(end)
+        except ValueError as exc:
+            raise AssertionError(
+                f"{label}: the marker pair #4332 kept is gone ({start!r} .. {end!r})"
+            ) from exc
+        block = lines[src[:lo].count("\n"):src[:hi].count("\n")]
+        code = [ln for ln in block if ln.strip() and not ln.lstrip().startswith("#")]
+        assert not code, (
+            f"{label} is no longer comment-only after the re-word: {code[:2]} — a round that "
+            "re-words placement prose must not move a line of the guard's code")
+        assert block, f"{label} sliced empty, so the assertion above was vacuous"

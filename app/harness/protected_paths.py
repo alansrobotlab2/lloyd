@@ -296,13 +296,13 @@ def write_deny_reason(target: str) -> str | None:
 # same place so the two cannot drift into disagreeing about what is sacred. A
 # credential file is a thing a turn may reach for without writing anything, and
 # the only other read-side path rule on this box (`_path_sandbox`) covers Bash
-# alone. Its header sits below line 264 on purpose: four other documents on this
-# box cite this file by line number — `architecture/autonomy-jobs.md` cites
-# `PROTECTED_WRITE_ROOTS` and `PROTECTED_SHELL_RO_ROOTS`, `architecture/tools.md`
-# and `architecture/threat-model.md` cite the write predicate and the resolver,
-# and `lloyd/reviews/2026-09-14-user-md-audit.md` cites the bind list — and the
-# last of those lives in the vault, which this round cannot edit. Inserting
-# above them would move four published citations, one of them unfixable here.
+# alone. Its header sits below line 264 on purpose, because documents on this box
+# cite this file by line number — some from the vault, where no code round can
+# re-point them. So new code and new comments are APPENDED at the tail of this file,
+# never inserted above a line a note may have quoted: an insertion silently re-points
+# every citation that passed the moved text, and the round that made it cannot repair
+# the vault's copy afterwards. The tally of citers used to sit here and is gone: no
+# module measures its own readers; the mover rail's claim row grades the anchors instead.
 #
 # The write deny-set above answers "may this turn land bytes here". A worker
 # turn whose entire input is somebody else's text — a YouTube transcript, a
@@ -1411,12 +1411,12 @@ def check_protected_delete(command: str, cwd: str | None = None) -> str | None:
 # The vault tree as a Bash-only write root (#3701)
 # ---------------------------------------------------------------------------
 #
-# This is the module's FOURTH policy and its narrowest. It lives here, at the end of
-# the file rather than beside `write_deny_reason`, for a documentary reason: four
-# documents on this box cite this file BY LINE NUMBER (the header at `:300` says so,
-# and `tests/test_architecture_coverage_doc_claims.py` parses those citations), so an
-# insertion at line 250 would silently re-point all of them. Appending costs the
-# reader a forward reference and buys back every one of those citations.
+# This is the module's FOURTH policy and its narrowest. It lives here, at the tail of
+# the file rather than beside `write_deny_reason`, for the reason the header at `:300`
+# gives: documents cite this file by line number, and an insertion at line 250 would
+# silently re-point every one of them — including the vault's copy, which no round's
+# diff can re-point afterwards. Appending costs the reader a forward reference and buys
+# back all of those citations; no tally of who holds them is stated, none is to be added.
 #
 # Why the vault tree cannot simply join `PROTECTED_WRITE_ROOTS`, stated once more
 # because it is the whole design of this function: `builtin_fs` and `vault_write` both
@@ -1514,9 +1514,9 @@ def bash_vault_write_denial(target: str, shape: str) -> str | None:
 # The witness directory: what a refused redirect there should say as well (#3737)
 # ---------------------------------------------------------------------------
 #
-# Appended after `bash_vault_write_denial` for the reason that block's header gives: four
-# documents cite this file by line number and `tests/test_architecture_coverage_doc_claims.py`
-# parses those citations, so anything that can live at the end must not be inserted above.
+# Appended after `bash_vault_write_denial` for the rule that block's header at `:300`
+# states: documents cite this file by line number, so what can live at the tail is
+# appended there and is never inserted above a line one of those citations has moved.
 # What follows is one sentence of advice plus the predicate that scopes it. No policy
 # change: no shape joins `VAULT_BASH_WRITE_SHAPES`, and the mover question #3701 left
 # open is RULED — owed-check closed it redirect-only on 2026-11-15 (#3956), so a mover
