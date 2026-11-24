@@ -3599,6 +3599,99 @@ def test_the_chrome_extension_grant_comment_names_what_stays_out_and_why():
         "hash, so every rebuild needs a second widening and clause 1 is not met")
 
 
+def test_the_panel_glob_reason_names_no_chunk_and_cites_its_witness():
+    """#4482: the `dist/assets/**` reason survives on its mechanism, with no chunk named.
+
+    The sentence this node owns read, since `f823fd94` wrote it, "`sidepanel-BaMPpFsS.js`
+    today" followed by a claim that the name turns into a different string after any build.
+    Both halves were wrong and only one of them was visible from outside: the chunk named there
+    left the tracked tree in `41bc89de` and a later
+    rebuild renamed it again, so the pointer has been pointing at a file the extension no
+    longer ships; and the reason given was the permanently-red claim
+    `tests/test_automod_gate.py::test_the_disproved_permanent_red_reason_is_gone_from_both_files`
+    had already evicted from the other two files — `41bc89de`'s own message records a second
+    identical build leaving `git status --porcelain -- chrome-extension/dist/` empty, so the
+    names move when the source moves and a rebuild of unchanged source renames nothing. That is
+    also the true reason for the glob, and `41bc89de` is cited in the sentence that replaced it.
+
+    Three rails, none of them a paraphrase-matcher, because a claim graded by loose substring
+    drifts back into the wording it replaced:
+
+    1. no chunk-hash token anywhere in `spec.py`. This is the item's own grep,
+       `[a-z0-9-]+-[A-Za-z0-9_-]{8}.(js|css)`, over the whole file rather than one line, so an
+       example re-added beside any other grant is caught too. The entry itself cannot satisfy
+       it: `chrome-extension/dist/assets/**` carries no eight-character hash run before a `js`
+       or `css`, which is why the entry and its classification are untouched by this node.
+    2. the true reason sits beside the entry, not merely somewhere in the file. The locator
+       steps back over this grant's own entry lines before collecting the comment, because
+       #3769's block sits above a PAIR and `_comment_block_above` — which every single-entry
+       grant here uses — would stop at the `dist/sidepanel.html` line and hand back the empty
+       string, the failure mode `comment_above` inside the node above documents at length.
+    3. the refuted spellings stay out, including this file's own. They are assembled from
+       fragments for the reason the gate-side node gives for its fixtures: a node that asserts
+       a string's absence by spelling it out becomes the hit the next `grep -rn` reports, and
+       only that grep cannot see the seam.
+    """
+    import re
+
+    text = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
+
+    named = [m.group(0) for m in
+             re.finditer(r"[a-z0-9-]+-[A-Za-z0-9_-]{8}.(js|css)", text)]
+    assert not named, (
+        f"spec.py names a build chunk ({named}); a chunk name in this file is a pointer that "
+        "expires at the next source change under web/src/sidepanel/**, as the one it just lost "
+        "did — the glob is the grant, so the reason has to state the mechanism instead")
+
+    lines = text.splitlines()
+    at = next((i for i, ln in enumerate(lines)
+               if CHROME_PANEL_ASSETS_GLOB in ln and not ln.strip().startswith("#")), None)
+    assert at is not None, (
+        f"{CHROME_PANEL_ASSETS_GLOB} is not an entry line in spec.py, so there is no grant "
+        "here whose reason this node could read")
+    i = at - 1
+    while i >= 0 and lines[i].strip().startswith('"'):
+        i -= 1
+    block_lines: list[str] = []
+    while i >= 0 and lines[i].lstrip().startswith("#"):
+        block_lines.append(lines[i])
+        i -= 1
+    block = "\n".join(reversed(block_lines))
+    assert block.strip(), (
+        f"no comment sits above {CHROME_PANEL_ASSETS_GLOB} and the entry beside it, so the "
+        "glob has stopped saying what it is for — walking back over quoted lines only as far "
+        "as this grant's own pair")
+    prose = re.sub(r"\s+", " ", block.lower())
+    reasons = (
+        ("a hash of its bytes",
+         "the mechanism: the name IS the content, so a glob is what stays true"),
+        ("renames the chunk",
+         "the consequence: moving the source moves the name, which a verbatim list of "
+         "hashes could not survive"),
+        ("unchanged source",
+         "the half that was missing — without it the sentence says the names move whatever "
+         "anyone does, which is the claim 41bc89de refuted"),
+        ("renames nothing",
+         "the measured form of that half, so a reader can go and rebuild twice"),
+    )
+    for phrase, why in reasons:
+        assert phrase in prose, (
+            f"the grant's own comment no longer says {why}, so the entry reads as slack "
+            f"rather than as a glob over content-hashed output: {phrase!r} missing from "
+            f"{block!r}")
+    assert "41bc89de" in block, (
+        "the replacement reason cites no witness, so the next reader re-derives the refuted "
+        "one — the rule the gate-side node already holds the other two files to")
+
+    for phrase in ("re-hashes on every" + " build",
+                   "every build" + " re-hashes",
+                   "another string after any " + "rebuild"):
+        assert phrase not in text, (
+            f"spec.py is back to saying {phrase!r}, the permanently-red claim that "
+            "test_the_disproved_permanent_red_reason_is_gone_from_both_files evicted from "
+            "gate.py and its own test file")
+
+
 def test_only_paths_the_grant_names_under_chrome_extension_may_be_admitted():
     """#1376's path-exactness property (#1030), restated for this grant's corpus.
 
@@ -5060,15 +5153,97 @@ def test_the_idle_worker_grant_moves_exactly_one_classification():
         "path is `allowed` that no entry names verbatim")
 
 
+def _grant_tuple_drift(was: "list[str]", now: "list[str]") -> "list[str]":
+    """Why a diff that opens spec.py may not move the ALLOWED_GLOBS tuple. Empty means clean.
+
+    One text comparison, two meanings, and what separates them is whether the idle-worker entry
+    was already in the base tuple:
+
+    * absent at base — this is #4532's own round, and the one thing it may do is add that entry,
+      verbatim, in one piece, with everyone else's entries where they were;
+    * present at base — the grant has landed and this is some later round that opened the file
+      for its own reasons (#4482 rewrote the reason sentence above the panel entry, which is a
+      comment, not a grant). Then nothing may be added, nothing removed, and the order nobody
+      touched stays the record #1376's comment says a person reads off one line.
+
+    The second arm is what a landed grant does to the first: a node that asks only "did somebody
+    add the idle-worker entry?" is red on every later round that touches spec.py, and a scope
+    violation read out of a diff that moved no entry at all is how a rail gets deleted rather
+    than obeyed.
+    """
+    added = [g for g in now if g not in was]
+    removed = [g for g in was if g not in now]
+    complaints: list[str] = []
+    if IDLE_WORKER_GRANT in was:
+        if added or removed:
+            complaints.append(
+                f"a round after #4532 moved the tuple: added {added}, removed {removed}. The "
+                "entry list is a grant record, not a scratch pad")
+        if now != was:
+            complaints.append(
+                "the entries kept their contents but not their order, which is the record of "
+                "which item admitted what")
+        return complaints
+    if added != [IDLE_WORKER_GRANT]:
+        complaints.append(
+            f"the grant added {added}; exactly one entry, spelled verbatim, may appear")
+    if removed:
+        complaints.append(
+            f"the grant removed {removed}; an entry deleted to make room is an edit to "
+            "someone else's grant")
+    if [g for g in now if g != IDLE_WORKER_GRANT] != was:
+        complaints.append(
+            "the surviving entries kept their contents but not their order, which is the "
+            "record of which item admitted what")
+    return complaints
+
+
+def test_a_later_round_opening_spec_moves_no_grant_entry():
+    """The arm #4482's own round fell into, pinned over synthetic tuples.
+
+    Until this arm existed the node below asked one question of any diff that opened spec.py —
+    "did you add the idle-worker entry?" — and so went red on a round that rewrote a comment and
+    moved no entry at all, because by then #4532's entry is in the base tuple and the answer is
+    "no, and that is correct". A check that fires on the round AFTER the one it was written for
+    is a check the next victim deletes, so both arms are pinned here instead of being left to the
+    next diff that touches the file.
+
+    Synthetic lists, deliberately: the property is about the comparison, and grading it against
+    the shipped tuple would only re-ask the question the node below asks.
+    """
+    someone_elses_grant = CHROME_PANEL_HTML
+    post_grant_base = [someone_elses_grant, IDLE_WORKER_GRANT]
+    assert _grant_tuple_drift(post_grant_base, list(post_grant_base)) == [], (
+        "a later round that opens spec.py to edit prose is being refused — the false positive "
+        "that made #4482's round red, and the reason this arm exists")
+    assert _grant_tuple_drift(post_grant_base, post_grant_base + ["chrome-extension/dist/**"]), (
+        "a round after #4532 added an entry and the drift check called it clean: the stronger "
+        "post-grant rule is the one that keeps #1376's verbatisation intact")
+    assert _grant_tuple_drift(post_grant_base, list(reversed(post_grant_base))), (
+        "a round after #4532 reordered the tuple and the drift check called it clean, though "
+        "the order is the record of which item admitted what")
+    pre_grant_base = [someone_elses_grant]
+    assert _grant_tuple_drift(pre_grant_base, pre_grant_base + [IDLE_WORKER_GRANT]) == [], (
+        "#4532's own round adding exactly its own entry is the case the first arm must accept; "
+        "refusing it would refuse the grant this whole file exists to hold")
+    assert _grant_tuple_drift(pre_grant_base, list(pre_grant_base)), (
+        "the pre-grant arm stopped refusing a round that never added the entry, so the clause "
+        "#4532 shipped is gone")
+
+
 def test_the_idle_worker_grant_adds_one_entry_and_edits_no_existing_one():
     """#4532 clause 2's other half, read off the diff: one entry added, none edited.
 
     The tuple at the round's base is the same file at `main`'s commit, so this is a text
     comparison and not an opinion about the shipped tuple. Order matters: an entry that
     was removed and re-added elsewhere reads as two edits, and the ordering of this tuple
-    is the only record of which grant came in under which item. Anything other than one
-    insertion is the widening the #1376 comment above the tuple says a person should be
-    able to read off one line.
+    is the only record of which grant came in under which item. What "anything other than one
+    insertion" means depends on whether the grant is already in that base tuple, so the
+    comparison lives in `_grant_tuple_drift`: pre-grant, this is #4532's own round and one
+    insertion is the whole of it; post-grant, a later round that opens spec.py — #4482 rewrote a
+    comment — may move no entry at all. Both arms are pinned by
+    `test_a_later_round_opening_spec_moves_no_grant_entry`, and the widening the #1376 comment
+    above the tuple says a person should read off one line is refused by either.
     """
     import subprocess
     import sys
@@ -5093,13 +5268,6 @@ def test_the_idle_worker_grant_adds_one_entry_and_edits_no_existing_one():
     was = _allowed_globs_as_written(prior.stdout)
     now = _allowed_globs_as_written(
         (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8"))
-    added = [g for g in now if g not in was]
-    removed = [g for g in was if g not in now]
-    assert added == [IDLE_WORKER_GRANT], (
-        f"the grant added {added}; exactly one entry, spelled verbatim, may appear")
-    assert not removed, (
-        f"the grant removed {removed}; an entry deleted to make room is an edit to "
-        "someone else's grant")
-    assert [g for g in now if g != IDLE_WORKER_GRANT] == was, (
-        "the surviving entries kept their contents but not their order, which is the "
-        "record of which item admitted what")
+    complaints = _grant_tuple_drift(was, now)
+    assert not complaints, "; ".join(complaints)
+

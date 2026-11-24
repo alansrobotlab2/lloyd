@@ -5043,6 +5043,12 @@ def test_the_disproved_permanent_red_reason_is_gone_from_both_files():
     hash of its bytes, so a matching name proves nothing about the bytes under it. What this
     node owns is that the two refuted sentences stay gone — the two strings below are the exact
     ones the triage re-ran, which is why they are matched literally and not paraphrased.
+
+    It owns one more thing since #4482: that neither shipped file names a chunk the tracked tree
+    does not contain. That half had the same shape as the claim it refutes — a grep for one dead
+    name, `BaMPpFsS`, in one of the two files — so it went green while `scripts/automod/spec.py`
+    carried a chunk name two releases stale. It is derived from `git ls-files` now, over both
+    files, and reasons about names rather than remembering one.
     """
     root = G.Path(__file__).resolve().parents[1]
     # Assembled from fragments, deliberately: #4171's acceptance check is `grep -rn` for these
@@ -5063,9 +5069,44 @@ def test_the_disproved_permanent_red_reason_is_gone_from_both_files():
         # cited in the same sentence that replaced it, in both files.
         assert "41bc89de" in text, f"{rel}: the replacement does not cite its witness"
     # The stale chunk name that had been in the refused-path list since before #3963 is gone
-    # too: a test naming a file the tree has not contained for two releases proves nothing.
-    gate_text = (root / "scripts/automod/gate.py").read_text(encoding="utf-8")
-    assert "BaMPpFsS" not in gate_text, "gate.py names a chunk the tree no longer ships"
+    # too — and #4482 turned that one-name grep into a rail over both shipped files, because a
+    # grep for the single name it was written for can only ever catch that name: spec.py went on
+    # pointing at the chunk `41bc89de` renamed while this node stayed green on gate.py alone.
+    # Now every chunk-hash token either file names has to be a file `git ls-files` reports under
+    # chrome-extension/dist/, so the rebuild that moves a name reddens this node instead of
+    # letting prose age quietly beside a chunk nobody ships.
+    import re as _re
+    # Extension-anchored, on the trailing edge, deliberately: unanchored, the same expression
+    # reads the imaginary `base-probe-failures.js` out of the literal
+    # `base-probe-failures.json` at scripts/automod/gate.py:1173, and gate.py becomes a false
+    # hit on its own filename. The lookahead is what makes gate.py measure zero tokens.
+    chunk = _re.compile(r"[a-z0-9][a-z0-9-]*-[A-Za-z0-9_-]{8}\.(?:js|css)(?![A-Za-z0-9])")
+    listed = subprocess.run(["git", "-C", str(root), "ls-files", "chrome-extension/dist/"],
+                            capture_output=True, text=True)
+    assert listed.returncode == 0, (
+        f"git ls-files exited {listed.returncode} ({listed.stderr.strip()}), so the set of "
+        "shipped chunks is unknown and the rail below would pass on an empty one")
+    shipped = [ln.rsplit("/", 1)[-1] for ln in listed.stdout.split() if ln.strip()]
+    assert shipped, (
+        "git ls-files reports no tracked file under chrome-extension/dist/. That is a question "
+        "about this tree, not about these two files: an empty set here would wave through any "
+        "stale name, so the rail says so rather than passing")
+    for rel in ("scripts/automod/gate.py", "scripts/automod/spec.py"):
+        named = set(chunk.findall((root / rel).read_text(encoding="utf-8")))
+        # A token counts as shipped when some tracked name ENDS with it, because a chunk can
+        # carry two hash runs — `highlighted-body-OFNGDK62-0dGmig-X.js` — and this expression's
+        # leftmost match is the last of them, so exact equality would redden a sentence naming a
+        # chunk the tree really does ship. A stale name is never such a tail: the hash moved.
+        stale = {t for t in named if not any(n.endswith(t) for n in shipped)}
+        assert not stale, (
+            f"{rel} names {sorted(stale)}, which no tracked file under chrome-extension/dist/ "
+            f"ends with — the name expired when the source moved (build twice and compare: "
+            "41bc89de), so the sentence has to state the mechanism, not the string")
+    # This test file is NOT in that loop, and cannot be: it seeds its stale-bundle case by
+    # replacing a tracked chunk with one the tree must never contain
+    # (test_a_changed_src_in_the_tracked_panel_html_reds_the_node), and the fixtures at the top
+    # of this section are synthetic by design. Holding a fixture to the tracked set would ask
+    # this file to fail, which is how a rail gets deleted rather than widened.
 
 
 def test_a_red_chrome_verdict_refuses_the_rung_whose_build_passed(

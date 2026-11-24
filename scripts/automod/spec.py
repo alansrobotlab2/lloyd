@@ -292,9 +292,9 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # tests/test_chrome_extension_manifest_tracked.py with a message telling a person to
     # rebuild by hand, and the rebuild's own output came back `unlisted` and could not be
     # committed either: the drift was detectable and not repairable. `dist/sidepanel.html` is
-    # named verbatim; `dist/assets/` is a glob, because the bundle names its chunks by content
-    # hash (`sidepanel-BaMPpFsS.js` today, another string after any rebuild) and a verbatim
-    # list of hashes is a grant that expires the first time it is used. It is the ONLY wildcard
+    # named verbatim; `dist/assets/` is a glob: a chunk's name IS a hash of its bytes, so a source
+    # change renames the chunk it emits, while a build of UNCHANGED source renames nothing (measured
+    # twice: `41bc89de`); a verbatim list expires, so the glob is the grant. It is the ONLY wildcard
     # under this name-space, and the directory it reaches holds no permission surface:
     # `dist/manifest.json` is a SIBLING of `dist/assets/`, not a member, so it stays
     # `unlisted` — the distinction the rail in tests/test_automod_spec.py re-pins rather than
