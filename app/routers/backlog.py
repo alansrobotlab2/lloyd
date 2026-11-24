@@ -49,7 +49,7 @@ from app.atomic_io import commit_lock
 from app.backlog_boards import (BOARDS, DEFAULT_BOARD, UnknownBoard,
                                 board_ids, check_board)
 from app.backlog_move import now_stamp, record_status_move, utc_instant
-from app.backlog_status import PIPELINE_STATUSES
+from app.backlog_status import PIPELINE_STATUSES, resolve_status
 from app.backlog_tags import NEEDS_HUMAN_TAG, new_task_tags, normalize_tags
 from app import frontmatter as FM
 from app.data_root import vault_root
@@ -60,6 +60,10 @@ logger = logging.getLogger(__name__)
 router = APIRouter()
 
 _BACKLOG_DIR = vault_root() / "backlog"
+# The four words under this module's own name. Since #4525 the *rule* is
+# `app.backlog_status.resolve_status`, which both writers below call: a new check
+# written as a bare `in _VALID_STATUSES` would skip the `open`/`todo`/`backlog`
+# coercion and put this surface back out of step with the MCP tool.
 _VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 _BACKLOG_PATTERN = re.compile(r"^(\d+)[-_].*\.md$")
 _BOARD_COLORS = ["#FF6B6B", "#4ECDC4", "#45B7D1", "#96CEB4", "#FFEAA7"]
@@ -738,9 +742,19 @@ async def backlog_task_update(request: Request):
                 body = body[:heading.end()].rstrip() + "\n\n" + new_description
             else:
                 body = new_description
+    status_coerced: dict | None = None
     if "status" in data:
-        if data["status"] not in _VALID_STATUSES:
-            raise HTTPException(status_code=400, detail=f"Invalid status '{data['status']}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
+        # The same rule the MCP tool applies, in one place both writers call
+        # (`app.backlog_status.resolve_status`): `open` / `todo` / `backlog` — the
+        # three words the run records show being guessed — are written as `draft`
+        # when the item has not been armed or closed, and everything else outside
+        # the four keeps the identical 400. This is the surface a *person* types
+        # into, and #518's lesson is that a rule living in only one of the two
+        # writers is a rule that did not land.
+        try:
+            status, status_coerced = resolve_status(data["status"], fm.get("status"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc))
         # The one place a person moves an item, and until #1023 the one writer
         # that recorded nothing: no `activity_log` line, no `completed`, and none
         # of the tag handling — so "every status move is attributed with its
@@ -756,8 +770,8 @@ async def backlog_task_update(request: Request):
         # the whole form on every save, so logging a posted status would narrate a
         # move on an ordinary title edit and re-date the close on a done card.
         status_recorded = record_status_move(
-            fm, data["status"], "set from Mission Control",
-            remove_tags=() if data["status"] == "draft" else (NEEDS_HUMAN_TAG,))
+            fm, status, "set from Mission Control",
+            remove_tags=() if status == "draft" else (NEEDS_HUMAN_TAG,))
 
     for key in ("priority", "blocked", "position"):
         if key in data:
@@ -809,7 +823,11 @@ async def backlog_task_update(request: Request):
         # order contradicts the file's own mtime.
         fm["updated"] = now_stamp()
     _write_task_file(filepath, fm, body)
-    return JSONResponse({"success": True, "description_ignored": description_ignored})
+    out: dict = {"success": True, "description_ignored": description_ignored}
+    if status_coerced:
+        out["status"] = fm.get("status")
+        out["status_coerced"] = status_coerced
+    return JSONResponse(out)
 
 
 def _reject_broken_fm(fm: dict, filepath: Path) -> None:
@@ -855,9 +873,14 @@ async def backlog_task_create(request: Request):
     # its first status move — recorded by the shared helper, which writes UTC — was
     # stamped seven hours later on the same file.
     now = now_stamp()
-    create_status = data.get("status", "draft")
-    if create_status not in _VALID_STATUSES:
-        raise HTTPException(status_code=400, detail=f"Invalid status '{create_status}'. Must be one of: {', '.join(sorted(_VALID_STATUSES))}")
+    # Nothing exists yet, so there is no status to protect: `resolve_status` with a
+    # `None` current is exactly the create case, and a guessed word lands on the
+    # same default this route already had. A word outside the four and outside the
+    # three guesses is still the 400 below, worded as it always was.
+    try:
+        create_status, create_coerced = resolve_status(data.get("status", "draft"), None)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     # A second live writer beside agent_mcp/backlog.py — the UI and
     # agent-services/guardian/notify.py both POST here — so fixing only the MCP
     # path leaves half of new tasks non-conformant. `type` is the one thing OKF
@@ -897,7 +920,11 @@ async def backlog_task_create(request: Request):
             _write_task_file(_BACKLOG_DIR / f"{new_id}-{slug}.md", fm, body)
             return new_id
     task_id = await asyncio.to_thread(_create)
-    return JSONResponse({"success": True, "id": task_id})
+    out: dict = {"success": True, "id": task_id}
+    if create_coerced:
+        out["status"] = fm.get("status")
+        out["status_coerced"] = create_coerced
+    return JSONResponse(out)
 
 
 @router.post("/api/backlog/task-delete")

@@ -21,7 +21,7 @@ from app.backlog_evidence import blocker_quote_refusal
 from app.atomic_io import commit_lock
 from app.backlog_boards import BOARDS, UnknownBoard, check_board
 from app.backlog_move import now_stamp
-from app.backlog_status import PIPELINE_STATUSES
+from app.backlog_status import PIPELINE_STATUSES, canonical_status, resolve_status
 from app.backlog_tags import SPAWN_TAG_PREFIX, new_task_tags, normalize_tags
 from app import frontmatter as FM
 from app.data_root import vault_root
@@ -36,6 +36,10 @@ SAVE_FAILED = ("Failed to save task: the item file was left unchanged — its fr
                "matter no longer parses, or the write lock could not be taken")
 
 BACKLOG_DIR = vault_root() / "backlog"
+# The four words under this module's own name. Since #4525 the *rule* is
+# `app.backlog_status.resolve_status`, which every writer here calls: a new check
+# written as a bare `in VALID_STATUSES` would skip the `open`/`todo`/`backlog`
+# coercion and reintroduce the refused call the coercion exists to remove.
 VALID_STATUSES = frozenset(PIPELINE_STATUSES)
 
 
@@ -172,17 +176,24 @@ async def list_tools():
         Tool(name="backlog_boards", description="List the kanban boards in the backlog with a task count for each. Use this to find a board name before filtering tasks with backlog_tasks.", inputSchema={
             "type": "object", "properties": {},
         }),
-        Tool(name="backlog_tasks", description="Use to find backlog items by status, board or tag; to open one in full use backlog_get_task. List tasks with filters (status, board, tag, blocked, assigned)", inputSchema={
+        # Its old last sentence named the five properties the schema below declares;
+        # dropping it is what pays for the `status` enum #4525 adds, inside this
+        # module, without moving `INTERNAL_CATALOG_TOKEN_CEILING`.
+        Tool(name="backlog_tasks", description="Use to find backlog items by status, board or tag; to open one in full use backlog_get_task", inputSchema={
             "type": "object",
             "properties": {
-                "status": {"type": "string", "description": "Filter by status"},
+                "status": {"type": "string", "enum": list(PIPELINE_STATUSES),
+                           "description": "Filter by status"},
                 "board": {"type": "string", "description": "Filter by board name"},
                 "tag": {"type": "string", "description": "Filter by tag"},
                 "blocked": {"type": "boolean", "description": "Filter by blocked state"},
                 "assigned": {"type": "boolean", "description": "Filter by assigned state"},
             },
         }),
-        Tool(name="backlog_get_task", description="Use to read one backlog item in full once you have its id; to change it use backlog_write_task. Get one backlog task in full: its frontmatter fields, tags, board, blocked/assigned state, and its markdown body.", inputSchema={
+        # Its second sentence ("Get one backlog task in full: its frontmatter fields,
+        # tags, board, blocked/assigned state, and its markdown body") repeated the
+        # first, so it is the rest of what pays for #4525's `status` enum.
+        Tool(name="backlog_get_task", description="Use to read one backlog item in full once you have its id; to change it use backlog_write_task", inputSchema={
             "type": "object",
             "properties": {"task_id": {"type": "integer", "description": "Task ID to retrieve"}},
             "required": ["task_id"],
@@ -204,7 +215,8 @@ async def list_tools():
                 "name": {"type": "string", "description": "Task name/title (required for new tasks)"},
                 "description": {"type": "string", "description": "Task description. On create, becomes the body. On update, combined with existing body per description_mode."},
                 "description_mode": {"type": "string", "enum": ["append", "replace", "prepend"], "description": "How description is applied on update. Default: 'append'. Use 'replace' to overwrite the body (title heading is preserved)."},
-                "status": {"type": "string", "description": "Task status"},
+                "status": {"type": "string", "enum": list(PIPELINE_STATUSES),
+                           "description": "Task status"},
                 "priority": {"type": "string", "enum": ["high", "medium", "low"],
                              "description": "Task priority. Default low; the unattended loop takes high before medium before low in every pool, so set it only when the item really should jump the queue"},
                 "board": {"type": "string", "enum": list(BOARDS),
@@ -273,7 +285,14 @@ def _handle_tasks(args: dict) -> str:
             content = f.read_text()
             frontmatter, body = parse_frontmatter(content)
             tid = int(match.group(1))
-            if status and frontmatter.get("status") != status:
+            # Both sides of this comparison read the canonical word. The `enum`
+            # #4525 puts on this argument declares four values, and a filter naming
+            # one of them has to answer for every row the same call renders —
+            # comparing raw front matter here while the row below showed
+            # `canonical_status`'s reading is how an item stranded on an
+            # off-vocabulary word could appear as `draft` in the list and then go
+            # missing for a caller who asked for `draft`.
+            if status and canonical_status(frontmatter.get("status")) != status:
                 continue
             if board and frontmatter.get("board") != board:
                 continue
@@ -289,7 +308,13 @@ def _handle_tasks(args: dict) -> str:
                 title = heading_match.group(1).strip()
             tasks.append({
                 "id": tid, "title": title,
-                "status": frontmatter.get("status", "todo"),
+                # The shared vocabulary, not a fifth word: `"todo"` was this
+                # reader's own invention for a missing status, was refused by every
+                # writer here, and is one of the three words the run records show
+                # callers guessing — so the read side was handing out the very word
+                # the write side rejects. `canonical_status`'s empty-status rule is
+                # the default everywhere else (`load_item`, the dashboard).
+                "status": canonical_status(frontmatter.get("status")),
                 "board": frontmatter.get("board", "default"),
                 "priority": frontmatter.get("priority", DEFAULT_PRIORITY),
                 "tags": normalize_tags(frontmatter.get("tags")),
@@ -473,12 +498,22 @@ def _handle_write(args: dict) -> str:
             task["body"] = (current_body + "\n\n" + description) if current_body else description
 
     promotion: dict | None = None
+    coerced: dict | None = None
     if args.get("status"):
-        if args["status"] not in VALID_STATUSES:
-            return json.dumps({"success": False, "error": f"Invalid status '{args['status']}'. Must be one of: {', '.join(sorted(VALID_STATUSES))}"})
+        # One rule with `app/routers/backlog.py`, in `app.backlog_status`: a word
+        # a guessing caller reaches for (`open`, `todo`, `backlog` — the three in
+        # the run records) is written as `draft` when that cannot move a live item
+        # backwards, and every other unknown word still costs the same refusal.
+        # `resolve_status` raises the identical message, which is what a caller
+        # recovering from this error reads to get the four legal words.
+        try:
+            status, coerced = resolve_status(args["status"], task.get("status"))
+        except ValueError as exc:
+            return json.dumps({"success": False, "error": str(exc)})
+        args = {**args, "status": status}
         promotion = _promotion(task_id, task, args, creating)
         if promotion is None:
-            task["status"] = args["status"]
+            task["status"] = status
     for key in ("priority", "board"):
         if args.get(key):
             task[key] = args[key]
@@ -551,14 +586,23 @@ def _handle_write(args: dict) -> str:
             out["overrode_closed"] = overrode
             out["message"] = (f"Task created; force: true overrode closed #{overrode['id']} "
                               f"({overrode['verdict']})")
+        if coerced:
+            # The word is not accepted silently: the caller that guessed is told
+            # what was written and why, in the same result, so it does not spend a
+            # second call discovering the vocabulary.
+            out["status"] = task.get("status")
+            out["status_coerced"] = coerced
         return json.dumps(out)
     if promotion is not None:
         return json.dumps({"success": True, "task_id": task_id, "created": False,
                            "status": task.get("status"), "promotion": promotion["outcome"],
                            "message": "Task updated; status NOT moved to up_next — "
                                       + promotion["message"]})
-    return json.dumps({"success": True, "task_id": task_id, "created": False,
-                       "message": "Task updated"})
+    out = {"success": True, "task_id": task_id, "created": False, "message": "Task updated"}
+    if coerced:
+        out["status"] = task.get("status")
+        out["status_coerced"] = coerced
+    return json.dumps(out)
 
 
 # A write of `status: up_next` is a request the ledger answers, not a status

@@ -6667,7 +6667,7 @@ REQUIRED_CITATIONS = frozenset({
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
     "scripts/skill_lint.py:392",                   # PHANTOM_EXEMPT. 282→392 when #4374's BURIED_TRIGGER check landed above it (110 lines).
     "agent_mcp/skills.py:88",                      # _QUARANTINE_STATUSES
-    "app/routers/backlog.py:904",                  # backlog_task_delete, re-pointed 850→870 by #3701 (its resolver gained a collision check above it), then 870→895 by #3410 (the module docstring gained a dated re-measurement line above it), then 895→904 on 2026-11-22 (task-create allocates its id under the shared lock, above it)
+    "app/routers/backlog.py:931",                  # backlog_task_delete, re-pointed 850→870 by #3701 (its resolver gained a collision check above it), then 870→895 by #3410 (the module docstring gained a dated re-measurement line above it), then 895→904 on 2026-11-22 (task-create allocates its id under the shared lock, above it), then 904→931 by #4525 (both writers in this module now call app.backlog_status.resolve_status instead of checking the enum inline, and the shared guards land above it)
     "web/src/components/pages/BacklogPage.tsx:572",   # DONE_WINDOW_DAYS
     "app/paths.py:310",                            # VAULT_FACTS_ROOT, added by #2795
 })
@@ -6824,7 +6824,7 @@ def test_every_live_prose_citation_resolves_to_the_symbol_beside_it():
     (`app/autonomy.py:3292` twice — §The functions and §Evidence pilot — then
     `tests/test_worker_evidence.py:686`, `tests/test_skill_tool_names.py:150`,
     `scripts/skill_lint.py:392`, `agent_mcp/skills.py:88`,
-    `app/routers/backlog.py:849`,
+    `app/routers/backlog.py:931` (re-pointed from 904 by #4525),
     `web/src/components/pages/BacklogPage.tsx:572`, `app/paths.py:278` from #2795, and
     `eval/djev_name_prior_probe.py:647` from cffd22e6), the nine of them named in
     `REQUIRED_CITATIONS`. The tenth distinct pair in the file — `app/autonomy.py:710`,
