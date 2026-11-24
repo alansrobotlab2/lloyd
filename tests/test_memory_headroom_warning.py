@@ -124,9 +124,12 @@ def test_the_rung_is_a_ratio_over_the_ceiling_and_moves_when_the_ceiling_moves()
     """No byte constant of its own: shrink the ceiling under it and the rung follows.
 
     `MEMORY_TIGHTNESS` (0.80) is the index's REFUSAL tightness and is deliberately not
-    reused here — 0.90 is a notice's, and #4122 may re-settle it once its headroom-days
-    row has data. What may not exist is a number in BYTES: this module has exactly the
-    ceilings `prompt_surface` owns and no others, which is the second assertion below.
+    reused here — 0.90 is a notice's, on the same decision that made the notice a LEVEL:
+    it prices a prospective write, where the dose reading prices a day, and the trigger
+    that would reopen that call is the command named in the `#:` block above
+    `HEADROOM_WARNING_TIGHTNESS`, run by whoever asks, not a row a closed item is still
+    owed. What may not exist is a number in BYTES: this module has exactly the ceilings
+    `prompt_surface` owns and no others, which is the second assertion below.
     """
     assert isinstance(MC.HEADROOM_WARNING_TIGHTNESS, float)
     assert 0.0 < MC.HEADROOM_WARNING_TIGHTNESS < 1.0
@@ -328,3 +331,184 @@ def test_the_prose_route_and_the_guard_scope_agree_on_which_file_is_the_index():
     is a cycle — which leaves two spellings of one fact and no check until this one.
     """
     assert PS.INDEX_MEMORY_NAME == MC.INDEX_MEMORY_FILE == "MEMORY.md"
+
+
+# ── #4303: the constant documents its own ruling, and cites nobody who is shut ───
+
+_TEST_SRC = Path(__file__).resolve().read_text(encoding="utf-8")
+
+#: The node whose docstring used to defer the tightness to the dose item's row store.
+_TIGHTNESS_NODE = ("test_the_rung_is_a_ratio_over_the_ceiling_and_moves_when_"
+                   "the_ceiling_moves")
+
+#: The closed dose item, in two pieces on purpose: the guard below forbids its digit
+#: sequence anywhere in this file, and a guard that named the number to forbid it would
+#: find only itself. Concatenation is evaluated at import, so the prose never carries it.
+_SHUT_DOSE_ITEM = "412" + "2"
+
+
+def _tightness_comment() -> str:
+    """The `#:` block over `HEADROOM_WARNING_TIGHTNESS`, as the prose a reader receives.
+
+    Contiguous comment lines above the constant, prefixes stripped and hard wraps folded,
+    so a claim is matched as a sentence rather than at whatever column it happens to break.
+    Read off the source instead of compared to one fixed blob: a rewording that keeps the
+    rulings still passes, and one that drops a ruling has to drop a substring a node below
+    asks for.
+    """
+    lines = _SRC.splitlines()
+    at = next(i for i, line in enumerate(lines)
+              if line.startswith("HEADROOM_WARNING_TIGHTNESS ="))
+    block: list[str] = []
+    i = at
+    while i > 0 and lines[i - 1].startswith("#:"):
+        block.append(lines[i - 1])
+        i -= 1
+    assert block, "the constant lost its `#:` comment block entirely"
+    return " ".join(line.removeprefix("#:").strip()
+                    for line in reversed(block))
+
+
+def test_the_tightness_comment_carries_the_level_ruling_and_no_dead_pointer():
+    """#4303 clause 1: the block says what it settled, and sends no reader to a shut item.
+
+    It used to defer the level-versus-dose question to the item that measured the dose.
+    That item is closed and its row store has never had a row written to it, so the
+    sentence had no owner: no future run would ever answer the question it raised. The
+    ruling therefore has to live in the block itself — where the next reader of the
+    constant already is — and the pointer may not come back in either direction: the item
+    it was deferred to and the item filed beside it are both shut.
+    """
+    block = _tightness_comment()
+
+    assert _SHUT_DOSE_ITEM not in _SRC, \
+        "`app/memory_ceiling.py` cites the closed dose-rate item again"
+    assert "4121" not in block, \
+        "the deferral was re-pointed to another closed item, which is the same defect"
+
+    assert "by decision" in block, \
+        "the level is asserted rather than ruled: the reasoning is what outlives a number"
+    assert "prices a prospective write" in block, "the notice's own unit is gone"
+    assert "prices a day" in block, \
+        "the dose's unit is gone, and with it the only reason the two differ"
+
+    # The disproven report-only alarm is the evidence that makes this a ruling and not a
+    # preference, and it is easy to misstate: the two clearances come from two reports five
+    # weeks apart, and between them the alarm printed and reached nobody — the file did not
+    # "grow anyway". A block that credits one item with both figures, or invents growth,
+    # cites an event that did not happen; the dates are what make them two readings.
+    assert "-> CURATE" in block, "the disproven report-only alarm is left unnamed"
+    assert "59 B" in block and "137 B" in block, \
+        "the two measured clearances that evidence the failure are gone"
+    assert "2026-11-06" in block and "2026-11-14" in block, \
+        "the clearances lost the dates that hold them five weeks apart"
+
+
+def test_the_reopen_trigger_is_a_measurement_anyone_can_take_today():
+    """#4303 clause 2: the trigger is a command that answers now, not data to be waited for.
+
+    The old sentence's defect was not that it deferred — deferring a call to an instrument
+    is fine — but that it deferred to a series nobody was writing, so the condition for
+    reopening could never be observed. What replaces it names the threshold, the window
+    that threshold is meaningless without, the script that prints both, and the fact that
+    the script's own row store has no writer, so no reader goes looking for a JSONL that
+    will not appear. It also names what a fired trigger earns — the direction the constant
+    moves, and how far — which is what makes it a decision rule rather than a curiosity.
+    """
+    block = _tightness_comment()
+
+    assert "headroom_days" in block and "window_days" in block, \
+        "the threshold lost either its quantity or the window it is divided by"
+    assert "under 1" in block, "the cut the trigger fires at is not stated"
+    assert "loaded_memory_dose_rate.py --window-days 30" in block, \
+        "the trigger names no command a reader can run"
+    assert "loaded-memory-dose-rate.jsonl" in block, \
+        "the row store the trigger is NOT read from goes unnamed"
+    assert "no writer" in block, \
+        "the block still reads as though those rows are accumulating somewhere"
+    assert "one edit to this line" in block, \
+        "the cost of re-settling — what makes the ruling cheap to revisit — is gone"
+    assert "0.95" in block, \
+        ("the trigger names a threshold but no action, so a reader who measures it still "
+         "has to guess which way the constant moves and how far")
+
+
+def test_repeated_firings_inside_one_pass_are_recorded_as_intended():
+    """#4303 clause 3: several notices in one write pass is the design, and it says so.
+
+    Priced per prospective text and refusing nothing, the notice answers every write in a
+    consolidation pass rather than once per pass. A reader who finds nine of them in one
+    session will otherwise reach for a suppression this module does not have, so the block
+    records the behaviour and the count that evidenced it — with the command that counts
+    it, because the figure the item was filed with did not reproduce.
+
+    What this node deliberately does NOT do is re-derive the nine. Those are occurrences of
+    the notice's signature in one session transcript under session scratch, which retention
+    sweeps; the owed half of the item is what copies those bytes somewhere durable. The node
+    pins that the block hands over a counting command with its number and carries no figure
+    that no command produces — the filed item's eleven is the one that does not.
+    """
+    block = _tightness_comment()
+
+    assert "not a defect" in block, "a repeat firing is left to read as a bug"
+    assert "nine" in block.lower(), "the reproduced count is gone from the block"
+    assert 'grep -o "headroom rung"' in block, \
+        "the count lost the command that reproduces it"
+    assert "wc -l" in block, "the counting command is truncated to a fragment"
+    # The counted phrase exists in the emitted message and nowhere in this file as one
+    # literal, because the message is built from two adjacent f-strings. A reader who greps
+    # the module for it gets nothing and may conclude the witness is invented, so the block
+    # says where the phrase actually lives.
+    assert "f-string" in block, \
+        "the block leaves a reader to grep this file for a phrase it never stores whole"
+    assert "eleven" not in block.lower() and " 11 " not in block, \
+        "the count that no command reproduces is back in the block"
+
+
+def test_the_pinning_docstring_carries_the_same_ruling():
+    """#4303 clause 4: the file that guards the number no longer routes a reader onward.
+
+    The module comment and the docstring of the node that pins the tightness carried the
+    same deferral, and fixing only the module would leave the dead pointer in the one place
+    a reader lands on right after `git grep HEADROOM_WARNING_TIGHTNESS`. A test docstring is
+    instruction, not decoration, so it carries the same ruling rather than a reference.
+    """
+    assert _SHUT_DOSE_ITEM not in _TEST_SRC, \
+        "this file still sends a reader to the closed dose-rate item"
+
+    node = next(n for n in ast.walk(ast.parse(_TEST_SRC))
+                if isinstance(n, ast.FunctionDef) and n.name == _TIGHTNESS_NODE)
+    doc = ast.get_docstring(node) or ""
+    assert doc, f"{_TIGHTNESS_NODE} lost its docstring"
+    assert "prices a prospective write" in doc and "prices a day" in doc, \
+        "the docstring defers again instead of stating the ruling"
+    assert "LEVEL" in doc, "the decision the docstring exists to carry is unnamed"
+
+
+def test_the_comment_round_moved_nothing_it_was_not_asked_to_move():
+    """#4303 clause 5: prose changed; the rung, the cited lines and the provenance did not.
+
+    Three things outside the two blocks have to survive a comment edit, and two of them show
+    up only as an absence: the constant is still 0.90 (this round is a notice about a rung,
+    not a re-tuning of it); the audit's line citations into this file still land on the
+    definitions they name, which is the standing reason the block sits at the END of the
+    module; and the dose script and its own suite still cite the item that filed the
+    instrument. Deleting those last two along with the deferrals is the over-correction — a
+    grep that has removed every mention looks exactly like a finished job.
+    """
+    assert MC.HEADROOM_WARNING_TIGHTNESS == 0.90, "a comment round changed the rung"
+
+    lines = _SRC.splitlines()
+    assert lines[113].strip() == "MEMORY_TIGHTNESS = 0.80", \
+        f"the audit's `:114` no longer reads what it cites: {lines[113]!r}"
+    assert lines[161].startswith("def tight_limit("), \
+        f"the audit's `:162` no longer reads what it cites: {lines[161]!r}"
+    assert lines[261].startswith("def memory_write_error("), \
+        f"the audit's `:262` no longer reads what it cites: {lines[261]!r}"
+
+    for rel in ("scripts/maintenance/loaded_memory_dose_rate.py",
+                "tests/test_loaded_memory_dose_rate.py"):
+        # Composed, not spelled: a literal here would put the shut item's number back into
+        # this file and trip the guard two nodes above.
+        assert _SHUT_DOSE_ITEM in (ROOT / rel).read_text(encoding="utf-8"), \
+            f"{rel} lost the provenance cite for the item that filed it"

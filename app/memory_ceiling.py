@@ -1212,9 +1212,40 @@ def index_unrepresentable_error(path: str | os.PathLike[str],
 #: because this is a notice and not a bound: at 80 % a file that already sits above the
 #: line would warn on every write it ever receives again, and the stretch worth warning
 #: about is the last one in which a relocation is still possible before the flat
-#: refusal. #4122 settles whether the right quantity is a level at all rather than a
-#: dose, once its headroom-days row has ~two weeks of data; that re-settling is one
-#: edit to this line and nothing else.
+#: refusal.
+#:
+#: The quantity is a LEVEL by decision, not by default, and the reason is what each
+#: reading is priced on: this notice prices a prospective write — the exact text one
+#: caller is about to land, answered back in that write's own result, to a hand that can
+#: still relocate the detail — while `headroom_days` prices a day and can only be read by
+#: a process that is not writing. That second arrangement is the one already tried here,
+#: and it did not work: `scripts/memory/memory_ledger.py status` has printed its
+#: `-> CURATE` alarm for a nearly-full `USER.md` for weeks — at 59 B of clearance on
+#: 2026-11-06, at 137 B on 2026-11-14, still printing on 2026-11-24 — and across that
+#: span the alarm reached no writer, because it is a report and the writer is not reading.
+#:
+#: What would reopen the decision is a measurement available now, not a series that has to
+#: accumulate first: USER.md's `headroom_days` under 1 at `window_days` 30, read from
+#: `scripts/maintenance/loaded_memory_dose_rate.py --window-days 30` run from `~/lloyd`
+#: (read-only, exit 0, and it prints the window every figure was divided by). It answers
+#: today because it derives the dose from `git cat-file` object sizes rather than from its
+#: own rows; its row store, `loaded-memory-dose-rate.jsonl` in `scripts/automod/state.py`'s
+#: `STATE_DIR`, has no writer on this box — no `--record` has ever run and no job is wired
+#: to run one. So the trigger is a command someone runs, not a row that eventually
+#: appears, and the action a fired trigger earns is a RAISED tightness — toward 0.95, so
+#: the notice still arrives ahead of the refusal when the margin is thinner — and that
+#: remains one edit to this line and nothing else.
+#:
+#: What to expect of a notice priced per write: it fires once per write, so a pass that
+#: grows one file repeatedly is told repeatedly, and that is the design working, not a
+#: defect. The 2026-11-18 nightly consolidation pass carries nine occurrences of the
+#: signature in its one session —
+#: `grep -o "headroom rung" ~/lloyd-data/sessions/20261118_181619_autonomy_7895.json | wc -l`
+#: — nine over those bytes, which session retention can sweep: the count is a witness, not
+#: a figure this suite re-derives. (Match that phrase in the emitted message, not by
+#: grepping this file for it: the sentence is composed across two adjacent f-strings, so
+#: the module holds no single literal to find.) Collapsing a pass to one notice would need
+#: per-pass state this module does not hold, and would blur which write crossed the rung.
 HEADROOM_WARNING_TIGHTNESS = 0.90
 
 
