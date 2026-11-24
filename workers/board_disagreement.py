@@ -62,6 +62,23 @@ BOARD = "lloyd"
 NAME = ("board-steward disagreed with the state machine and nobody has ruled "
         "which side is wrong")
 
+#: Where the model's raw reply actually lives, as ONE sentence held here so the
+#: `disagreement_rows` docstring, the rendered filing body and
+#: `architecture/workers-jobs.md` cannot drift into three separate claims (#4387).
+#: Boundary-limited on purpose: `43cc6ba7` (2026-11-19) is the commit that started
+#: writing the reply into `runs.response_json`, so the sentence this one replaced — that
+#: the store never keeps the reply at all — read as a present-tense limitation while
+#: being true only of rows an older pool wrote. It quotes no row count, and neither may
+#: the two other surfaces: the figure the architecture page published beside the old
+#: claim had rotted before the next reader checked it, which is what a count in prose
+#: always does and why none of the three may carry one.
+REPLY_PROVENANCE = (
+    "The model's raw reply is kept in `runs.response_json` for any row a pool running "
+    "`43cc6ba7` (2026-11-19) or later wrote; an older row is empty there, and any tick's "
+    "reply is recoverable from its `meta_json.session_id` at "
+    "`~/lloyd-data/sessions/<id>.json`."
+)
+
 #: owed-check's flip bar (#3089 asked, #3329 ruled 2026-10-25) — restated here so
 #: the trigger and the flip name one pair of numbers rather than two copies that
 #: can drift apart. Restating is not owning: the floor is ruled in
@@ -395,9 +412,12 @@ def disagreement_rows(ids: list[int], moves: list[dict],
 
     "Recorded at the tick" is not "kept by luck": the same tick's `board_steward` ledger
     event carries `moves`, each with its `item_id`, `status` and the `note` the steward
-    wrote, and now carries the machine's half in `agreement.disagree_sides`. What the
-    store genuinely never kept is the model's raw reply — `response_json` is empty in
-    every board-steward `runs` row.
+    wrote, and now carries the machine's half in `agreement.disagree_sides`. The model's
+    raw reply is kept in `runs.response_json` for any row a pool running `43cc6ba7`
+    (2026-11-19) or later wrote; an older row is empty there, and any tick's reply is
+    recoverable from its `meta_json.session_id` at `~/lloyd-data/sessions/<id>.json`.
+    (`REPLY_PROVENANCE` holds this sentence; the node that reads this docstring compares
+    them, so keep the two in step or the docstring goes red, not merely stale.)
     """
     proposed: dict[int, str] = {}
     for m in moves or []:
@@ -997,6 +1017,15 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         head = ("tick whose trailing-7-day judgement was measured **below** owed-check's "
                 "flip floor:")
         fired = ""
+    # Where the raw reply lives, then the caveat that the runs `source` is hyphenated:
+    # the underscored spelling is the ledger's event kind, so a reader who filters `runs`
+    # with it sees 0 rows and concludes the store keeps nothing when it keeps everything.
+    # `REPLY_PROVENANCE` is the one sentence the `disagreement_rows` docstring and
+    # `architecture/workers-jobs.md` carry too, so the three cannot disagree (#4387).
+    reply_here = REPLY_PROVENANCE + (
+        " A `runs` lookup for the ticks these rows come from needs the hyphenated "
+        "`source`: `board-steward` is the runs spelling, while the underscored "
+        "`board_steward` is the ledger's event kind and matches no runs row at all.")
     body = (
         f"# {NAME}\n\n"
         f"Filed by `workers/board_disagreement.py` at the end of a board-steward "
@@ -1011,10 +1040,8 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"tick elsewhere: the proposal itself is in the ledger's `board_steward` event "
         f"for that tick, whose `moves` list carries the `item_id`, the `status` and the "
         f"`note` the steward wrote for it, and the machine's side is in that same event's "
-        f"`agreement.disagree_sides`, recorded by the tick that scored it (#3677). What "
-        f"is stored nowhere is the model's raw reply — "
-        f"`response_json` is empty in every board-steward `runs` row (`source` is "
-        f"hyphenated: `board_steward` matches no runs row at all).\n\n"
+        f"`agreement.disagree_sides`, recorded by the tick that scored it (#3677). "
+        f"{reply_here}\n\n"
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
         + _coverage(min(len(ids), ROWS_MAX), window, unrecoverable=unrecoverable,
                     dropped=dropped, distinct=distinct, unruled=unruled,

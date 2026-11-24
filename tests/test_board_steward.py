@@ -4549,16 +4549,35 @@ def test_the_prompt_governs_the_closing_window():
     assert "NO line of this item names `promoted` or" in aborted, aborted
 
 
+#: The claim #4387 retires, built here from two fragments rather than written whole so
+#: that this file does not itself trip the acceptance it enforces: `git grep -n` for the
+#: phrase over the tracked tree had to return 0 lines and returned 4 before this round,
+#: and one of those 4 was this file asserting the phrase was PRESENT. Every node below
+#: asserts this string ABSENT, and
+#: `test_the_retired_claim_survives_nowhere_in_the_text_that_publishes_it` folds each
+#: file's line wraps away first — which is the hole #4387's own check fell into, since
+#: the module docstring held the claim across a wrap and the item's grep never saw it.
+REPLY_CLAIM_RETIRED = ("`response_json` is empty in every " "board-steward `runs` row")
+
+
 def test_the_disagreement_body_names_the_ledger_event_as_where_the_move_lives(board,
                                                                               tmp_path):
     """Clause 4. The body claimed "the proposed move is stored nowhere else … so this
     item is the record". That is false: the same tick's `board_steward` ledger event
     carries `moves` with the `item_id`, the `status` and the `note` the steward wrote
-    (#3602's triage read the 2026-10-30T21:51:37Z row and found all three). What the
-    store really never kept is the model's raw reply, so the body must keep that claim
-    and drop the one a reader would falsify in one grep.
+    (#3602's triage read the 2026-10-30T21:51:37Z row and found all three).
+
+    #4387 is the same failure in the paragraph after that one, and this node was part of
+    it. The body went on to publish the model's raw reply as kept nowhere at all, and
+    until this round this node asserted that sentence WAS there — a pinned false claim is
+    worse than an unpinned one, because the filing site and the test agree to keep
+    re-issuing it. `43cc6ba7` (landed 2026-11-19) is the commit that started writing the
+    reply into `runs.response_json`, so what the body owes a reader now is the boundary
+    and the way back into an older tick's reply, not a permanent absence. The
+    hyphenated-`source` caveat stays: filtering `runs` by the ledger's `board_steward`
+    spelling answers 0 rows, which a reader meets as "the store keeps nothing".
     """
-    from workers.board_disagreement import file_or_update
+    from workers.board_disagreement import REPLY_PROVENANCE, file_or_update
 
     file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
                    backlog_dir=board, ledger=tmp_path / "ledger.jsonl")
@@ -4569,7 +4588,17 @@ def test_the_disagreement_body_names_the_ledger_event_as_where_the_move_lives(bo
     assert "`board_steward` event" in body, body
     for want in ("`moves`", "`item_id`", "`status`", "`note`"):
         assert want in body, f"{want!r} missing: the ledger's own field names are the way back"
-    assert "`response_json` is empty in every board-steward `runs` row" in body, body
+    assert REPLY_PROVENANCE in body, body
+    assert REPLY_CLAIM_RETIRED not in body, (
+        "the retired absolute is back in the rendered filing body, so the next item this "
+        "module files publishes a pre-`43cc6ba7` fact as the store's live limitation")
+    for want in ("`meta_json.session_id`", "`~/lloyd-data/sessions/<id>.json`",
+                 "`43cc6ba7`", "2026-11-19"):
+        assert want in body, f"{want!r} missing: the body must name the boundary and the " \
+                             f"route back to any tick's raw reply"
+    assert "hyphenated" in body and "matches no runs row at all" in body, (
+        "the hyphenated-`source` caveat is still true and still the only thing stopping a "
+        "reader concluding from a 0-row `board_steward` query that nothing is kept")
     assert "`desired_statuses`" in body, "the machine's side must still be named"
 
 
@@ -4689,7 +4718,16 @@ def test_the_architecture_page_says_the_ruling_can_be_answered_from_the_store():
     nowhere else" and the question "which side is wrong" "cannot be answered from the
     store". Both halves are false — 23 of the window's 23 disagreeing ids have their
     proposal in that window's `board_steward` events — and a claim that the evidence does
-    not exist is what stops anyone going to look for it (#3651)."""
+    not exist is what stops anyone going to look for it (#3651).
+
+    The page's third sentence went the same way (#4387): it told the reader the raw reply
+    is kept nowhere, and justified that with a count of rows on this box. A count in prose
+    is the reason the sentence outlived its own evidence — the figure had rotted before
+    the next reader checked it, and `43cc6ba7` (2026-11-19) had already falsified the
+    absolute. So the page now carries the same boundary sentence the module files and the
+    same recovery route, from the same constant, and quotes no count at all."""
+    from workers.board_disagreement import REPLY_PROVENANCE
+
     doc = " ".join((Path(__file__).resolve().parents[1] / "architecture"
                     / "workers-jobs.md").read_text(encoding="utf-8").split())
     assert "stored nowhere else" not in doc, doc[-900:]
@@ -4697,9 +4735,62 @@ def test_the_architecture_page_says_the_ruling_can_be_answered_from_the_store():
     assert "answerable from the store" in doc, (
         "the replacement has to state the positive, or a later reader re-derives the "
         "doubt the sentence it replaced was built on")
-    assert "response_json` is empty in every board-steward `runs` row" in doc, (
-        "the raw reply is genuinely still not kept, and the page must keep saying so: 0 "
-        "of the 1,123 board-steward runs rows on this box carry a non-empty one")
+    assert REPLY_PROVENANCE in doc, (
+        "the page states the boundary the filer states, from the module's own constant, "
+        "or the two documents drift and a reader of one re-derives the retired claim")
+    assert REPLY_CLAIM_RETIRED not in doc, doc[-900:]
+    assert "1,123" not in doc, (
+        "the page quotes a row count again: this is the figure that had rotted while it "
+        "still read as a live measurement, and the sentence needs no count to stand")
+
+
+def test_the_module_text_states_the_reply_boundary_rather_than_an_absence():
+    """Clause 2. `disagreement_rows`' docstring told a reader the store "genuinely never
+    kept" the reply, an unqualified present-tense claim about EVERY board-steward `runs`
+    row (#4387). It is read by whoever edits the filer, which is exactly the reader a
+    stale limitation misleads, so it now carries the same boundary as the body and the
+    page.
+
+    Asserted through `inspect.getdoc` and not the raw module source on purpose: the
+    constant holding the sentence lives in that same module, so a source-text `in` check
+    would be satisfied by the constant's own definition and could not see whether the
+    docstring still says otherwise.
+    """
+    import inspect
+
+    from workers import board_disagreement as D
+    from workers.board_disagreement import REPLY_PROVENANCE
+
+    doc = " ".join(inspect.getdoc(D.disagreement_rows).split())
+    assert REPLY_PROVENANCE in doc, doc
+    assert REPLY_CLAIM_RETIRED not in doc, (
+        "the docstring reverted to the unqualified claim about every row")
+
+
+def test_the_retired_claim_survives_nowhere_in_the_text_that_publishes_it():
+    """#4387's acceptance check is a `git grep` over the tracked tree, and the item's own
+    addendum records why that check needed widening: at the docstring the claim sat across
+    a line wrap, so the item's pattern matched one of its two homes only, and a round that
+    satisfied the grep while leaving the docstring absolute would still have shipped the
+    false claim. Folding each file's whitespace before comparing closes that hole, and this
+    node is the acceptance check in a form that runs on every suite rather than only when
+    somebody remembers to grep.
+
+    Three files, because the claim had three publishers: the filer's docstring, the
+    architecture page, and this file — a test asserting the false sentence is present is
+    how a false sentence keeps being filed and re-triaged as confirmed.
+    """
+    root = Path(__file__).resolve().parents[1]
+    for rel in ("workers/board_disagreement.py", "architecture/workers-jobs.md",
+                "tests/test_board_steward.py"):
+        flat = " ".join((root / rel).read_text(encoding="utf-8").split())
+        assert REPLY_CLAIM_RETIRED not in flat, (
+            f"{rel} still publishes the retired claim once its line wraps are folded — "
+            f"the wrapped shape is exactly what the acceptance grep could not see")
+    for rel in ("workers/board_disagreement.py", "architecture/workers-jobs.md"):
+        flat = " ".join((root / rel).read_text(encoding="utf-8").split())
+        assert "1,123" not in flat, (
+            f"{rel} carries a hard-coded board-steward row count again")
 
 
 async def test_the_reader_never_consults_the_machine_for_a_rows_half_only_its_removal(

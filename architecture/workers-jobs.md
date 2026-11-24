@@ -554,11 +554,13 @@ tick happened to propose. The two sides survive the tick: the machine's recomput
 from `desired_statuses`, and the steward's is in the window's `board_steward`
 ledger events, each `moves` entry carrying `item_id`, `status` and the `note` the
 steward wrote, so the question "which side is wrong" IS answerable
-from the store (#3651). What is genuinely not kept is the model's raw reply —
-`response_json` is
-empty in every board-steward `runs` row — so a row whose id appears in no move in
-the window is filed with `(not in its moves)` and counted in the item's Coverage
-bullet as unrecoverable. A later below-floor tick **adds its new ids to
+from the store (#3651). The model's raw reply is kept in
+`runs.response_json` for any row a pool running `43cc6ba7` (2026-11-19) or later wrote;
+an older row is empty there, and any tick's reply is recoverable from its
+`meta_json.session_id` at `~/lloyd-data/sessions/<id>.json`. The filer reads the ledger's
+`moves` and not that reply, so a row whose id appears in no move in the window is filed
+with `(not in its moves)` and counted in the item's Coverage bullet as unrecoverable.
+A later below-floor tick **adds its new ids to
 the same item** rather than filing a second one, and an item a round is already
 working (`in_progress`) is left unrewritten. Each file-or-merge appends one
 `board_steward_disagreement` row to the promotions ledger carrying that window's
