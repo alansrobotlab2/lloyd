@@ -1,7 +1,7 @@
 ---
 title: Desktop computer use
 status: implemented
-updated: 2026-10-24
+updated: 2026-11-24
 ---
 
 # Desktop computer use
@@ -114,7 +114,8 @@ For those apps to have element lists, two things are needed:
   is Lua, so the line is `hl.env("ACCESSIBILITY_ENABLED", "1")` in
   `~/.config/hypr/hyprland.lua`; the `env = ACCESSIBILITY_ENABLED,1` form
   belongs to a `hyprland.conf` and does nothing here. Nothing under
-  `~/.config/hypr/` set it as of 2026-09-23;
+  `~/.config/hypr/` sets it — re-measured 2026-11-24, 0 hits across the five
+  `.lua` files there;
 - the apps must then be restarted.
 
 Until then those windows are pixel-only. `desktop_capture` says so ("the app
@@ -131,8 +132,17 @@ action except `wait` needs one.
   file, a corrupt file or an expired grant all mean the human holds the
   lease. That is the opposite of Hermes's private-desktop default, and it is
   on purpose.
-- Only the Desktop tab grants a lease (`POST /api/desktop/lease`, 10/30/60
-  minutes, capped at 240). A grant or a revoke toasts through `hyprctl notify`.
+- Only the Desktop tab asks for a lease (`POST /api/desktop/lease`, 10/30/60
+  minutes, capped at 240 — `desktop_lease.MAX_TTL_MINUTES`), and every refusal
+  below is about what Lloyd can call. What the route enforces for a peer is
+  nothing: `post_desktop_lease` takes no `Request`, where the frame publish
+  beside it requires `_peer_is_loopback` (`app/routers/desktop.py:94`, its one
+  call site `:140`). So the write that hands over the keyboard is gated only by
+  `ApiPeerGate`'s address rule — loopback or `server.trusted_networks`, which
+  this box never sets and so defaults to the whole tailnet — while the write
+  that shows a frame is loopback-only (#4533). The tripwire below only protects
+  a seat Alan has already lent; nothing refuses a grant he never made.
+  A grant or a revoke toasts through `hyprctl notify`.
 - Before each action the tripwire compares the pointer and the focused window
   with where Lloyd left them. A move of more than `tripwire_px` (24), or a focus
   change Lloyd did not make, revokes the lease and the action answers
@@ -312,3 +322,19 @@ This is what made any of the above visible to a model, and it also fixed
   `tests/test_desktop_frame_mirror.py` joined the code table. Filed nothing:
   every finding was a line of this doc corrected in place, a shipped fix, or
   a ruled decision (#683).
+- 2026-11-24 — **current**. Re-checked every path, key, count, route and
+  refusal site against the tree at `f65d2310`: 0 commits touch
+  `agent_mcp/desktop/`, `app/desktop_lease.py`, `app/routers/desktop.py`,
+  `agent-services/bin/lloyd-desktop-helper.py` or `app/harness/tool_images.py`
+  in the last 30 days, and the three pinned suites pass together at this head
+  (127 passed, 2 skipped). The backend table, the tripwire and epoch rule, the
+  `wait`-exempts-the-lease rule, the guard tables (VT switches included),
+  `classify_session`, the annotations, the image budget/eviction/rung-0 numbers
+  and the §6 probe trio all hold. Re-measured the two dated claims and both are
+  still true: no `ACCESSIBILITY_ENABLED` anywhere under `~/.config/hypr/`, and
+  `Xvnc`/`xfwm4` are installed. One over-claim corrected in place — §3's "only
+  the Desktop tab grants a lease" describes Lloyd's tool refusals, not the
+  route: `post_desktop_lease` takes no `Request` and checks no peer or session,
+  while `post_desktop_state` beside it demands the loopback peer, so a
+  trusted-network peer (the tailnet by default, since `config.yaml` never sets
+  `server.trusted_networks`) can grant the lease outright. Filed #4533.
