@@ -458,3 +458,63 @@ def test_the_units_block_defines_the_token_field_end_to_end():
     assert "input_tokens_per_turn / (llm_calls/turns)" in units, units
     assert "observer ms SUMMED / turn" in units, units
     assert "observer ms PER CALL" in units, units
+
+
+# ---------------------------------------------------------------------------
+# #4345 clause 5: the module docstring's own latency verdict carries its dates
+# ---------------------------------------------------------------------------
+
+def test_the_module_docstring_dates_the_latency_verdict_it_ships(tmp_path):
+    """The docstring's deadline sentence names its window, its bound, and today's trio.
+
+    For seven weeks this file's module docstring ended the #458 story with "The
+    deadline sits ABOVE p99 (p50 1.8 s / p90 4.1 s / p99 9.2 s over that window)".
+    "That window" was #995's own `--since 2026-09-01` cut measured 2026-09-17 — n
+    9,606 non-error calls, p50 1,750 / p90 4,090 / p99 9,231 ms — and no reader
+    could tell, because the sentence carried no dates and named no bound. So a
+    standing claim about the box outlived the traffic it described: measured
+    2026-11-24 over the same `--since 2026-09-01`, the trio is p50 6,980 / p90
+    15,106 / p99 21,963 ms over 29,644 non-error calls with 12,110 of them (40.9%)
+    over the 8,000 ms bound — the synchronous deadline now sits BELOW p90, the
+    opposite of the sentence a reader of this file would have taken away.
+
+    The clause is therefore three things at once, asserted here: the window dates
+    are in the text, the bound it compares against is named in the unit the bound is
+    kept in (`timeout_seconds` in seconds, so the ms figure is spelled out), and the
+    current trio is beside it with the date it was measured. Asserted as source text,
+    because the artefact under test is a sentence a model reads before it runs the
+    script — the same reason `_units_block` exists in `tests/test_iv_metrics_series.py`.
+
+    The second half is the clause's safety pin: the fix was to the docstring, and the
+    `UNITS` entry's "compared against a deadline they do not share" is still true and
+    unedited. So this node re-runs the printed block and re-asserts the invariant
+    `test_the_summed_figure_is_still_printed_and_labelled_summed` owns — exactly one
+    printed line matching `SUMMED`, at 8,750 for this fixture — so a docstring edit
+    that quietly reached into the `print` cannot pass as documentation-only.
+    """
+    doc = ast.get_docstring(ast.parse(GRADER.read_text(encoding="utf-8")))
+    assert doc, "iv_grade.py carries no module docstring to hold the verdict"
+
+    # The undated form, which is the shape that went false while still reading as a
+    # measurement. It must be gone even in a quoted form.
+    assert "over that window)" not in doc, (
+        "the sentence is back to pointing at an unnamed window")
+    assert "The deadline sits ABOVE p99 (p50" not in doc, (
+        "the verdict is back to being asserted unqualified, with no dates and no bound")
+
+    # The dated trio, the current trio, both bounds, and where to read it next.
+    for text in ("2026-09-01", "2026-09-17", "9,606",
+                 "p50 1,750 / p90 4,090 / p99 9,231 ms",
+                 "2026-11-24", "29,644",
+                 "p50 6,980 / p90 15,106 / p99 21,963 ms",
+                 "8,000 ms", "12,000 ms",
+                 "inner_voice.observer.timeout_seconds", "async_timeout_seconds",
+                 "40.9%", "latency_p90_over_sync_deadline"):
+        assert text in doc, f"the docstring no longer carries {text!r}"
+
+    # The printed block, unchanged: one SUMMED line, same value as the node above.
+    repo = _make_repo(tmp_path)
+    _make_db(repo, STANDARD_ROWS)
+    hits = _lines_matching(_run(repo).stdout, r"SUMMED")
+    assert len(hits) == 1, f"expected one line whose label contains SUMMED: {hits!r}"
+    assert "8,750" in hits[0], hits[0]

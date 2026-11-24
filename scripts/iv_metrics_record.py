@@ -25,6 +25,13 @@ writer on `usage.db`.
 `usage.db` is absent from this file on purpose, and `--out` exists so the
 destination is never hardcoded — the tests run this against a fixture root.
 
+One number is not computed here but read: the observer's synchronous per-call
+deadline, `inner_voice.observer.timeout_seconds`, taken through `app.config.CONFIG`
+so `latency_p90_over_sync_deadline` judges the window against the bound the observer
+actually runs on rather than a copy of it that stops being true the day it is
+retuned (#4345). That is the only config this script reads, and a checkout that
+cannot supply it stores a null flag naming the reason — never a guessed bound.
+
 Window bounds. `inner_voice_observations.created_at` is written **local-naive**, while
 UTC runs hours ahead of it, so a bound authored in a different clock does not shift the
 window — it moves one end of it, silently. On this box (UTC−7) a `date -u` bound names a
@@ -323,6 +330,59 @@ def _count(value) -> int:
     return int(value) if _numeric(value) else 0
 
 
+#: The one spelling of the bound the per-call percentiles are read against. It is a
+#: key PATH, walked out of `CONFIG` below, so the number itself lives only in
+#: `config.yaml` and this file can never disagree with it (#4345).
+SYNC_DEADLINE_KEY = "inner_voice.observer.timeout_seconds"
+
+
+def _sync_deadline_ms() -> tuple[int | None, str]:
+    """(the observer's synchronous per-call deadline in ms, where it came from).
+
+    A percentile is only a verdict against a bound, and the bound that matters for
+    a spoken turn is the one the synchronous terminal review runs on —
+    `inner_voice.observer.timeout_seconds`, Alan's #458 ruling, which the observer
+    reads through `app.config.CONFIG`. Reading it the same way is the whole design:
+    retuning that deadline in `config.yaml` moves the flag's bound in the next row,
+    while a millisecond literal typed in here would have the series keep judging
+    p90 against a bound that stopped existing the day anyone retuned it. #458 was
+    exactly this mistake one unit up ("25.8 s/turn against a 12 s deadline").
+
+    Returns `(None, why)` rather than a default when the config cannot be imported
+    or carries no such key. A guessed bound beside a measured percentile is a
+    fabricated comparison, and a null with a stated reason is a row that admits it
+    could not decide.
+    """
+    try:
+        from app.config import CONFIG
+    except Exception as exc:                                    # noqa: BLE001
+        # The key is named even here: a bare `unavailable (ModuleNotFoundError)`
+        # says something failed without saying which bound is now missing from the
+        # row, and a reader of a null flag has to be able to tell this deadline from
+        # any other source failure the series might one day carry.
+        return None, f"unavailable ({type(exc).__name__}): {SYNC_DEADLINE_KEY}"
+    node: object = CONFIG
+    for part in SYNC_DEADLINE_KEY.split("."):
+        node = node.get(part) if isinstance(node, dict) else None
+    if not _numeric(node):
+        return None, f"{SYNC_DEADLINE_KEY} absent or non-numeric"
+    return int(round(float(node) * 1000)), SYNC_DEADLINE_KEY
+
+
+def _over_sync_deadline(p90, deadline_ms) -> bool | None:
+    """Is this window's p90 round-trip over the observer's synchronous deadline?
+
+    `None` when either number is missing: a window whose every LLM row errored has
+    no p90 at all (`iv_grade.py`'s `_percentile` returns None on an empty list,
+    #995), and a config that could not be read has no bound. Storing `False` for
+    either case would file an unmeasured night as a night that fitted inside the
+    deadline, which is the #1874 null-not-zero rule in flag form.
+    """
+    if not _numeric(p90) or not _numeric(deadline_ms):
+        return None
+    return float(p90) > float(deadline_ms)
+
+
 def breach_basis(row: dict, prior_rates: list) -> list[float]:
     """The rates the median is taken over: the last `window_rows` prior rates plus this
     row's own — empty when the row has no rate, which is what "nothing to breach" means.
@@ -367,6 +427,7 @@ def _row(report: dict, *, window_hours: float | None, threshold: float,
     recall = report.get("recall_proxy", {}) or {}
     llm_calls = int(cost.get("llm_calls", 0) or 0)
     dropped, error_total, by_deadline = _dropped_verdicts(report)
+    deadline_ms, deadline_source = _sync_deadline_ms()
     return {
         # window: the bound as passed, the data's own ends, and the local instant
         # of measurement. `until` is local because `created_at` is local (#835), and
@@ -402,6 +463,29 @@ def _row(report: dict, *, window_hours: float | None, threshold: float,
         # cost
         "observer_ms_per_turn": cost.get("observer_ms_per_turn"),
         "input_tokens_per_turn": cost.get("input_tokens_per_turn"),
+        # The round-trip distribution, which is what `observer_ms_per_turn` is NOT:
+        # that figure is the SUM of a window's LLM milliseconds over its turns
+        # (#995), and a turn costs several calls, so it cannot say whether the
+        # synchronous terminal review is slow enough to be waited behind by a
+        # spoken turn. The grader has computed these four since #995 and this
+        # recorder — the only writer of the series — dropped them until #4345, so
+        # the question was unanswerable from any row ever written. `n` is the
+        # denominator beside them, and it is `_count`ed like the miss counts:
+        # `iv_grade.py` emits it unconditionally, so a stored 0 means the grader
+        # measured and found no completed round-trip, never that no field was
+        # written — and the three percentiles then stay None, because
+        # `_percentile` answers "nothing to measure" with None, not 0 (#1874).
+        "latency_ms_per_call_n": _count(cost.get("latency_ms_per_call_n")),
+        "latency_ms_per_call_p50": cost.get("latency_ms_per_call_p50"),
+        "latency_ms_per_call_p90": cost.get("latency_ms_per_call_p90"),
+        "latency_ms_per_call_p99": cost.get("latency_ms_per_call_p99"),
+        # The bound those percentiles are read against, stated as a value and its
+        # source exactly the way `threshold`/`threshold_source` below state theirs
+        # (#4345). Bound: `inner_voice.observer.timeout_seconds`, currently 8 s.
+        "sync_deadline_ms": deadline_ms,
+        "sync_deadline_source": deadline_source,
+        "latency_p90_over_sync_deadline": _over_sync_deadline(
+            cost.get("latency_ms_per_call_p90"), deadline_ms),
         # threshold state, so a breach is reconstructible from the file alone
         "threshold": threshold,
         "threshold_source": threshold_source,

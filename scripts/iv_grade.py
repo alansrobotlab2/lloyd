@@ -54,8 +54,20 @@ Every deadline in the subsystem (`inner_voice.observer.timeout_seconds`,
 `async_timeout_seconds`) is PER CALL, so only the second pair may be compared
 to it. Printed alone, the summed line caused #458 to argue "mean observer
 latency is 25.8 s/turn against a 12 s deadline … the deadline is arithmetically
-doomed": both halves were unit errors. The deadline sits ABOVE p99 (p50 1.8 s /
-p90 4.1 s / p99 9.2 s over that window).
+doomed": both halves were unit errors. THAT ruling's own trio is dated here
+because for seven weeks it was not: window 2026-09-01 → 2026-09-17, n 9,606
+non-error calls, p50 1,750 / p90 4,090 / p99 9,231 ms (#995). Against the
+12,000 ms `async_timeout_seconds` — the only deadline #995 names beside its trio —
+that verdict was true. It was never true of the 8,000 ms
+`timeout_seconds` the two synchronous terminal calls have run on since Alan's
+#458 ruling of 2026-09-14 — #995's own triage recorded p99 9,231 ms sitting
+ABOVE that bound — and it is not true of traffic now: measured 2026-11-24 over
+`--since 2026-09-01`, p50 6,980 / p90 15,106 / p99 21,963 ms over 29,644
+non-error calls, 12,110 of them (40.9%) over the 8,000 ms. The sync deadline
+sits BELOW p90 today. `scripts/iv_metrics_record.py` carries these four keys and
+that bound into the nightly series as of #4345, so a later reader re-runs the
+row (`latency_ms_per_call_p90` beside `latency_p90_over_sync_deadline`) instead
+of re-deriving this paragraph by hand.
 
 Percentiles exclude error rows because a failed call's latency is its own
 deadline cut-off (stamped after the request was abandoned), not a completed

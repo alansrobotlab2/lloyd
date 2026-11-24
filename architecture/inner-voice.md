@@ -417,8 +417,27 @@ the retired thing is true, and only a week of nightly rows can say it is doing e
 `observer_ms_per_turn` is a SUM over the window's reviews as well, not a
 round-trip (#995). Those same three rows read 28,238 / 25,766 / 25,305 ms a
 turn, which says nothing about the synchronous terminal review a spoken turn
-waits behind; the per-call percentiles would, and
-`scripts/iv_metrics_mirror.py` does not carry them into the series.
+waits behind. The figures that do are the grader's per-call percentiles —
+`latency_ms_per_call_n` / `_p50` / `_p90` / `_p99` — and the place they died was
+**`scripts/iv_metrics_record.py`'s `_row`**, whose `# cost` block copied only
+`observer_ms_per_turn` and `input_tokens_per_turn` into the series row until
+#4345. The mirror never dropped them and cannot: `scripts/iv_metrics_mirror.py`
+copies the series whole (`part.write_bytes(source.read_bytes())`), so source and
+mirror agreed on the absence — 69 rows, 0 per-call keys, both files, measured
+2026-11-24. Naming the mirror as the dropper was wrong twice over: it blamed a
+byte copy for a filter, and it sent the fix to the one file that had none.
+
+**The bound the percentiles are read against is the observer's synchronous
+per-call deadline**: `inner_voice.observer.timeout_seconds`, 8,000 ms — Alan's
+#458 ruling. Each nightly row now carries that bound with its source
+(`sync_deadline_ms` / `sync_deadline_source`) and the verdict as
+`latency_p90_over_sync_deadline`, null rather than false when the window had no
+completed round-trip (#1874's rule). Measured 2026-11-24 over `--since
+2026-09-01`: p50 6,980 / p90 15,106 / p99 21,963 ms over 29,644 non-error calls,
+12,110 of them (40.9%) over the bound. So the spoken-path question #4216's
+addendum asks — is the synchronous terminal review too slow to be waited behind
+by a barge-in — turns on 15,106 ms against 8,000 ms, and it is now a question a
+series can answer; the ruling itself is owed once three rows carry the keys.
 
 ## Review log
 

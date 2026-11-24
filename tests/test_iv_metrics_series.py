@@ -2356,6 +2356,12 @@ def test_the_mutes_close_the_live_fan_out_and_every_fixture_sets_them(tmp_path):
 # `:520`, so a rename would break the trend at the seam and leave the archived rows
 # unjoinable to the new ones. This test is the guard on that decision, run across
 # the real pipe.
+#
+# #4345 added the OTHER half at the same seam: `_row` also copies the four
+# per-call keys now, so this test guards two things at once — the SUM keeps its
+# name and its value, and the round-trip keys arrive with the grader's values.
+# Until then the recorder was the only writer of the series and it dropped them,
+# which is why the item could not be measured from any row ever written.
 
 
 def test_the_percentile_keys_leave_the_recorder_row_intact(tmp_path):
@@ -2369,6 +2375,12 @@ def test_the_percentile_keys_leave_the_recorder_row_intact(tmp_path):
     SUM, the new keys carry the round-trip, and neither is quietly redefined into
     the other. Run as a real `bash -c` pipe with the fixture `HOME`, exactly like
     every other end-to-end test in this file.
+
+    #4345 clause 1 extends it: the four per-call keys are asserted ON THE ROW with
+    the fixture's values (n 2, p50 100, p90 300, p99 300), not merely present in
+    the grader's payload. Before that clause the row could lack every one of them
+    while this test stayed green, which is exactly how the series ended up with 69
+    rows and no per-call latency in any of them.
     """
     repo = _make_repo(tmp_path)
     _make_db(repo, [
@@ -2392,9 +2404,25 @@ def test_the_percentile_keys_leave_the_recorder_row_intact(tmp_path):
         "the persisted key was renamed; the archived rows in "
         "_pipeline/reflection/iv-metrics.jsonl would no longer join to the new ones")
 
-    # The grader, same fixture and same bound, on its own — the keys the recorder
-    # did NOT copy still have to exist for the next consumer, and the two views of
-    # one fixture must agree on the SUM. `sys.executable` rather than the pipe's
+    # #4345 clause 1, asserted ON THE ROW rather than in the grader's payload: the
+    # four per-call keys are in the series file now, with the fixture's own values,
+    # beside the SUM that keeps its separate meaning. `latency_ms_per_call_n` 2 is
+    # the two LLM calls in `_STANDARD_OBS`, and nearest-rank over n=2 gives p50 100
+    # (rank 1) and 300 for both p90 and p99 (rank 2). Before this clause none of
+    # these keys reached the row at all — 69 nightly rows carried
+    # `observer_ms_per_turn` and no round-trip figure in any of them — so an assert
+    # that only re-ran the grader could not tell the recorder's silence from the
+    # grader's, which is how the gap survived #995 by seven weeks.
+    for key, want in (("latency_ms_per_call_n", 2),
+                      ("latency_ms_per_call_p50", 100),
+                      ("latency_ms_per_call_p90", 300),
+                      ("latency_ms_per_call_p99", 300)):
+        assert key in row, f"{key} never reached the series: {sorted(row)}"
+        assert row[key] == want, f"{key}={row[key]!r}, the grader says {want!r}"
+
+    # The grader, same fixture and same bound, on its own — the row must agree with
+    # the grader key for key, and the two views of one fixture must agree on the
+    # SUM. `sys.executable` rather than the pipe's
     # `python3` because this call only reads keys; the pipe above is what pins the
     # interpreter a scheduled run actually gets.
     graded = subprocess.run(
@@ -2438,6 +2466,17 @@ _KEYS_BEFORE_1874 = {
     "dropped_rate", "landed_rate", "miss_rate", "observer_ms_per_turn",
     "input_tokens_per_turn", "threshold", "threshold_source", "window_rows",
     "flagged", "models", "recorded_at",
+}
+
+#: What #4345 adds on top: the grader's four per-call figures, and the bound they
+#: are read against stated three ways (the value, its source, the verdict). Named
+#: separately rather than folded into the set above because the comment there is
+#: #1874's clause-3 claim about the row AT that time, and rewriting it would make
+#: this file cite a change as the guard for a later one.
+_KEYS_ADDED_BY_4345 = {
+    "latency_ms_per_call_n", "latency_ms_per_call_p50", "latency_ms_per_call_p90",
+    "latency_ms_per_call_p99", "sync_deadline_ms", "sync_deadline_source",
+    "latency_p90_over_sync_deadline",
 }
 
 
@@ -2497,15 +2536,25 @@ def test_the_miss_counts_are_added_without_changing_any_existing_field():
     exactly `miss_checked` and `miss_corrected` — a renamed or dropped field, or a
     third field riding along, goes red here.
 
+    The one edit #4345 made to this assertion is its right-hand side, and nothing on
+    the left: `_row` now also copies the grader's per-call latency keys and their
+    bound, so the set is `_KEYS_BEFORE_1874` + #1874's two counts +
+    `_KEYS_ADDED_BY_4345`, still an exact equality — a field riding along beyond
+    those still goes red, which is the clause #1874 filed and #4345 keeps
+    ("additive means every old key keeps its name and its value"). #4345's own
+    clause 1 is "add the four keys beside `observer_ms_per_turn`", and this is the
+    test that would catch it silently renaming the SUM while doing so.
+
     The behavioural half is that the alert path cannot see the new fields: two
     rows differing only in the two counts (same 0.25 ratio, 4/1 against 400/100)
     agree on `flagged`, and `breach_basis` is computed from `dropped_rate` and
     `window_rows` alone.
     """
     row = _row_1874(_REPORT_1874)
-    assert set(row) == _KEYS_BEFORE_1874 | {"miss_checked", "miss_corrected"}, (
+    assert set(row) == (_KEYS_BEFORE_1874 | {"miss_checked", "miss_corrected"}
+                        | _KEYS_ADDED_BY_4345), (
         f"extra={set(row) - _KEYS_BEFORE_1874}, "
-        f"missing={_KEYS_BEFORE_1874 - set(row)}")
+        f"missing={(_KEYS_BEFORE_1874 | _KEYS_ADDED_BY_4345) - set(row)}")
 
     expected = {
         "window_hours": 26.0,
@@ -2844,3 +2893,240 @@ def test_the_three_newest_rows_are_frequency_rising_and_cost_flat_and_the_doc_sa
             "does not print it, so the per-turn rise above has nothing to be flat "
             "against")
     assert ROWS_4216[0][0] in section, "the section must date the rows it quotes"
+
+
+# ── #4345: the per-call percentiles reach the row, with the bound they mean ─────
+#
+# `iv_grade.py` has computed `latency_ms_per_call_n/p50/p90/p99` since #995 and `_row`
+# copied exactly two cost fields, so the round-trip figures died at the recorder: the
+# live series and its vault mirror each held 69 rows and 0 occurrences of the key on
+# 2026-11-24, byte for byte identical. The mirror could not have done it
+# (`part.write_bytes(source.read_bytes())` has no key list), which is why `#4345`
+# moved the blame to `_row` in both this file and `architecture/inner-voice.md`.
+#
+# What the tests below hold, past "the keys are copied":
+#
+#   * null, never 0. A window with no completed call stores n 0 and three nulls,
+#     because `_percentile` answers "nothing to measure" with None and a `0 ms` p50
+#     would read back as the fastest night on record — #1874's denominator rule in a
+#     field #1874 never named.
+#   * the bound, or the number is meaningless. p90 is only slow or fast relative to
+#     the observer's synchronous per-call deadline, so the recorder reads
+#     `inner_voice.observer.timeout_seconds` through `app.config.CONFIG` and states
+#     the value with its source the way `threshold`/`threshold_source` state theirs.
+#     A fixture that raises that timeout with `$LLOYD_CONFIG_OVERLAY` therefore moves
+#     the verdict with the observations untouched — which a millisecond literal typed
+#     into the recorder could not do, and #458 is what happens when one is.
+#
+#: The one config key the flag reads, at the bound `config.yaml` carries today. The
+#: fixture writes it rather than copying the tracked `config.yaml`, so the test says
+#: which bound it means instead of inheriting one it does not name.
+SYNC_DEADLINE_CONFIG = "inner_voice:\n  observer:\n    timeout_seconds: 8\n"
+
+#: Ten completed round-trips, 1 s through 10 s, one per turn. `_percentile` is
+#: nearest-rank, so over n = 10 the ranks are 5 / 9 / 10 and the trio is
+#: p50 5,000 / p90 9,000 / p99 10,000 ms. p90 is 1,000 ms over the 8 s bound and
+#: 11,000 ms under the 20 s one the overlay arm raises it to: one row, two verdicts,
+#: and the only thing that moved is the bound.
+ROUND_TRIP_LADDER_MS = [1000, 2000, 3000, 4000, 5000, 6000, 7000, 8000, 9000, 10000]
+
+
+def _make_config_repo(tmp_path: Path) -> Path:
+    """A fixture repo that can answer the bound question — and answers it at 8 s.
+
+    `_make_repo`'s `app` chain is the grader's, which is stdlib-only by the rule in
+    `tests/fixture_checkout.py`, and `app/config.py` is not in it and not stdlib-only:
+    it imports `yaml` and `app.atomic_io`. A plain fixture repo therefore has no bound
+    to read and the recorder stores a null flag naming that — the honest arm, tested
+    on its own below. The two tests that need a flag which DECIDES need the chain, and
+    these three files are the whole of it (`app/paths.py` is already copied), so the
+    bound under test is a value in a fixture `config.yaml` rather than the machine's.
+    """
+    repo = _make_repo(tmp_path)
+    for rel in ("app/config.py", "app/atomic_io.py"):
+        shutil.copy2(ROOT / rel, repo / rel)
+    (repo / "config.yaml").write_text(SYNC_DEADLINE_CONFIG, encoding="utf-8")
+    return repo
+
+
+def _ladder_rows() -> list[dict]:
+    """The ten round-trips, spread across the 26-hour window the nightly asks for."""
+    return [{"latency_ms": ms, "turn_id": f"trip{i}",
+             "created_at": NOW_LOCAL - datetime.timedelta(hours=25 - i)}
+            for i, ms in enumerate(ROUND_TRIP_LADDER_MS)]
+
+
+def _pipe_row(repo: Path, since: str, out: Path,
+              extra_env: dict | None = None) -> dict:
+    """The documented pipe over `repo`, returning the single row it appended.
+
+    `--no-outcome-score` because the outcome scorer opens the session transcripts,
+    which is another test's subject; everything the cost block reads is in the
+    observations the fixture wrote.
+    """
+    env = _env(repo.parent)
+    env.update(extra_env or {})
+    result = _call(since=since, repo=repo, out=out,
+                   extra=["--hours 26", "--no-outcome-score"], env=env)
+    assert result.returncode == 0, (result.returncode, result.stderr[:400])
+    rows = _rows_of(out)
+    assert len(rows) == 1, f"expected one appended row, got {len(rows)}: {rows}"
+    return rows[0]
+
+
+def test_a_window_with_no_completed_call_stores_the_percentiles_as_null(tmp_path):
+    """#4345 clause 2: n 0 with three nulls, and the flag null beside them.
+
+    Two config-carrying fixture repos, one pipe each, both at the same 8 s bound so a
+    null below cannot be blamed on a missing config:
+
+      * every observation errored — the shape `tests/test_iv_grade_latency.py`'s
+        all-error node builds, and the reason percentiles exclude error rows at all:
+        a failed call's latency is its own deadline cut-off, not a round-trip. The
+        grader emits `latency_ms_per_call_n: 0` and None for each percentile.
+      * the ten completed round-trips, where all four keys are numbers.
+
+    Asserted in both directions because the failure is one-sided: storing 0 rather than
+    null is what makes an unmeasurable night read as a fast one, which is the exact
+    misreading #1874 rules out for ratios and #995 for percentiles. The bound is
+    asserted present in the null row at the same time: a null flag with no bound beside
+    it would be ambiguous between "nothing to measure" and "not over the bound".
+    """
+    unmeasured_repo = _make_config_repo(tmp_path / "unmeasured")
+    _make_db(unmeasured_repo, [
+        {"latency_ms": 12000, "error": "timeout after 8.0s", "turn_id": f"err{i}",
+         "created_at": NOW_LOCAL - datetime.timedelta(hours=5 - i)}
+        for i in range(2)])
+    measured_repo = _make_config_repo(tmp_path / "measured")
+    _make_db(measured_repo, _ladder_rows())
+    since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+
+    unmeasured = _pipe_row(unmeasured_repo, since, unmeasured_repo / "unmeasured.jsonl")
+    measured = _pipe_row(measured_repo, since, measured_repo / "measured.jsonl")
+
+    assert unmeasured["latency_ms_per_call_n"] == 0, unmeasured
+    assert type(unmeasured["latency_ms_per_call_n"]) is int, unmeasured
+    for key in ("latency_ms_per_call_p50", "latency_ms_per_call_p90",
+                "latency_ms_per_call_p99"):
+        assert unmeasured[key] is None, (
+            f"{key} stored {unmeasured[key]!r} over a window with no completed call; "
+            "only null says 'nothing was measured' without also reading 'it was fast'")
+    assert unmeasured["sync_deadline_ms"] == 8000, unmeasured["sync_deadline_source"]
+    assert unmeasured["latency_p90_over_sync_deadline"] is None, (
+        "a flag of False here would be a verdict on nothing; only None is honest")
+
+    assert measured["latency_ms_per_call_n"] == 10, measured
+    assert (measured["latency_ms_per_call_p50"], measured["latency_ms_per_call_p90"],
+            measured["latency_ms_per_call_p99"]) == (5000, 9000, 10000), measured
+    for key in ("latency_ms_per_call_n", "latency_ms_per_call_p50",
+                "latency_ms_per_call_p90", "latency_ms_per_call_p99"):
+        assert isinstance(measured[key], int) and not isinstance(measured[key], bool), (
+            f"{key}={measured[key]!r} is not a number on a window that had calls")
+
+
+def test_the_p90_verdict_follows_the_bound_in_config_and_not_the_rows(tmp_path):
+    """#4345 clause 3: one unchanged p90, two bounds, two verdicts.
+
+    Same fixture, same observations, same output of the grader — two runs of the pipe,
+    the second carrying `LLOYD_CONFIG_OVERLAY` raising `timeout_seconds` from 8 to 20.
+    p90 is 9,000 ms in both rows, and the flag goes true → false with nothing but the
+    bound having moved. That is what "derived from `app.config.CONFIG`" has to mean: a
+    millisecond literal copied into the recorder would have printed 8000 twice and
+    ruled true twice, and the series would have kept judging 2027's traffic against
+    this year's deadline.
+
+    The provenance pair is the other half of the clause, and it is asserted on both
+    rows: `sync_deadline_ms` is the value and `sync_deadline_source` names the config
+    key it came from, the shape `threshold`/`threshold_source` already use two lines
+    below in the same block.
+    """
+    repo = _make_config_repo(tmp_path)
+    _make_db(repo, _ladder_rows())
+    since = _iso(NOW_LOCAL - datetime.timedelta(hours=26))
+
+    ruled = _pipe_row(repo, since, repo / "at-8s.jsonl")
+    assert ruled["latency_ms_per_call_p90"] == 9000, ruled
+    assert ruled["sync_deadline_ms"] == 8000, ruled
+    assert ruled["sync_deadline_source"] == "inner_voice.observer.timeout_seconds", ruled
+    assert ruled["latency_p90_over_sync_deadline"] is True, ruled
+
+    overlay = repo.parent / "raise-the-bound.yaml"
+    overlay.write_text("inner_voice:\n  observer:\n    timeout_seconds: 20\n",
+                       encoding="utf-8")
+    raised = _pipe_row(repo, since, repo / "at-20s.jsonl",
+                       extra_env={"LLOYD_CONFIG_OVERLAY": str(overlay)})
+    assert raised["latency_ms_per_call_p90"] == ruled["latency_ms_per_call_p90"] == 9000, (
+        "the p90 moved, so the two rows no longer differ only by the bound")
+    assert raised["sync_deadline_ms"] == 20000, raised
+    assert raised["sync_deadline_source"] == ruled["sync_deadline_source"], raised
+    assert raised["latency_p90_over_sync_deadline"] is False, (
+        "the flag stayed true over a bound it is now 11,000 ms inside: the bound is "
+        "not being read from the config the run was given")
+
+    # The clause's "not a literal 8000" is a claim about the source, so it is checked
+    # in the source: no millisecond figure of this size may appear anywhere in the
+    # recorder, which is what keeps a retuned `config.yaml` honest for the next author
+    # rather than only for the two rows above.
+    assert "8000" not in RECORDER.read_text(encoding="utf-8"), (
+        "the recorder carries a millisecond literal again, so retuning the deadline in "
+        "config.yaml would leave every later row judging p90 against a bound nobody set")
+
+
+def test_a_repo_with_no_config_to_read_stores_a_null_flag_that_names_the_key(tmp_path):
+    """The fallback arm of the same clause: an unreadable bound is reported, not guessed.
+
+    `_make_repo`'s stdlib-only `app` chain has no `app/config.py`, so the recorder
+    cannot ask the question — and must not answer it. The row keeps its four
+    percentiles (those need no config) and stores both the bound and the flag as null,
+    with the source naming the key it tried to read. A default of `False` here would
+    put "inside the deadline" into the series for a checkout that never said so.
+    """
+    repo = _make_repo(tmp_path)
+    _make_db(repo, _ladder_rows())
+    row = _pipe_row(repo, _iso(NOW_LOCAL - datetime.timedelta(hours=26)),
+                    repo / "no-config.jsonl")
+
+    assert row["latency_ms_per_call_p90"] == 9000, row
+    assert row["sync_deadline_ms"] is None, row
+    assert row["latency_p90_over_sync_deadline"] is None, row
+    # Prefix asserted, not the punctuation after it: the shipped string is
+    # `unavailable (ModuleNotFoundError): inner_voice.observer.timeout_seconds`, and
+    # both halves are the point. A bare `unavailable` would say something failed
+    # without saying which bound left the row, so a reader of a null flag could not
+    # tell this from any other source failure the series might one day carry.
+    assert row["sync_deadline_source"].startswith("unavailable"), row
+    assert "inner_voice.observer.timeout_seconds" in row["sync_deadline_source"], row
+
+
+def test_the_architecture_doc_blames_the_recorder_and_states_the_bound():
+    """#4345 clause 4: the doc names the file that filtered, and the number to judge by.
+
+    Two sentences in `architecture/inner-voice.md`'s `## Verification` are under test.
+    Before this clause the doc said the per-call percentiles were missing because
+    "`scripts/iv_metrics_mirror.py` does not carry them into the series" — and the
+    mirror is `part.write_bytes(source.read_bytes())`, a whole-file byte copy with no
+    key list, which is why source and mirror agreed on the absence. The false blame
+    sent the fix to a file that had none while `_row` went unnamed, and the doc also
+    never said what the percentiles would be judged against, which is the half that
+    makes #4216's addendum question answerable at all.
+
+    Scoped to `## Verification`, like the other doc clauses in this file: a sentence
+    added somewhere else in the doc is not the sentence a reader of that defect reaches.
+    """
+    section = _verification_section()
+    start = section.index("`observer_ms_per_turn` is a SUM over the window's reviews")
+    para = section[start:]
+
+    assert "scripts/iv_metrics_record.py" in para and "`_row`" in para, (
+        "the doc still does not name the recorder's `_row` as where the per-call "
+        "percentiles are dropped")
+    # Exonerated in the same breath, with the reason: deleting the false blame alone
+    # leaves nothing for the next triage pass to read, and the mirror gets blamed again.
+    assert "iv_metrics_mirror.py" in para and "write_bytes" in para, (
+        "the doc must still say what the mirror is, and why a byte copy cannot drop a "
+        "key — that reason is what stops this being re-filed against the wrong file")
+    assert "does not carry them into the series" not in para, (
+        "the sentence blaming the mirror for filtering is still standing")
+    assert "inner_voice.observer.timeout_seconds" in para and "8,000 ms" in para, (
+        "the paragraph must state the deadline the percentiles are read against, in "
+        "the unit the percentiles are in — a trio with no bound is not a verdict")
