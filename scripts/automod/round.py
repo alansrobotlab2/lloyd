@@ -11,13 +11,17 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
 import os
+import re
 import subprocess
 import sys
 import time
 from pathlib import Path
 
 from scripts.automod import gate as G, promote as P, spec, state as S, worktree as W
+
+logger = logging.getLogger(__name__)
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -734,6 +738,79 @@ def _gate_verdict(round_id: str) -> dict:
             "review_clauses": RV.summarize_clause_rows(rows)}
 
 
+#: A reason's own clause claim, spelled in the grader's vocabulary rather than
+#: ordinary English: `all five are not_met`, `every clause unmet`, `both are not
+#: met`. `failed` is deliberately not in the alternation — "all 5 tests failed" is
+#: a claim about the tests rung and would read as a contradiction beside a row whose
+#: clauses were all met. What this matches is a sentence about *clauses*, which is
+#: the only sentence the stamped verdicts can answer.
+_ALL_CLAUSES_UNMET = re.compile(
+    r"\b(?:all|every|both)\b[^.;]{0,40}?\b(?:not_met|not met|unmet)\b", re.IGNORECASE)
+
+#: The `N met` / `N partial` terms of a `review_clauses` summary — the exact shape
+#: `review.summarize_clause_rows` writes (`"4 met, 1 unsatisfiable of 5"`). Only a
+#: positive verdict counts as a contradiction: `unmet`, `unsatisfiable` and
+#: `post_landing` do not make an "everything failed" claim false.
+_CLAUSE_PASSED = re.compile(r"\b(\d+) (met|partial)\b")
+
+
+def _every_clause_unmet_claim(reason: str, review_clauses: str) -> bool:
+    """Does the reason say no clause was met, while the verdicts on its own row say one was?
+
+    The second half of the same defect as an absent quote, and the half that needs
+    no artifact: `#4547`'s witness row reads `so all five are not_met rather than
+    guessed at met` with `"review_clauses": "4 met, 1 unsatisfiable of 5"` on the
+    very same line, and nothing read one against the other. An empty
+    `review_clauses` is `""` — no grade recorded, which is not a grade that met
+    nothing (#2448) — so a claim this strong has nothing to contradict and reads as
+    unverified, not false.
+
+    It goes one way only. `SM_20261121_133517` claims the opposite direction ("all 5
+    clauses met" beside `3 met, 2 partial of 5`) and is caught by the quote half,
+    which is the half the incident's own prose was made of.
+    """
+    if not review_clauses:
+        return False
+    if not _ALL_CLAUSES_UNMET.search(reason or ""):
+        return False
+    return any(int(n) > 0 for n, _ in _CLAUSE_PASSED.findall(review_clauses))
+
+
+def _quoted_gate_text_absent(round_id: str, reason: str, review_clauses: str) -> bool:
+    """Should this abort row be stamped **the reason's gate claims do not match this round's artifacts**?
+
+    `True` on either of two readings, `False` otherwise — and `False` means
+    "verified or unknown", never "verified": a truthful quote, a reason that quotes
+    nothing, a round whose directory the retention sweep reclaimed, and an internal
+    error here are all the same answer, because an advisory stamp that fires on a
+    missing file would teach the next reader to ignore it.
+
+    The two readings are the two ways the reason can contradict the record while the
+    record is sitting on disk beside it:
+
+    1. it quotes text as its own report's finding that no file of that round holds
+       (`app/backlog_evidence.absent_report_quotes`, which also holds the measured
+       firing rate: 2 of the 119 rows on 2026-11-24, both real);
+    2. it asserts every clause failed while the `review_clauses` it rides with
+       records a `met` or a `partial` (`_every_clause_unmet_claim`).
+
+    The stamp travels with the row and back to the caller, and it edits nothing: the
+    reason stays the caller's prose, which `scorecard.bare_aborts` counts by
+    emptiness and which is the narrative a reader needs. What it gives the consumer
+    — the abort triage that turns a refusal into a `blocker`, and a blocker skips the
+    depth gate — is a reason to not promote an unverified refusal on its own word.
+    """
+    try:
+        from app import backlog_evidence as BE
+        if BE.absent_report_quotes(reason, round_id):
+            return True
+        return _every_clause_unmet_claim(reason, review_clauses)
+    except Exception:  # noqa: BLE001 — a close must still close, and an error is not a fabrication
+        logging.getLogger(__name__).exception(
+            "the abort reason stamp errored for %s; the row goes out unflagged", round_id)
+        return False
+
+
 #: A patch over this size is not a lost edit, it is somebody rebuilding the
 #: tree; copying it into the audit trail on every close is how the audit trail
 #: stops being readable. The paths are recorded whatever the size.
@@ -847,17 +924,31 @@ def abort(round_id: str, reason: str = "") -> dict:
     clause the file records as met (#2448 — `gate_ok: false` alone agreed with
     the invented story, so the incident recurred after that stamp landed).
 
+    And now a fourth, machine-readable and never narrative:
+    `quoted_gate_text_absent` (see `_quoted_gate_text_absent`), which is `True` when
+    the reason quotes this round's report at text no file of the round holds, or
+    claims every clause failed while the `review_clauses` riding beside it records a
+    `met`. The two earlier stamps made the disagreement *visible*; #4547's row shows
+    what visibility buys, because that row's `review_clauses` of `4 met, 1
+    unsatisfiable of 5` sat next to a reason saying `all five are not_met` and the
+    blocker filed from the reason was still taken early as a `priority: high`
+    blocker of another item. The prose is untouched — same collapse, same 500-char
+    cap — so `scorecard.bare_aborts` does not move and the narrative survives; the
+    flag is what a consumer checks, not what it reads.
+
     And it carries the live checkout's uncommitted work, copied aside first
     (see `preserve_live_dirt`). The branch is not where an orphan live edit
     lives, so a close that kept only the branch kept nothing of it.
     """
     verdict = _gate_verdict(round_id)     # before the removal, which deletes the round dir
+    stored = " ".join(str(reason or "").split())   # the caller's prose, once, for both uses below
+    stamped = dict(verdict, quoted_gate_text_absent=_quoted_gate_text_absent(
+        round_id, stored, verdict["review_clauses"]))   # also before: it reads the round's own files
     preserved = preserve_live_dirt(round_id)   # also before: the tree is nobody's once the worktree is gone
     W.remove(round_id, keep_branch=True, repo=LIVE_ROOT)
     S.append_event({"event": "round_aborted", "round_id": round_id,
-                    "reason": " ".join(str(reason or "").split())[:500],
-                    **verdict, **preserved})
-    return {"aborted": round_id, "branch_kept": f"automod/{round_id}", **verdict, **preserved}
+                    "reason": stored[:500], **stamped, **preserved})
+    return {"aborted": round_id, "branch_kept": f"automod/{round_id}", **stamped, **preserved}
 
 
 def _unit_drift() -> list[str]:

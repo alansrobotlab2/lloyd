@@ -1,6 +1,6 @@
-"""Is a blocker's quoted gate evidence really in the artifact it names?
+"""Is a quoted line of a round's gate report really in the artifact it names?
 
-A *blocker* — an item tagged `spawned-by-autocode` + `blocker`, first line
+Two surfaces ask this question and they cannot afford the same answer. A *blocker* — an item tagged `spawned-by-autocode` + `blocker`, first line
 "Blocks #N" — is the one thing an implement round may file of its own, and it is
 the most privileged item on the board: the `a BLOCKER of #…` line of
 `workers/sources/autotriage.py:542-544` tells the triage that "an implement round
@@ -51,10 +51,23 @@ measured off the real artifact:
   an abbreviation of a value that long is read that way: a prefix shorter than
   `MIN_VALUE_PREFIX_CHARS` is a guess about the number, and stays absent.
 
-A backtick, not a quotation mark, is what marks the claim: this corpus writes
-verbatim copies as inline code and its own prose in ordinary sentences, so prose
-outside backticks is never checked here. The judgement is checkable by hand
-either way (`grep -F '<quote>' <artifact>`), which is the property the prompt
+A backtick, not a quotation mark, is what marks the claim **on the refusal path**:
+this corpus writes verbatim copies as inline code and its own prose in ordinary
+sentences, so `absent_quotes` — the function that can say *no* to a write — reads
+inline code and nothing else. `absent_report_quotes` is the advisory twin of that
+judgement, for a surface where a quotation mark, not a backtick, is how the claim
+is made: an abort reason's prose, which can only ever be stamped, never blocked.
+It exists because #4547's witness row fabricated exactly such a quote — a
+double-quoted span presented as `gate.json`'s finding that no file of that round
+holds — and the backtick-only rule cannot see it. Everything that can be shared is
+shared: the same artifact sweep, the same collapse, the same field comparison, the
+same "unreadable is not absent" ruling; only the candidate form and the widening
+that a refusal cannot afford differ. The refusal path is unchanged by that
+incident's own triage, which records a false refusal it has already caused and
+defers widening it to a separate decision.
+
+The judgement is checkable by hand either way
+(`grep -F '<quote>' <artifact>`), which is the property the prompt
 asked a blocker's evidence to have.
 
 Lives in `app/` beside the other backlog helpers so both board writers reach one
@@ -303,6 +316,102 @@ def absent_quotes(body: str, *, rounds_dir: Path | None = None) -> list[dict]:
                            "round_ids": round_ids,
                            "searched": [str(path) for path, _ in artifacts]})
     return absent
+
+
+#: A round's abort reason is only making a checkable claim when it says *its own
+#: report* says something. This is that attribution, and it is the whole of the
+#: narrowing in `absent_report_quotes`: of the 119 `round_aborted` rows in
+#: `~/.local/state/lloyd-automod/promotions.jsonl` on 2026-11-24, 8 name one of
+#: these in the reason and 5 of those also carry a double-quoted span, and those 5
+#: are the claims a reader can verify by hand with `grep -F`. A quote attributed to
+#: anything else — a test run, the item, a source file — is a different claim, and
+#: this module does not answer it.
+_REPORT_CITED = re.compile(r"gate\.json|gate\.log|\bgate report\b", re.IGNORECASE)
+
+#: One span held in double quotes (straight or turned), at least `MIN_QUOTE_CHARS`
+#: long. Single quotes are not a form: an apostrophe inside `don't` cuts the span
+#: mid-sentence. A backtick is deliberately not a form here either, which is the
+#: opposite of `absent_quotes` — see `absent_report_quotes`.
+_QUOTED_PROSE = re.compile(
+    rf'"([^"\n]{{{MIN_QUOTE_CHARS},}})"|“([^”\n]{{{MIN_QUOTE_CHARS},}})”')
+
+
+def _copiable_prose(span: str) -> bool:
+    """Could this quoted span have been pasted out of the report, unedited?
+
+    Three of `_is_verifiable`'s four rules carry over (length, a space to compare,
+    no ellipsis — a cut span is not a line of any file). The command rules do not,
+    and that is deliberate: they exist because a *blocker's* backticked spans are
+    mostly shell commands the author wrote, and refusing a write over one would
+    cost a real item. Here the span is a double-quoted run of prose in a sentence
+    about a gate report, and the fabricated quote this function exists to catch
+    begins with a path — `tests/test_architecture_coverage_doc_claims.py is
+    ~15,768 lines/~804,524 chars and the harness caps per-read content at ~76.8 KB`
+    — which the leading-path rule would wave through (#4547's witness row). Only
+    `&&` and `|` stay, because a quoted pipeline is a command in any surface.
+    """
+    quote = span.strip()
+    if len(quote) < MIN_QUOTE_CHARS or " " not in quote:
+        return False
+    if any(e in quote for e in ELLIPSES):
+        return False
+    return "&&" not in quote and "|" not in quote
+
+
+def absent_report_quotes(reason: str, round_id: str, *,
+                         rounds_dir: Path | None = None) -> list[str]:
+    """The spans an abort reason quotes as its own round's report text that no file of that round holds.
+
+    `[]` is a green answer and covers two different situations, exactly as
+    `absent_quotes` does: every verifiable span reproduced, **or** there was no
+    claim to test — no double-quoted span, no attribution to the report, or a round
+    directory the retention sweep reclaimed. A missing artifact is never read as a
+    fabricated quote; it is unreadable, which is a different fact (#4547 clause 4).
+
+    The caller reads this as an *advisory* stamp, not a refusal, and that is why
+    this function is allowed a wider span set than `absent_quotes` on one axis
+    (double-quoted prose, which that function never reads, and which is how an
+    abort reason actually quotes a finding) and a narrower one on two others (only
+    the round the caller names, not any round a paragraph happens to mention; only
+    text attributed to the report, not any quote in the string). A false stamp costs
+    an honest abort one extra field on a row; a false refusal costs a real blocker.
+    Measured over the 119 rows on 2026-11-24: 6 spans in 5 rows checked, 2 rows
+    flagged, and each of the 2 is contradicted by the clause verdicts on its own
+    row — `SM_20261121_133517` quotes `review: 5 met of 5 clause(s)` beside a
+    `review_clauses` of `3 met, 2 partial of 5`, and `SM_20261124_183211` is the
+    #4547 witness — while the other 114 rows carry no stamp.
+
+    The reason is collapsed before it is scanned, so a quote that was written
+    across two lines is still one span, and the match step compares both the raw
+    span against the artifact and the collapsed span against the collapsed artifact
+    for the same reason `absent_quotes` does: a JSON report and a prose sentence
+    disagree about newlines and nothing else. Truncating is *not* applied here —
+    the caller stores `reason[:500]`, and a cut that lands inside a quoted pair
+    turns a true quote into a fragment no file holds.
+    """
+    if not reason or not round_id:
+        return []
+    text = _collapse(reason)
+    if not _REPORT_CITED.search(text):
+        return []
+    spans: list[str] = []
+    for match in _QUOTED_PROSE.finditer(text):
+        span = (match.group(1) or match.group(2) or "").strip()
+        if _copiable_prose(span) and span not in spans:
+            spans.append(span)
+    if not spans:
+        return []
+    root = Path(rounds_dir) if rounds_dir is not None else rounds_root()
+    artifacts = _artifacts(root / round_id)
+    if not artifacts:
+        return []          # nothing readable: unverifiable, never absent
+    rendered = [(body, _collapse(body)) for _, body in artifacts]
+    fields = (_merged_fields(artifacts)
+              if any(_key_value(s) for s in spans) else {})
+    return [span for span in spans
+            if not any(span in body or _collapse(span) in fold
+                       for body, fold in rendered)
+            and not _key_value_reproduces(span, fields)]
 
 
 def blocker_quote_refusal(name: Any, description: Any, tags: Any) -> str | None:

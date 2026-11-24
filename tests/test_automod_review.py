@@ -3221,6 +3221,206 @@ def test_an_abort_row_leaves_absent_verdicts_absent_rather_than_zero_met(scratch
     assert ev["review_clauses"] == "2 unmet of 2"
 
 
+# ── the abort row's own claims, checked against the round's artifacts (#4547) ──
+#
+# `gate_ok` and `review_clauses` made a disagreeing row readable; #4547 is what it
+# costs to leave the reading to a human. `SM_20261124_183211` was aborted with a
+# double-quoted "finding" attributed to its own `gate.json`, that sentence became a
+# `priority: high` `blocker` of another item — which skips the depth gate — and the
+# quote is in no artifact of that round (`grep -rl "never got the file into context"
+# ~/.local/state/lloyd-automod/` returns `promotions.jsonl`, the row itself, and
+# nothing else). Its own `review_clauses` field reads `4 met, 1 unsatisfiable of 5`
+# beside a reason saying `all five are not_met`. Measured over all 119 abort rows on
+# 2026-11-24: 5 carry a verbatim double-quoted span naming the report, 6 spans in
+# those rows, 2 rows flagged — this one and `SM_20261121_133517`, whose reason quotes
+# `review: 5 met of 5 clause(s)` beside its own `3 met, 2 partial of 5`.
+
+def test_an_abort_reason_quoting_a_finding_the_report_does_not_hold_is_flagged(scratch, monkeypatch):
+    """A quoted span attributed to `gate.json` that no file of the round holds is
+    stamped, not just recorded. #4547 clause 1.
+
+    The quote below is the witness's shape: a multi-sentence finding, in quotation
+    marks, introduced by the report's name. Nothing else on the row contradicts it —
+    `gate_ok: false` agrees that the gate refused, which is why #1116's and #2448's
+    stamps did not stop it — so the flag has to be computed here, while the round's
+    own directory is still the thing to read.
+    """
+    monkeypatch.setattr(R, "_round_id", lambda: "SM_AQ1")
+    rid = R.start("invented quote", force=True, item_id=77)["round_id"]
+    _gate_json_for(rid, {"review_retry": True, "review_attempt": 1, "clauses": [
+        {"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "met"},
+        {"clause": 3, "verdict": "met"}, {"clause": 4, "verdict": "met"},
+        {"clause": 5, "verdict": "unsatisfiable"}]})
+    out = R.abort(rid, reason='gate.json\'s finding reads "the harness caps per-read '
+                              'content at 76 KB, so the changed file never reached '
+                              'context" and the round stopped there')
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["quoted_gate_text_absent"] is True, "the row says the quote is not its report's"
+    assert out["quoted_gate_text_absent"] is True
+    # The machine verdict that disproves it stays on the row beside the flag.
+    assert ev["review_clauses"] == "4 met, 1 unsatisfiable of 5"
+    assert "never reached context" in ev["reason"], "and the prose is still there to read"
+
+
+def test_an_abort_reason_that_quotes_the_report_truthfully_is_cleared(scratch, monkeypatch):
+    """A true quote reads `False`, from either file, across a line break. #4547 clause 2.
+
+    "Merely unflagged" would be the same value and a much weaker instrument: a
+    consumer that refuses to promote an unverified refusal needs to tell *cleared*
+    from *never checked*, and the only way it can is if an honest abort is put
+    through the same comparison. The two spans are the two ways an honest copy
+    arrives — one byte-identical out of `gate.json`, one reflowed by the sentence it
+    was pasted into, which is why the match collapses both sides.
+    """
+    monkeypatch.setattr(R, "_round_id", lambda: "SM_TR1")
+    rid = R.start("truthful quotes", force=True, item_id=77)["round_id"]
+    _gate_json_for(rid, {"review_retry": True, "review_findings": "two nodes are red here and green alone",
+                         "clauses": [{"clause": 1, "verdict": "met"}]})
+    (S.ROUNDS_DIR / rid / "gate.log").write_text(
+        "rung review\nreview refused on a clause whose witness\nnames no test node\n",
+        encoding="utf-8")
+    out = R.abort(rid, reason='gate.json says "two nodes are red here and green alone" '
+                              'and gate.log adds "review refused on a clause whose witness '
+                              'names no test node"')
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["quoted_gate_text_absent"] is False, "both quotes reproduce"
+    assert out["quoted_gate_text_absent"] is False, "and the caller is told so, not left guessing"
+
+
+def test_an_abort_reason_claiming_every_clause_failed_is_checked_against_the_verdicts(scratch,
+                                                                                      monkeypatch):
+    """`all five are not_met` beside a row that records four `met` is a contradiction
+    the row can settle by itself. #4547 clause 3.
+
+    No artifact is quoted here, so the quote half sees nothing: the claim is about
+    clause verdicts, and the verdicts are on the row — this is the half that makes
+    the #4547 row self-refuting. The second round is the honest arm of the same
+    sentence: a grade that met nothing agrees with "all two are not_met", and a flag
+    that fired on it would train the next reader to ignore it.
+    """
+    ids = iter(("SM_UN1", "SM_UN2"))
+    monkeypatch.setattr(R, "_round_id", lambda: next(ids))
+    contradicted = R.start("four met one unsatisfiable", force=True, item_id=77)["round_id"]
+    _gate_json_for(contradicted, {"review_retry": True, "clauses": [
+        {"clause": 1, "verdict": "met"}, {"clause": 2, "verdict": "met"},
+        {"clause": 3, "verdict": "met"}, {"clause": 4, "verdict": "met"},
+        {"clause": 5, "verdict": "unsatisfiable"}]})
+    out = R.abort(contradicted, reason="the grader would not read the file, so all five "
+                                       "are not_met rather than guessed at met")
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["review_clauses"] == "4 met, 1 unsatisfiable of 5"
+    assert ev["quoted_gate_text_absent"] is True
+    assert out["quoted_gate_text_absent"] is True
+
+    agreed = R.start("nothing met", force=True, item_id=78)["round_id"]
+    _gate_json_for(agreed, {"review_retry": True, "clauses": [
+        {"clause": 1, "verdict": "unmet"}, {"clause": 2, "verdict": "unmet"}]})
+    R.abort(agreed, reason="both clauses were refused; all two are not_met")
+    ev2 = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "round_aborted"][-1]
+    assert ev2["review_clauses"] == "2 unmet of 2"
+    assert ev2["quoted_gate_text_absent"] is False, "the claim agrees with the verdicts"
+
+
+def test_an_abort_with_no_report_or_no_verdicts_is_never_read_as_fabricated(scratch, monkeypatch):
+    """A swept round directory and an ungraded refusal both read `False`. #4547 clause 4.
+
+    The retention sweep reclaims `rounds/<id>/`, so a month-old abort that quoted
+    its report honestly cannot be re-checked at all; and a refusal row carrying
+    findings but no clause rows has no verdict to contradict (the same
+    present-and-empty answer #2448 clause 3 demanded of `review_clauses`). Reading
+    either as a fabrication would put the stamp on the honest majority and teach
+    everyone to ignore it, so each is unknown, and unknown is `False`.
+    """
+    import shutil
+    ids = iter(("SM_SW1", "SM_SW2"))
+    monkeypatch.setattr(R, "_round_id", lambda: next(ids))
+    swept = R.start("swept artifacts", force=True, item_id=77)["round_id"]
+    _gate_json_for(swept, {"review_retry": True, "clauses": [{"clause": 1, "verdict": "met"}]})
+    shutil.rmtree(S.ROUNDS_DIR / swept)
+    out = R.abort(swept, reason='gate.json\'s finding reads "the harness caps per-read '
+                                'content at 76 KB" and all of it is not_met')
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["quoted_gate_text_absent"] is False, "no artifact is unreadable, not a forgery"
+    assert out["quoted_gate_text_absent"] is False
+
+    ungraded = R.start("refused without verdicts", force=True, item_id=78)["round_id"]
+    _gate_json_for(ungraded, {"review_retry": True,
+                              "review_findings": "clause 2 unmet: no test"})
+    R.abort(ungraded, reason="the review refused: every clause is unmet")
+    ev2 = [e for e in S.read_events(path=S.LEDGER_PATH)
+           if e.get("event") == "round_aborted"][-1]
+    assert ev2["review_clauses"] == "", "no grade was recorded, which is not a grade of none"
+    assert ev2["quoted_gate_text_absent"] is False
+
+
+def test_the_flag_never_touches_the_reason_and_reaches_the_caller_too(scratch, monkeypatch):
+    """The stamp rides the row and the returned dict; the prose is untouched. #4547 clause 5.
+
+    `scorecard.py`'s `bare_aborts` counts aborts whose reason is empty, and the
+    abort narrative is what a later triage reads, so the fix may add a field and
+    nothing else — same whitespace collapse, same 500-character cap. The reason is
+    built here as one string used for both purposes, so the row's prose and the
+    prose that was checked cannot drift apart. And the cap is load-bearing for the
+    stamp too: this reason runs past it, which cuts the *stored* copy mid-sentence
+    while the span that gets checked is still whole, so a check reading the stored
+    row would be reading a fragment no file ever held.
+    """
+    monkeypatch.setattr(R, "_round_id", lambda: "SM_LG1")
+    rid = R.start("long reason", force=True, item_id=77)["round_id"]
+    _gate_json_for(rid, {"review_retry": True, "clauses": [{"clause": 1, "verdict": "met"}]})
+    reason = ('gate.json\'s finding reads "the harness caps per-read content at 76 KB, '
+              'so the changed file never reached context" — and after that the round '
+              "kept going for two more hours re-running the tests rung, re-reading the "
+              "run spec, re-checking the live baseline and writing this note, which is "
+              "long enough on purpose that the stored copy of it is cut off well before "
+              "its own end, exactly as every abort row in the ledger has been cut since "
+              "the reason field first went in, and the point of this sentence is that "
+              "the flag must survive that cut without editing a single word of it.")
+    out = R.abort(rid, reason=reason)
+    ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+          if e.get("event") == "round_aborted"][-1]
+    assert ev["reason"] == " ".join(reason.split())[:500], "byte for byte what abort() stored before"
+    assert len(ev["reason"]) == 500 and ev["reason"].strip(), "a full, non-empty reason"
+    assert ev["quoted_gate_text_absent"] is True
+    assert out["quoted_gate_text_absent"] == ev["quoted_gate_text_absent"], "one value, two doors"
+
+
+def test_a_span_the_reason_does_not_attribute_to_the_report_is_not_checked(scratch, monkeypatch):
+    """What the stamp does not fire on, pinned so it stays that way. #4547's false-positive
+    discipline: four absent-or-unquoteable spans, four `False`.
+
+    The claim being machine-checked is "my report says X", so a quote handed over by
+    some other source is a different claim (a test run, an eval, a source file), an
+    ellipsis says the author cut the text, a backtick is the refusal path's marker
+    and not this one's, and a 9-character span has no phrasing to compare. Every one
+    of these fired in the 119-row replay until the rule that ends it went in —
+    backticked emphasis in `SM_20261031_000301` mis-paired into spans of connective
+    prose, and `Task 1770 not found` in `SM_20260929_004452` is a tool error, not a
+    report line.
+    """
+    ids = iter(("SM_FP1", "SM_FP2", "SM_FP3", "SM_FP4"))
+    monkeypatch.setattr(R, "_round_id", lambda: next(ids))
+    for label, why in (
+            ("not attributed", 'the review rung\'s finding reads "the harness caps per-read '
+                              'content at 76 KB" and the round stopped'),
+            ("cut by an ellipsis", 'gate.json\'s finding reads "the harness caps ... '
+                                   'never reached context" and stopped'),
+            ("in backticks", 'gate.json\'s finding reads `the harness caps per-read content` '
+                             "and the round stopped"),
+            ("too short", 'gate.json\'s finding reads "76 KB cap" and the round stopped')):
+        one = R.start(f"{label} case", force=True, item_id=77)["round_id"]
+        _gate_json_for(one, {"review_retry": True, "clauses": [{"clause": 1, "verdict": "met"}]})
+        R.abort(one, reason=why)
+        ev = [e for e in S.read_events(path=S.LEDGER_PATH)
+              if e.get("event") == "round_aborted"][-1]
+        assert ev["quoted_gate_text_absent"] is False, f"{label}: {why[:60]}"
+
+
 def test_a_missing_resume_branch_falls_back_to_a_fresh_worktree(scratch):
     out = R.start("go", force=True, from_branch="automod/SM_NOPE")
     try:
