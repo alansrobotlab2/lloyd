@@ -602,6 +602,45 @@ def test_the_drain_the_gate_divides_by_is_the_shipped_one():
         f"STARVED_AFTER_DAYS from {R.MAX_QUEUED}/{drain.group(1)}")
 
 
+def test_the_wait_the_schema_quotes_and_the_order_that_grants_it_are_untouched():
+    """#4401 clause 4: the round that reconciled `research_propose`'s `priority`
+    description changed prose in `agent_mcp/research.py` and nothing else, and it had
+    to. The sentence it shipped quotes three numbers this module owns — the 14-day
+    wait, the 1000-point credit that lets the wait outrank any band, and the default
+    band of 50 callers are told about — so a change billed as text-only that moved one
+    of them would make the new prose false in the opposite direction. Until now the
+    credit and the signature default were pinned nowhere:
+    `test_the_starvation_gate_is_one_full_pass_over_the_cap` reads the gate's
+    arithmetic against the cap and the drain, and no node read these together.
+
+    The `ORDER BY` is pinned as text as well as by the nodes above because clause 4
+    names it, and shape and meaning fail differently here. Those behavioural nodes are
+    the falsifier if the expression's MEANING moves; this is the falsifier if its SHAPE
+    moves — the credit subtracted outside the `CASE`, say, which this module's own
+    docstring says would make an unparseable `proposed_at` yield NULL, and NULL sorts
+    FIRST ascending, handing a row nobody can read the head of the queue.
+    """
+    import inspect
+
+    assert R.STARVED_AFTER_DAYS == 14
+    assert R.STARVED_PRIORITY_CREDIT == 1000
+
+    sql, params = R._claim_query(R._now())
+    assert "ORDER BY priority - CASE WHEN" in sql, (
+        f"the credit is no longer inside the CASE, which is what keeps an "
+        f"unparseable stamp from buying the head of the queue: {sql}")
+    assert "ELSE 0 END ASC, proposed_at ASC, id ASC" in sql, (
+        f"the FIFO and tie-break terms that make 'position N' a fact are gone: {sql}")
+    assert params[2:] == [R.STARVED_AFTER_DAYS * 86400, R.STARVED_PRIORITY_CREDIT], (
+        "the ORDER BY no longer binds the constants its docstring says it uses")
+
+    default = inspect.signature(ResearchStore.propose).parameters["priority"].default
+    assert default == 50, (
+        "`propose`'s default moved: agent_mcp/research.py::research_propose advertises "
+        "it to every caller, and the credit's justification above cites it as the "
+        "reason 1000 is large enough")
+
+
 def test_promotion_below_the_gate_is_a_step_not_a_gradient(s):
     """#4274 clause 5, the bounded half. `workers/queue.py` ages per period; this
     store does not, and the difference is what clause 4 depends on: a row under

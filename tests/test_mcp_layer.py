@@ -287,6 +287,115 @@ def test_tool_parameters_are_documented(tools):
     assert undocumented == [], f"undocumented parameters: {undocumented}"
 
 
+# ── research_propose's priority promise (#4401) ──────────────────────────────
+
+def _propose_priority_description(tools) -> str:
+    """The `priority` description exactly as `tools/list` ships it, not the module's
+    source text — the promise a proposing agent can act on is the serialised one."""
+    propose = next(t for t in tools if t.name == "research_propose")
+    return (propose.input_schema or {})["properties"]["priority"]["description"]
+
+
+def test_research_propose_priority_qualifies_the_ordering_it_offers(tools):
+    """#4401. The field used to read "0-100, lower is researched sooner. Default 50.",
+    and `9c7ef6eb` made that false while leaving the sentence standing: a queued row
+    that has waited `STARVED_AFTER_DAYS` sorts at `priority - 1000` — at most -900
+    against a fresh row's floor of 0 — so the number orders only recent proposals. A
+    proposer taking the old sentence at face value would raise a weight to rescue a
+    fresh topic and change nothing, which is the shape of harm a schema field does:
+    invisible, because the call still succeeds.
+
+    The unconditioned claim is the defect, not the word "sooner", so this pins both
+    directions and pins them structurally: the bare phrase absent, and the wait named
+    IN THE SAME SENTENCE as the ordering claim. Sentence-splitting is what makes the
+    second arm bite — a reword that parks the wait in a following sentence ("A lower
+    number is researched sooner. Topics older than 14 days go first.") satisfies every
+    substring check in this file and still ships the first sentence as a promise that
+    is false half the time.
+
+    The range and the default are asserted because `app/research_store.py` justifies
+    the 1000-point credit by citing them ("`research_propose` documents 0-100 and
+    `propose`'s own default is 50"); drop either from this field and that comment
+    points at nothing while its own sentence still reads as settled. The constant's
+    NAME must stay out of the text: this field is read by a model, which has no
+    reason to know an internal identifier and no way to look it up.
+    """
+    from app import research_store as R
+
+    desc = _propose_priority_description(tools)
+
+    assert "lower is researched sooner" not in desc.lower(), (
+        "the unconditioned ordering claim is back — past the wait gate the stored "
+        "band decides nothing at all")
+    # The shipped sentence opens "A lower number is researched sooner among…", not
+    # "Lower is researched sooner among…", precisely because #4401's acceptance check is a
+    # grep for that phrase: a conditioned sentence that still contains it leaves the next
+    # reader an ambiguous grep — 1 hit, and they must open the file to learn whether this
+    # round ever happened. The range opens the field and "Default 50." closes it, in the
+    # two forms `app/research_store.py` cites when it justifies the 1000-point credit.
+    assert "0-100. A lower number is researched sooner among" in desc
+    assert "STARVED_AFTER_DAYS" not in desc, (
+        "an internal identifier leaked into a model-facing schema field")
+
+    sooner = [s for s in re.split(r"(?<=[.!?]) +", desc) if "sooner" in s.lower()]
+    assert sooner, f"the field no longer states what its number is for: {desc!r}"
+    for s in sooner:
+        assert f"{R.STARVED_AFTER_DAYS} days" in s, (
+            f"the ordering claim is unconditioned inside its own sentence: {s!r}")
+    assert "whatever its priority" in desc, (
+        "the half a proposer actually needs — that waiting outranks any weight, so "
+        "no priority value rescues a fresh topic past a starved one — is gone")
+    assert "0-100" in desc, (
+        "the accepted range dropped: research_store's justification for the "
+        "1000-point credit cites this field's range as its referent")
+    assert re.search(r"[Dd]efault 50\b", desc), (
+        "the default dropped, and so does the referent of the same justification")
+
+
+def test_the_priority_promise_the_schema_ships_is_the_one_the_store_keeps(tools):
+    """The seam #4401's text has to cross: this schema is served by the MCP
+    aggregator's process, and the ordering it describes is a SQLite `ORDER BY`
+    evaluated in the deep-research worker's. Nothing in the Python ties them, so the
+    node reads both sides.
+
+    Two things have to stay true for the sentence to keep meaning what it says:
+
+    * every day-count the field quotes is the gate the store actually applies, and
+      the default it quotes is the one `propose` really writes;
+    * the wait really does beat the whole advertised range — a starved row's sort key
+      is `priority - STARVED_PRIORITY_CREDIT`, so the credit must exceed the widest
+      gap the field invites callers to use (0 to 100), or "ahead of every fresher one
+      whatever its priority" would be the same kind of overclaim this round removed,
+      just one magnitude down.
+
+    This is the arm that reddens on a store-side edit: move `STARVED_AFTER_DAYS` or
+    shrink `STARVED_PRIORITY_CREDIT` and the shipped description is the thing that
+    fails, which is the point — the prose is now a claim with a falsifier.
+    """
+    import inspect
+
+    from app import research_store as R
+    from app.research_store import ResearchStore
+
+    desc = _propose_priority_description(tools)
+
+    quoted_days = {int(n) for n in re.findall(r"(\d+) days", desc)}
+    assert quoted_days == {R.STARVED_AFTER_DAYS}, (
+        f"the field quotes {sorted(quoted_days)} days; the store gates at "
+        f"{R.STARVED_AFTER_DAYS}")
+    advertised_default = int(re.search(r"[Dd]efault (\d+)", desc).group(1))
+    real_default = inspect.signature(ResearchStore.propose).parameters["priority"].default
+    assert advertised_default == real_default, (
+        f"the field advertises a default of {advertised_default}, `propose` writes "
+        f"{real_default}")
+
+    lowest, highest = 0, 100          # the range the same field states
+    assert R.STARVED_PRIORITY_CREDIT > highest - lowest, (
+        f"a starved row sorts {R.STARVED_PRIORITY_CREDIT} below its band, but callers "
+        f"are invited to use a {highest - lowest}-point range: the freshest possible "
+        f"row could then stay ahead, and the schema's guarantee is false")
+
+
 # ── Module contract (P2-1) ───────────────────────────────────────────────────
 
 def test_modules_meet_the_contract():
@@ -1107,6 +1216,15 @@ RETIRED_TOOLS = frozenset({
 # enum, `browser_evaluate.frame_index` repeating the description's frame note,
 # `browser_snapshot` pointing at evaluate's frame_index (evaluate says it), and
 # `browser_click`'s example. 22,489 over 107 tools; every trigger clause kept.
+#
+# 2026-11-23, #4401: `research_propose`'s `priority` gained its wait condition (+134
+# chars — the field's old one-liner had been falsified by the starvation gate in
+# `app/research_store.py`, and an unconditioned "lower is sooner" is an instruction to
+# do the one thing that no longer works). Paid for inside the same module, not by the
+# ceiling: `research_stats`' description enumerated the response's own payload — counts
+# per state, settles today, queue depth and age, last note — all of which a caller reads
+# out of the reply, while the clause that decides whether to call ("Start here before
+# proposing or reporting on research") stayed. 22,491 over 107 tools.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 

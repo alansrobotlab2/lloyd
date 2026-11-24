@@ -432,7 +432,9 @@ GIST_LOSS_EXCEPTIONS: dict[str, str] = {
     "research_next": "'never takes work away' is a read-only note; 'peek' already says so",
     "research_complete": "'never rewritten' is a write-once note about an outcome already recorded",
     "research_list": "'before proposing anything new' is ordering advice; the gist names the filters",
-    "research_stats": "'start here before' is ordering advice; the gist names the counts",
+    # `research_stats` is off this list as of #4401: its description is now short enough
+    # to survive `CATALOG_GIST_CHARS` whole, so the routing clause ships in the gist and
+    # nothing is lost to truncate. The node's own anti-rot arm required the removal.
     "vault_overview": "'orient before searching' is ordering advice; the gist says summarize",
 }
 

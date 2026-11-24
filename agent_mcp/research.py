@@ -81,7 +81,18 @@ async def list_tools() -> list[Tool]:
                     },
                     "priority": {
                         "type": "integer",
-                        "description": "0-100, lower is researched sooner. Default 50.",
+                        # The 14 is `app.research_store.STARVED_AFTER_DAYS`, written as
+                        # a literal for the reason `_STATUSES` above is one: `list_tools`
+                        # must not import the store just to build a schema string.
+                        # `tests/test_mcp_layer.py` pins the number to the constant, so
+                        # the two cannot drift; the wording says the wait rather than
+                        # naming the constant, because a model reads this field.
+                        "description": (
+                            "0-100. A lower number is researched sooner among topics "
+                            "proposed in the last 14 days; one older than that is "
+                            "claimed ahead of every fresher one whatever its priority. "
+                            "Default 50."
+                        ),
                     },
                     "proposed_by": {
                         "type": "string",
@@ -185,10 +196,14 @@ async def list_tools() -> list[Tool]:
         ),
         Tool(
             name="research_stats",
+            # #4401 pays its priority sentence out of this description rather than out
+            # of the catalog ceiling: what was enumerated here was the response's own
+            # field names (per-state counts, settles today, queue depth and age, last
+            # note), which a caller learns from the payload it gets back. The routing
+            # clause that decides whether to call at all is untouched.
             description=(
-                "Registry health in one call: how many topics sit in each state, how "
-                "many were settled today, the depth and age of the queue, and the last "
-                "note written. Start here before proposing or reporting on research."
+                "Registry health in one call. Start here before proposing or "
+                "reporting on research."
             ),
             inputSchema={"type": "object", "properties": {}},
         ),
