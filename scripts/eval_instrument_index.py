@@ -20,7 +20,8 @@ Three rules make the number worth reading, and each is the reason the file exist
    unmeasurable stage (a named refusal with its denominator, not a rate). Here it
    is applied to the instruments themselves. A component whose artifact is absent
    contributes `missing`; a component whose newest artifact is older than its own
-   declared cadence contributes `stale`. Neither enters the numerator *or* the
+   declared cadence contributes `stale` — or, for a hand-run arm with no declared
+   cadence, older than `HAND_RUN_GRACE_DAYS`. Neither enters the numerator *or* the
    denominator, and the renormalisation is printed. Fewer than
    `MIN_SCORED_COMPONENTS` measured components and the total REFUSES rather than
    publishing a percentage that a single surviving instrument could set to 100.
@@ -94,6 +95,22 @@ SERIES_NAME = "instrument-index.jsonl"
 #: missing instead of publishing the survivor's value as a percentage.
 MIN_SCORED_COMPONENTS = 2
 
+#: How old a hand-run arm's newest artifact may get before it stops counting.
+#: `hand_run_by_ruling` exempts an arm from ITS OWN cadence test — the writer runs on
+#: a ruling, not a schedule, so there is no declared interval to be late against — but
+#: an exemption from a cadence is not an exemption from ageing. Without this bound the
+#: flag is a licence to age forever: #4324 read the live series carrying `uptake_probe`
+#: as `measured`, value 1.0, `contributes: true`, at 60 d old on 2026-11-19 and 65 d on
+#: 2026-11-24, while its store holds three dated tables, newest `uptake-2026-09-20.json`
+#: (`ls eval/uptake/uptake-*.json` → 3). Thirty days is the shape of the other
+#: retention horizons on this box (PAUSE_JOURNAL_MAX_AGE_DAYS = 30 in
+#: scripts/groundskeeper/retention-sweep.py), and it is deliberately generous: an arm
+#: ages out here only when nobody has run it for more than a month. Past that the arm
+#: is excluded and named, not trusted — and the named exclusion is the point: it is a
+#: visible request for the run, not a silent zero.
+HAND_RUN_GRACE_DAYS = 30
+
+
 #: Rows of this series needed before a component can be called flat: three prior
 #: rows plus the one being published. Below it the answer is `insufficient-series`,
 #: never `flat` — the thinnest store the table carries now is uptake's three dated
@@ -161,9 +178,16 @@ class Instrument:
     #: Days between runs as the WRITER declares them, or None for an instrument
     #: with no declared cadence at all. `cadence_days is None` and
     #: `hand_run_by_ruling` travel together: such an instrument cannot reach
-    #: tier 2 (nothing is arriving on a schedule to be tracked over time), and it
-    #: is never flagged stale, because a cadence check that flags a deliberate
-    #: design is worse than no check.
+    #: tier 2 (nothing is arriving on a schedule to be tracked over time), and it is
+    #: exempt from the CADENCE test — it has no declared interval to be late against.
+    #: It is not exempt from staleness: `hand_run_by_ruling` is stale past
+    #: `HAND_RUN_GRACE_DAYS` (30 d) — the ruling #4169's owed-check pass made and #4324
+    #: implemented, taken after measuring what the exemption cost: the 2026-11-19
+    #: published row carried `uptake_probe` as `measured` at 60 d old, value 1.0, inside
+    #: the composite, and the 2026-11-24 row still carried it at 65 d, out of a store
+    #: holding three dated tables whose newest is 2026-09-20. A cadence check that flags
+    #: a deliberate design is worse than no check — but no check at all is what let a
+    #: number that old into a daily total.
     cadence_days: int | None
     hand_run_by_ruling: bool
     #: The autonomy task file that runs the writer, or None = hand-run-or-none.
@@ -273,11 +297,13 @@ def _gate_to_land_lag_series() -> Path:
 #: the job that runs that command. `scheduled_by` is the field that tells a reader the
 #: arm is written, so an entry re-added without it re-opens the same defect.
 #:
-#: What is NOT the route back in: `hand_run_by_ruling`. That flag suppresses the
-#: staleness test outright — it is how `uptake_probe` sat in the 2026-11-15 published
-#: total as `measured` at 56 days old, value 1.0 — so setting it on this arm would have
-#: returned a store whose newest row was 2026-09-12 to the daily composite as if it were
-#: current, which is a worse reading than the visible exclusion it replaces.
+#: What is NOT the route back in: `hand_run_by_ruling`. Until #4324 that flag suppressed
+#: the staleness test outright — it is how `uptake_probe` sat in the 2026-11-15 published
+#: total as `measured` at 56 days old, value 1.0 — and even bounded at
+#: `HAND_RUN_GRACE_DAYS` it still asserts that no job runs the writer, so setting it on
+#: this arm would have returned a store whose newest row was 2026-09-12 to the daily
+#: composite as if it were current, which is a worse reading than the visible exclusion
+#: it replaces.
 #:
 #: The dropped 0.18 went back to the six surviving weighted arms in proportion to the
 #: weight each already carried — old weight over the 0.82 they summed to, rounded to two
@@ -812,13 +838,25 @@ def read_instrument(instr: Instrument, *, today: date,
         return noted(Reading(key=instr.key, status="not-a-rate",
                              detail=f"{value} is outside 0..1, so `{instr.value_path}` is "
                                     f"not a share and may not enter the total", **base))
-    if (instr.cadence_days is not None and not instr.hand_run_by_ruling
-            and age is not None and age > instr.cadence_days):
+    #: Whose horizon this arm is measured against. A scheduled arm is late against the
+    #: cadence its own writer declares — the rule and the printed wording unchanged from
+    #: before #4324. An arm with NO declared cadence had no horizon at all: the old guard
+    #: required `cadence_days is not None`, so `hand_run_by_ruling` skipped this test
+    #: outright, which is how `uptake_probe` entered the 2026-11-19 composite as
+    #: `measured` at 60 d old with value 1.0. A hand-run arm that DID declare a cadence
+    #: keeps its own, stricter number; the grace is only the fallback for one that has
+    #: nothing else to be judged against.
+    limit = instr.cadence_days if instr.cadence_days is not None else (
+        HAND_RUN_GRACE_DAYS if instr.hand_run_by_ruling else None)
+    if limit is not None and age is not None and age > limit:
+        horizon = (f"a declared cadence of {instr.cadence_days} d "
+                   f"(scheduled_by={instr.scheduled_by or 'no task file'})"
+                   if instr.cadence_days is not None else
+                   f"the {HAND_RUN_GRACE_DAYS} d hand-run grace "
+                   f"(hand_run_by_ruling: no declared interval to be late against)")
         return noted(Reading(
             key=instr.key, status="stale",
-            detail=f"newest artifact is {age} d old against a declared "
-                   f"cadence of {instr.cadence_days} d "
-                   f"(scheduled_by={instr.scheduled_by or 'no task file'})",
+            detail=f"newest artifact is {age} d old against {horizon}",
             **base))
     return noted(Reading(key=instr.key, status="measured",
                          detail=f"newest artifact {path.name}"

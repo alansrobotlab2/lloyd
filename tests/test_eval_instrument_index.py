@@ -606,10 +606,11 @@ def test_a_stale_instrument_is_excluded_and_named_with_its_declared_cadence(tmp_
     assert "tool_quality" in [d["key"] for d in row["dead_or_stale"]]
 
 
-def test_a_hand_run_instrument_is_never_flagged_stale(tmp_path):
+def test_a_hand_run_arm_inside_the_grace_still_counts(tmp_path):
     """Several instruments are hand-run by ruling (the uptake probe exits 3 with
-    no table below a 0.70 precision floor). A cadence check that flags them is
-    worse than no check, so they carry no declared cadence and no stale verdict."""
+    no table below a 0.70 precision floor), so no cadence test is applied to them and
+    an arm 23 days into a 30-day grace is a measurement, not an outage. The rule is
+    not "never stale" — #4324 bounded it; `HAND_RUN_GRACE_DAYS` says how far."""
     row, _, _ = _row(tmp_path, GOOD_VALUES, days={"uptake_probe": "2026-09-20"})
 
     uptake = _component(row, "uptake_probe")
@@ -619,6 +620,118 @@ def test_a_hand_run_instrument_is_never_flagged_stale(tmp_path):
     assert uptake["age_days"] == 23
     assert uptake["tier"] == 1, "hand-run means not tracked over time, not broken"
     assert "uptake_probe" not in [d["key"] for d in row["dead_or_stale"]]
+
+
+def test_a_hand_run_arm_older_than_the_grace_is_stale_and_leaves_the_total(tmp_path):
+    """#4324: `hand_run_by_ruling` opts an arm out of its cadence test, not out of
+    staleness. An arm whose newest artifact is older than `HAND_RUN_GRACE_DAYS` (30 d)
+    publishes `stale`, drops out of the denominator, and is named in both blocks.
+    Without this the flag is a licence to age forever, which is what the live row
+    showed: `uptake_probe` measured at 60 d old, value 1.0, in the composite."""
+    row, _, _ = _row(tmp_path / "past", GOOD_VALUES, days={"uptake_probe": "2026-08-29"})
+    inside, _, _ = _row(tmp_path / "inside", GOOD_VALUES,
+                        days={"uptake_probe": "2026-09-20"})
+
+    uptake = _component(row, "uptake_probe")
+    assert uptake["age_days"] == 45, "2026-08-29 against the pinned NOW of 2026-10-13"
+    assert uptake["status"] == "stale"
+    assert uptake["contributes"] is False and uptake["in_total_denominator"] is False
+    assert "uptake_probe" in [e["key"] for e in row["totals"]["excluded"]]
+    assert "uptake_probe" in [d["key"] for d in row["dead_or_stale"]]
+    assert row["totals"]["scored"] == inside["totals"]["scored"] - 1, (
+        "bounding the arm costs exactly one scored component and no more")
+    assert row["totals"]["scored"] >= EII.MIN_SCORED_COMPONENTS, (
+        "the index survives losing the arm: it publishes with a named exclusion "
+        "rather than refusing, so a bound on one arm never silences the series")
+    assert row["totals"]["status"] == "ok"
+
+
+def test_a_hand_run_arm_at_exactly_the_grace_counts_and_one_day_past_does_not(tmp_path):
+    """The bound is `age_days > HAND_RUN_GRACE_DAYS`, not `>=`: at exactly 30 days the
+    arm still measures, at 31 it is out. This is the edge the constant's own
+    comparison turns on, and the 30-day arm is clause 2's second case."""
+    at, _, _ = _row(tmp_path / "at", GOOD_VALUES, days={"uptake_probe": "2026-09-13"})
+    past, _, _ = _row(tmp_path / "past", GOOD_VALUES, days={"uptake_probe": "2026-09-12"})
+
+    assert _component(at, "uptake_probe")["age_days"] == EII.HAND_RUN_GRACE_DAYS
+    assert _component(at, "uptake_probe")["status"] == "measured"
+    assert _component(at, "uptake_probe")["contributes"] is True
+    assert "uptake_probe" not in [d["key"] for d in at["dead_or_stale"]]
+    assert _component(past, "uptake_probe")["age_days"] == EII.HAND_RUN_GRACE_DAYS + 1
+    assert _component(past, "uptake_probe")["status"] == "stale"
+    assert "uptake_probe" in [d["key"] for d in past["dead_or_stale"]]
+
+
+def test_a_scheduled_arm_is_measured_up_to_its_cadence_and_stale_one_day_past(tmp_path):
+    """The half of the arm-selection rule a grace-based bound can break: a hand-run
+    horizon must not move a scheduled arm's. `tool_quality` declares
+    `cadence_days = 7` with `hand_run_by_ruling = False`, so 7 d is inside and 8 d is
+    stale — the same strict `age > limit` comparison, against the arm's own number.
+    The far-past case is pinned by
+    `test_a_stale_instrument_is_excluded_and_named_with_its_declared_cadence` at 32 d."""
+    inside, _, _ = _row(tmp_path / "in", GOOD_VALUES, days={"tool_quality": "2026-10-06"})
+    past, _, _ = _row(tmp_path / "out", GOOD_VALUES, days={"tool_quality": "2026-10-05"})
+
+    assert _component(inside, "tool_quality")["hand_run_by_ruling"] is False
+    assert _component(inside, "tool_quality")["age_days"] == 7
+    assert _component(inside, "tool_quality")["status"] == "measured"
+    assert _component(inside, "tool_quality")["contributes"] is True
+    assert _component(past, "tool_quality")["age_days"] == 8
+    assert _component(past, "tool_quality")["status"] == "stale"
+    assert "cadence of 7 d" in _component(past, "tool_quality")["detail"], (
+        "a scheduled arm still names its own declared cadence, unchanged")
+
+
+def test_a_hand_run_stale_detail_names_the_grace_and_prints_no_empty_cadence(tmp_path):
+    """Every hand-run arm has `cadence_days = None`, so the cadence wording would
+    interpolate the word `None` into a published row. A hand-run verdict states the
+    grace as a number instead, and never calls it a cadence."""
+    row, _, _ = _row(tmp_path, GOOD_VALUES, days={"uptake_probe": "2026-08-29"})
+
+    detail = _component(row, "uptake_probe")["detail"]
+    assert f"{EII.HAND_RUN_GRACE_DAYS} d" in detail, detail
+    assert "45 d" in detail, detail
+    assert "None" not in detail, detail
+    assert "cadence" not in detail.lower(), (
+        f"an arm with no declared cadence must not have its horizon worded as one: "
+        f"{detail}")
+
+
+def _field_comment(source: str, field: str) -> str:
+    """The `#:` block attached directly above a dataclass field — that field's own
+    documentation, as this module writes it, not a substring the check finds."""
+    lines = source.splitlines()
+    at = next(i for i, line in enumerate(lines) if line.startswith(f"    {field}:"))
+    start = at
+    while start > 0 and lines[start - 1].lstrip().startswith("#:"):
+        start -= 1
+    return "\n".join(lines[start:at])
+
+
+def test_the_cadence_field_doc_states_the_grace_bound_not_a_suppression():
+    """The sentence "it is never flagged stale" is what made the suppression look
+    like the design, and #4324 measured what it cost: the 2026-11-19 published row
+    carried `uptake_probe` as measured at 60 d. The doc now states the bound, names
+    the constant, and cites the ruling and the witness."""
+    src = Path(EII.__file__).read_text(encoding="utf-8")
+
+    doc = _field_comment(src, "cadence_days")
+    assert "never flagged stale" not in doc, doc
+    assert "HAND_RUN_GRACE_DAYS" in doc, "the doc must name what bounds the arm"
+    assert "#4324" in doc, "the rule, so nobody re-litigates the flag from memory"
+    assert "60 d" in doc, f"the live witness belongs in the doc that excuses it: {doc}"
+
+    # Same claim, second home: the `automod_scorecard` retirement note said this flag
+    # "suppresses the staleness test outright". Checked across the WHOLE module with
+    # whitespace flattened, because both times it was written it was wrapped mid-phrase
+    # and a line-boundary-sensitive grep reads it as absent — the assertion would have
+    # passed on the broken text.
+    flat = " ".join(src.split())
+    assert "suppresses the staleness test outright" not in flat, (
+        "the retirement note still asserts the suppression is total; #4324 bounded it, "
+        "so that claim is false in the tree")
+    assert "is never flagged stale" not in flat
+
 
 
 def test_an_artifact_whose_pointer_yields_nothing_is_a_named_refusal_not_a_zero(tmp_path):
@@ -1663,9 +1776,11 @@ def test_the_exhibit_arm_is_carried_in_the_table_and_excluded_from_both_totals(t
 # printing two totals over whatever survived. Two ways out existed — name a writer,
 # or remove the arm — and the ruling recorded below in the module source is removal.
 # The third option the item suggested (`hand_run_by_ruling=True`, as `uptake_probe`
-# carries) is the wrong one and is NOT taken here: that flag suppresses the staleness
-# test outright, so a 65-day-old 0.7 would have come back into the composite as if it
-# were current. These three tests are the retirement made checkable: the key is gone
+# carries) is the wrong one and is NOT taken here: at the time of that ruling the flag
+# suppressed the staleness test outright, so a 65-day-old 0.7 would have come back into
+# the composite as if it were current. (#4324 has since bounded the flag at
+# `HAND_RUN_GRACE_DAYS`, which removes the blanket exemption but not the reason: an arm
+# nobody runs still has nothing to contribute.) These three tests are the retirement made checkable: the key is gone
 # from the row, the weights still add up, and the ruling is in the source where the
 # next reader of the table will find it.
 
