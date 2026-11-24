@@ -376,8 +376,9 @@ bands below are that same field, read on 2026-11-17: the 12 rows dated
 49 rows dated 2026-09-26 → 2026-11-17 read min 3,658 / median 23,440 / max
 39,009. No row is dated 2026-09-24, and the one row dated 2026-09-25 is in
 neither band. R2 therefore cut the per-turn figure ~2.7x and left it ABOVE the
-plan's ~15–20k target: a measured miss with dates on it, which is what this
-section owes rather than a passing check.
+plan's ~15–20k target — a comparison this section now settles rather than defers,
+because that target was never a prompt measurement at all, and the paragraph
+below states the ruling that retires it.
 
 The per-turn field cannot by itself say whether the prompt got cheaper, because
 half of it is reviews-per-turn — median 2.26 reviews per turn in both bands. The
@@ -387,9 +388,31 @@ before R2 against 10,431 after, interquartile range 10,181–10,655 across those
 49 rows, so per-review cost has been flat since late September. The three newest
 rows (2026-11-15 → -17) read 26,339 / 32,740 / 33,135 a turn while those same
 rows read 10,845 / 10,757 / 10,436 a review, over 7 → 207 → 200 turns: more
-reviews, not a prompt-cost regression. Whether a 23,440 median against ~15–20k
-is a miss worth acting on is a ruling on the observer's prompt and the mid-turn
-review interval, and is owed separately (#4216).
+reviews, not a prompt-cost regression.
+
+**The ~15–20k target is retired as a contract** (#4216, ruled 2026-11-19): no trim to
+the observer prompt, and no change to the mid-turn review interval. The estimate was
+written against `input_tokens_per_turn`, and the paragraph above shows what half of
+that field is — reviews-per-turn, median 2.27 across the 50 rows dated
+2026-09-26 → 2026-11-19 (2.26 within the 49 rows above). As a prompt budget the band
+therefore implies 6.6–8.8k tokens a review, against the 10,419 actually measured: the
+1.2–1.6x it appears to miss by is the wrong denominator, not a cost. It is a prompt
+flat within ±5% for seven weeks — the interquartile range 10,162–10,658 sits 2.5% below
+and 2.3% above that median — reading 48.5% cache-hit (measured 2026-11-19, 30-day
+window). A deployed change has to buy a measured gain, and there was none to buy, so
+the 23,440 per-turn median is neither a pass nor a miss: it is a figure in a unit no
+target was ever written for.
+
+**What the section polices from here is the per-review cost, with its dates**:
+median 10,419 tokens a review, min 6,109 / max 10,936, interquartile range
+10,162–10,658, across the 50 rows dated 2026-09-26 → 2026-11-19. One row further back
+that cut read 10,431 with interquartile range 10,181–10,655, so the newest row moved
+the median by 12 tokens and moved no verdict.
+
+**Re-arm bound**: re-open the target only on a nightly row whose per-review median
+exceeds 13,000 — 22% over the observed IQR ceiling of 10,658 — or falls under 8,000,
+23% under the median. Anywhere between those two numbers the series is still saying
+the retired thing is true, and only a week of nightly rows can say it is doing either.
 
 `observer_ms_per_turn` is a SUM over the window's reviews as well, not a
 round-trip (#995). Those same three rows read 28,238 / 25,766 / 25,305 ms a

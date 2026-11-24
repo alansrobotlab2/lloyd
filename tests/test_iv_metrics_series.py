@@ -2730,6 +2730,37 @@ def test_the_architecture_doc_states_measured_bands_instead_of_the_r2_prediction
     assert "2026-09-25" in section, (
         "the row between the two bands is unmentioned, so the cut looks chosen")
 
+    # ── #4344: the ruling on that miss is now MADE, so the section says so ─────────
+    # #4216's owed entry settled on 2026-11-19 that the ~15–20k target is retired as a
+    # contract — `input_tokens_per_turn` is half reviews-per-turn, so the band was
+    # never a prompt measurement. A ruling that lives only in a ledger row is invisible
+    # where the question was asked, and the sentence that asked it is the first thing a
+    # fresh reader of this section reaches: it read "is owed separately (#4216)" for two
+    # days after the ruling, which is the carried-forward owed claim that re-asks.
+    assert "owed separately" not in section, (
+        "the section defers a ruling that was rendered on 2026-11-19, so the next loop "
+        "re-opens it (#4344)")
+    assert "retired as a contract" in section, (
+        "the retirement has to be stated, not implied by the band's absence — the band "
+        "stays named above precisely so this says WHICH target is retired")
+    assert "#4216, ruled 2026-11-19" in section, (
+        "a ruling in a doc outlives its reason unless it is dated; #4216 exists because "
+        "an undated moving quote did exactly that")
+    assert "median 2.27" in section and "6.6–8.8k" in section, (
+        "the retirement's arithmetic is the claim: reviews-per-turn 2.27 turns the band "
+        "into 6.6–8.8k a review, which is why it was never a prompt measurement")
+    assert "10,419 actually measured" in section, (
+        "the implied-per-review half of the comparison is missing, so 'wrong denominator' "
+        "is an assertion with no figure under it")
+    assert "wrong denominator" in section and "neither a pass nor a miss" in section, (
+        "the verdict on the 23,440 per-turn median has to be stated; leaving it "
+        "unresolved is what let 'a measured miss' stand")
+    for open_question in ("a measured miss", "which is what this section owes",
+                          "Whether a 23,440 median"):
+        assert open_question not in section, (
+            f"the section still keeps the target question open with {open_question!r}, "
+            "which is the wording #4344 was filed to retire")
+
 
 def test_the_architecture_doc_carries_the_per_review_figure_and_its_reading():
     """Clause 4: the section says which of its two numbers can show a prompt change.
@@ -2756,6 +2787,31 @@ def test_the_architecture_doc_carries_the_per_review_figure_and_its_reading():
     assert "2.26" in section, (
         "reviews-per-turn is asserted to be steady across both bands; the measured "
         "median that says so has to be in the sentence that claims it")
+
+    # ── #4344: with the per-TURN target retired, this per-review figure is what the
+    # section polices, so it now carries the ruled cut — median, extremes, interquartile
+    # range, and the dates of the rows they were measured over — plus the bound that
+    # re-opens the target. Dated, deliberately: the docstring above records that an
+    # earlier round edited the doc to match a NEWEST row, and #4216's whole subject was
+    # figures true in no window. These 50 rows (2026-09-26 → 2026-11-19) do not advance
+    # with the mirror — a later cut is a NEW dated sentence beside this one, and the
+    # 49-row / 10,431 reading asserted above stays, so a reader can see that one row
+    # moved the median by 12 tokens and moved no verdict.
+    assert "per-review cost" in section and "polices" in section, (
+        "nothing in the section names what it polices now that the per-turn band is "
+        "retired, so the section reads as having stopped policing cost")
+    assert "median 10,419 tokens a review" in section, (
+        "the policed figure has no value: the ruled median is not in the section")
+    assert "min 6,109 / max 10,936" in section and "10,162–10,658" in section, (
+        "the extremes and the interquartile range are what make 10,419 a distribution "
+        "rather than one row's reading, and they are the ruling's own numbers")
+    assert "50 rows dated 2026-09-26 → 2026-11-19" in section, (
+        "the ruled cut is undated, which is the exact failure #4216 was filed about")
+    assert "Re-arm bound" in section, (
+        "retiring a target with no bound to re-open it by silently stops policing the "
+        "cost: there would be no reading that could ever restart the question")
+    assert "13,000" in section and "8,000" in section, (
+        "the bound has to be numbers a nightly row can be compared to, not 'worsens'")
 
     assert "input_tokens_per_turn / (llm_calls/turns)" in _units_block(), (
         "the doc states a derivation the code that produces the field does not, so the "
