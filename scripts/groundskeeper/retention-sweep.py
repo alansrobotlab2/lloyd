@@ -455,6 +455,41 @@ paragraph from rotting into a comment: it runs the shipped script over a corpus 
 inside the data root, and it refuses any store path this module resolves that lands on or
 under the directory.
 
+Also deliberately NOT a store: ~/lloyd-data/eval/baselines/ — every baseline an eval run
+produced since the runtime data root moved (`architecture/measurement.md`'s description
+of it), the directory `app.paths.EVAL_BASELINES_DIR` names and the runners write into.
+Two eval directories ARE bounded here — `eval/tool-quality/` (store 17) and
+`eval/measurements/injection-canary/` — and that adjacency is the whole reason this
+paragraph exists rather than a line in a board item: a widening pass that sees `eval/`
+named twice concludes the third one is covered too, which is #3987's "easy to misread as
+coverage". Nothing here matches a path under it, and that is a ruling rather than an
+omission — #3908 declined an arm, #3917, #4023 and #4249 each re-asked, and owed-check
+ruled prose on 2026-11-17. The basis is a measurement: 54 MB (55,315,971 bytes) / 216
+entries, 213 files, measured 2026-11-17; the same two commands six days later read
+59,441,308 bytes / 236 entries, 233 files — 4 MB and 20 files in six days, on a data
+filesystem at 46% used with 54% free. And nobody else bounds it either:
+`agent-services/guardian/datawatch.py:88` watches `eval/baselines` REPO-relative —
+`RUNTIME_NAMES`, applied to the CHECKOUT tree, so the directory it means is that
+tree's own `eval/baselines`: ten entries there, tracked only through `.gitignore`'s two
+carve-outs, and nothing to do with this one. The only thing transferable from that watcher
+is why it watches ("measurement records the harness reviews commit as evidence (#600)", its
+own line at :312). So the readers of this one are
+the analysis scripts that need the history present — `scripts/eval_trend_stats.py`'s
+`load_window` globs `nightly-*.json` in it to draw the trend — and there is no second
+owner to defer a delete to, which is the opposite of store 17's situation. The revisit
+trigger is pressure, not age: a row becomes owed once the store passes 1 GB, or once the
+data filesystem drops below 10% free; neither is close, and until one trips the route for
+bytes worth keeping is a copy, not a delete — put them under `~/obsidian/backlog/data/`
+and commit them there, which is what #3916's fixture-run witness and #4118's archived
+k-sweep artifact did (vault `1d704b60d`, `b252cb515`, `631713718`). When the trigger does
+fire, the first arm is a report-only row in store 17's shape — count it, print it, delete
+nothing in either mode — and never a deleter, because a baseline is the evidence an
+already-published trend was drawn from and an age window would drop the oldest nights
+first, which are exactly the baseline a "did this regress?" comparison needs.
+`tests/test_retention_sweep.py` keeps this paragraph honest the same way it keeps the one
+above honest: it runs the shipped script over a planted `eval/baselines/` and refuses any
+store path this module resolves that lands on or under it.
+
 Usage:
     retention-sweep.py            # dry run — report only
     retention-sweep.py --apply    # actually delete/gzip

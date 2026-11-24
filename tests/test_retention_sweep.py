@@ -5023,6 +5023,264 @@ def test_no_store_the_sweep_resolves_lands_on_the_trajectory_corpus(tmp_path, mo
         f"the finder does not even name a corpus path planted in a stand-in module: {named}")
 
 
+# ── #4249: ~/lloyd-data/eval/baselines/ is held on purpose, and says so ──────
+#
+# #3987's finding was that the sweep's two bounded eval stores make the third eval
+# directory read as covered: `eval/tool-quality/` (store 17) and
+# `eval/measurements/injection-canary/` both appear in the store list, so a widening pass
+# that greps for `eval/` sees two hits and moves on. The question then arrived on four
+# passes (#3908, #3917, #4023, owed-check 2026-11-17) because nothing in the tree said
+# the absence was a decision. This is prose plus the same two behavioural pins the
+# trajectory section above already uses — no store path may land there, and the shipped
+# `--apply` must leave the bytes alone — deliberately NOT a delete rule, an age window or
+# a report row: those are owed-check's call on a future measurement, not this round's.
+#
+# Measured basis, re-run before writing: `du -sb` on 2026-11-17 gave 55,315,971 bytes over
+# 216 entries at `-mindepth 1` (213 files, 3 directories); the same commands on
+# 2026-11-24 gave 59,441,308 bytes / 236 entries / 233 files, and `df -P` put the data
+# filesystem at 46% used. The note carries both dates so a later pass can see the rate.
+
+#: The directory the hold is about, spelled the way `app.paths.EVAL_BASELINES_DIR` does.
+def _baselines_under(root: Path) -> Path:
+    return root / "eval" / "baselines"
+
+
+def _baselines_hold_paragraph(doc: str) -> str:
+    """The module docstring's eval/baselines paragraph, cut on its own heading.
+
+    `_exclusion_paragraph`'s shape and the reason for it: slice to the paragraph's
+    blank-line terminator, so a qualifier moved down into the Usage block changes this
+    finder's output instead of keeping it reassuringly unchanged. Its heading is searched
+    for separately (`_HOLD_HEADING`) rather than through `doc.find("Deliberately NOT a
+    store")` because that helper takes the FIRST match and belongs to the trajectory
+    paragraph, which sits above this one — the ordering is asserted below, not assumed.
+    """
+    start = doc.find(_HOLD_HEADING)
+    assert start >= 0, (
+        "the sweep's docstring no longer carries the paragraph that records "
+        "~/lloyd-data/eval/baselines/ as held — the ruling lives on the board and nowhere "
+        "in the tree, which is the state that produced four repeat asks")
+    rest = doc[start:]
+    end = rest.find("\n\n")
+    assert end > 0, "the eval/baselines paragraph runs to the end of the docstring"
+    return rest[:end]
+
+
+_HOLD_HEADING = "Also deliberately NOT a store: ~/lloyd-data/eval/baselines/"
+
+
+def test_the_docstring_records_the_eval_baselines_hold_below_the_trajectory_exclusion(rs):
+    """Clause 1: the hold is recorded where a widening pass reads it, dated, and BELOW the
+    trajectory exclusion so that paragraph's own finder still returns the trajectory text.
+
+    The date and the byte count are the point, not decoration: the four repeat asks were
+    each answered by re-measuring, and a note that says only "we decided not to" invites a
+    fifth. The placement assertion is the one that protects a green test two sections
+    above — `_exclusion_paragraph` slices on the first `"Deliberately NOT a store"`
+    occurrence, so an exclusion inserted ABOVE the trajectory paragraph would silently
+    start grading the wrong prose.
+    """
+    doc = rs.__doc__ or ""
+    para = _baselines_hold_paragraph(doc)
+    flat = " ".join(para.split())
+
+    assert "~/lloyd-data/eval/baselines/" in flat, (
+        "the paragraph does not name the directory by data-root path, so a grep of this "
+        "file for the hold still finds only the two bounded eval stores")
+    assert "deliberately" in para.lower(), (
+        "the hold is stated as a fact rather than a decision, which is the word a "
+        "widening pass needs before it edits")
+    assert "ruling rather than an omission" in flat, (
+        "the paragraph does not say the absence of a rule is intentional, so it reads as "
+        "an omission to the next pass and the question comes back a fifth time")
+    for token, why in (
+            ("54 MB", "no human-readable size, so nobody can compare it to the 1 GB bound"),
+            ("55,315,971 bytes", "the exact measure behind the ruling is gone"),
+            ("216 entries", "the entry count the ruling was made on is gone"),
+            ("213 files", "the file count the ruling was made on is gone"),
+            ("2026-11-17", "the measurement is undated, so it cannot be re-run against")):
+        assert token in flat, f"{why}: {flat[:200]}"
+
+    assert doc.find(_HOLD_HEADING) > doc.find("Deliberately NOT a store"), (
+        "the eval/baselines hold now precedes the trajectory exclusion; "
+        "`_exclusion_paragraph` takes the first match and would start grading this "
+        "paragraph instead of that one")
+    trajectory = _exclusion_paragraph(doc)
+    assert "_pipeline/trajectories" in trajectory and "eval/baselines" not in trajectory, (
+        "`_exclusion_paragraph` no longer returns the trajectory paragraph")
+
+    counted = re.findall(r"(?i)\b(?:one|two|three|four|five|six|seven|eight|nine|ten|"
+                         r"eleven|twelve|thirteen|\d+)\s+stores?\b", doc)
+    assert not counted, (
+        f"the docstring counts stores ({counted}); the count moves every time a store is "
+        "added, and the new paragraph must not introduce one (clause 5)")
+
+
+def test_the_eval_baselines_note_names_the_commit_route_and_no_second_owner(rs):
+    """Clause 2: the note gives the route for bytes worth keeping — copy and commit — and
+    credits no other component with bounding the directory.
+
+    "Copy into the vault and commit" is exercised precedent, not an invention: #3916
+    committed a fixture-run witness that way and #4118 archived an artifact and its cliff
+    sample, all on `~/obsidian` (`1d704b60d`, `b252cb515`, `631713718`). The second half is
+    the more dangerous half. `agent-services/guardian/datawatch.py` really does watch a name
+    spelled `eval/baselines`, and a note that cited it as an owner would hand the next pass
+    a reason to delete these bytes — so the claim is checked against the watcher's own
+    source: the name lives in `RUNTIME_NAMES`, a tuple of CHECKOUT-relative entries, and
+    that module never imports the constant that names the data-root directory.
+    """
+    flat = " ".join(_baselines_hold_paragraph(rs.__doc__ or "").split())
+
+    assert "backlog/data/" in flat, "the note names no destination for kept bytes"
+    assert "commit" in flat.lower(), "the route is named without the step that preserves them"
+    for sha in ("1d704b60d", "b252cb515", "631713718"):
+        assert sha in flat, f"the note lost the vault precedent that the route is exercised: {sha}"
+    assert "a copy, not a delete" in flat.lower(), (
+        "the route no longer says what it replaces, so a sweep arm can be re-proposed as "
+        "the same outcome")
+    assert "nobody else bounds it" in flat.lower(), (
+        "the note does not deny a second owner, which is the claim that makes a delete "
+        "look safe")
+    assert "repo-relative" in flat.lower() and "RUNTIME_NAMES" in flat, (
+        "datawatch is named without saying its `eval/baselines` is a different path, so "
+        "the note would be read as crediting it with this directory")
+
+    watcher = Path(__file__).resolve().parents[1] / "agent-services" / "guardian" / "datawatch.py"
+    src = watcher.read_text()
+    block = src[src.index("RUNTIME_NAMES = ("):]
+    block = block[:block.index("\n)") + 2]
+    assert '"eval/baselines"' in block, (
+        "the note calls datawatch's name a RUNTIME_NAMES entry; the watcher no longer "
+        "keeps it there, so the sentence about a repo-relative watch needs re-reading")
+    assert "EVAL_BASELINES_DIR" not in src, (
+        "datawatch now imports the constant that names the data-root baselines directory, "
+        "so it may really be a second owner — re-read this paragraph before deleting "
+        "anything under eval/baselines")
+
+
+def test_the_eval_baselines_note_states_the_revisit_bound_and_its_first_arm(rs):
+    """Clause 3: the revisit trigger is pressure rather than age, and the first arm when it
+    trips is store 17's shape — a report with no delete — never a deleter.
+
+    The bound has to be a number the note can already be measured against (54 MB against
+    1 GB, 54% free against 10%), and the first arm has to be named, because the
+    temptation when a directory finally looks big is the mtime window this item refused.
+    Store 17 is cited by its real shape, so the reference cannot drift: that store's own
+    docstring entry is read for the phrase that makes it report-without-delete, and the
+    rung is confirmed to ignore `apply` the way the note implies.
+    """
+    doc = rs.__doc__ or ""
+    flat = " ".join(_baselines_hold_paragraph(doc).split())
+
+    assert "1 GB" in flat, "the size half of the revisit bound is missing"
+    assert "10% free" in flat, "the headroom half of the revisit bound is missing"
+    assert "pressure, not age" in flat.lower(), (
+        "the trigger is not named as pressure, so an mtime window reads as the default "
+        "answer: " + flat[:160])
+    assert "report-only" in flat.lower() and "store 17" in flat, (
+        "the note does not name the first arm as a report row in store 17's shape")
+    assert "never a deleter" in flat.lower(), (
+        "the note allows a delete as the first arm, which is the transition this item "
+        "refused four times")
+
+    tool_quality = _store_paragraph(doc, "17. ~/lloyd-data/eval/tool-quality/")
+    assert "REPORTS and does not bound" in " ".join(tool_quality.split()), (
+        "store 17 is no longer the report-without-delete shape the note points at, so the "
+        "first arm needs a different exemplar")
+
+
+def test_no_store_the_sweep_resolves_lands_on_the_eval_baselines_directory(tmp_path, monkeypatch):
+    """Clause 4a: no path the sweep module resolves is the baselines directory or anything
+    under it — the hold pinned as behaviour, not as a grep of the prose.
+
+    Same instrument the trajectory section uses: every module-level `Path` off a fresh
+    import with `LLOYD_DATA` at a scratch root, so a store added tomorrow as
+    `DATA_ROOT / "eval" / "baselines"` is caught whether or not a fixture redirects it. The
+    decoy is what makes the green mean something: a stand-in module holding one baselines
+    path must produce exactly one hit, proving the enumeration can see such a constant at
+    all.
+    """
+    mod = _load(monkeypatch, lloyd_data=tmp_path / "data")
+    held = _baselines_under(mod.DATA_ROOT)
+
+    resolved = {name for name, value in vars(mod).items()
+                if isinstance(value, Path) and not name.startswith("__")}
+    assert {"SESSIONS_DIR", "TASKS_DIR", "TOOL_QUALITY_DIR", "WORKERS_DB"} <= resolved, (
+        f"the enumeration found only {sorted(resolved)}: too few to be the sweep's stores, "
+        "so a green below would be an empty scan rather than an absence")
+    assert _paths_landing_on(mod, held) == [], (
+        "a store the sweep resolves now points at the directory this script deliberately "
+        f"does not bound: {_paths_landing_on(mod, held)}")
+
+    decoy = types.SimpleNamespace(EVAL_BASELINES_DIR=held / "nightly-2026-11-01.json",
+                                  SESSIONS_DIR=mod.DATA_ROOT / "sessions")
+    named = _paths_landing_on(decoy, held)
+    assert len(named) == 1 and named[0].startswith("EVAL_BASELINES_DIR"), (
+        f"the finder does not even name a baselines path planted in a stand-in module: {named}")
+
+
+def test_the_shipped_apply_run_leaves_every_planted_baselines_file_in_place(tmp_path):
+    """Clause 4b and 5: the shipped script, run the way cron runs it, leaves every planted
+    baseline byte-identical, and the report gains no baselines row.
+
+    Fixture-based calls cannot answer this — they supply the store paths, so they can only
+    report what the fixture chose. This runs the file with no venv against a data root of
+    its own, planting the decoy store the sweep DOES own (`groundskeeper-queue.json`, past
+    its 30-day window) beside the baselines. Without it an `--apply` that deleted nothing
+    at all would satisfy every assertion here. The files are backdated 400 days, past the
+    widest window in the script (`SESSION_ARCHIVE_AGE_DAYS` = 90), so a survivor is a file
+    no rule could have reached rather than one that happened to sit inside a horizon. The
+    no-extra-report-line assertion is the in-repo half of the owed check that a live sweep
+    still prints the same store lines: prose must not become a row.
+    """
+    py3 = shutil.which("python3")
+    if not py3:
+        pytest.skip("no bare python3 to prove the no-venv path against")
+    root = tmp_path / "data"
+    held = _baselines_under(root)
+    held.mkdir(parents=True)
+    planted = {}
+    for name in ("nightly-2026-01-01.json", "nightly-2026-01-08.json",
+                 "abba-A1-empty-20260110-070319.json"):
+        payload = json.dumps({"baseline": name, "queries": 86}).encode()
+        path = held / name
+        path.write_bytes(payload)
+        _backdate(path, 400)
+        planted[name] = (payload, path.stat().st_mtime)
+    (root / "_pipeline").mkdir(parents=True)
+    queue = root / "_pipeline" / "groundskeeper-queue.json"
+    queue.write_bytes(b"x" * 2048)
+    _backdate(queue, 31)
+
+    env = dict(os.environ)
+    env["LLOYD_DATA"] = str(root)
+    env["LLOYD_VAULT_ROOT"] = str(tmp_path / "no-vault")
+
+    def run(*args):
+        return subprocess.run([py3, str(_SCRIPT), *args], capture_output=True,
+                              text=True, env=env, cwd="/", timeout=120)
+
+    dry = run()
+    assert dry.returncode == 0, dry.stderr[-800:]
+    applied = run("--apply")
+    assert applied.returncode == _APPLY_STATUS_FROM_A_WORKTREE, applied.stderr[-800:]
+    assert not queue.exists(), (
+        "this run deleted nothing at all, so the baselines surviving it is not evidence "
+        "that the sweep would leave them alone")
+    for name, (payload, mtime) in planted.items():
+        path = held / name
+        assert path.is_file(), f"the sweep archived or deleted a baseline: {name}"
+        assert path.read_bytes() == payload, f"a baseline was rewritten, not left: {name}"
+        assert path.stat().st_mtime == mtime, f"a store touched the baseline's mtime: {name}"
+    assert sorted(p.name for p in held.iterdir()) == sorted(planted), (
+        "something appeared in the baselines directory — an archived copy is as good as an "
+        "archive once a reader globs nightly-*.json")
+    for out in (dry.stdout, applied.stdout):
+        named = [ln for ln in out.splitlines()
+                 if "baseline" in ln.lower() and not ln.startswith("  data root:")]
+        assert not named, f"the sweep reported an eval/baselines store: {named}"
+
+
 # ── #1837: the branch line names the settled decision, not an open item ──────
 #
 # The ruling on unreachable `automod/*` tips is made — never deleted, they are the sole
