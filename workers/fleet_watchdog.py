@@ -1258,9 +1258,9 @@ def _outranked_clause(
 
     Empty string UNLESS the fleet is demonstrably claiming: some source other than the
     waiting one has rows in `claimed` or `running` stamped inside the same
-    `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` window the wait is weighed against — the one
-    bound `_queue_starving` pages at, so the count and the accusation can never be
-    about two different intervals (#4506: this branch, its lookback and the printed
+    `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS` window the wait is weighed against — the
+    window bound `_queue_starving` pages at, so the count and the accusation can never
+    be about two different intervals (#4506: this branch, its lookback and the printed
     minutes below all carried a raw three-times-`max_duration` expression, and binding
     only the threshold
     would have left the alert's own sentence quoting a window the alarm no longer used).
@@ -1270,6 +1270,26 @@ def _outranked_clause(
     finishes. The waiting source is excluded from the count on purpose: an `owed-check`
     row claiming work while its own older sibling waits is the anomaly (the pool takes
     the best-ranked claimable row), not evidence that someone is ahead of it.
+
+    The claims read carries a SECOND bound beside `MAX_LEGITIMATE_QUEUE_WAIT_SECONDS`:
+    the instant an engaged operator hold opened (`_operator_hold_instant`, #4530), and
+    the window this prints is the one those two bounds leave. A hold stops
+    `WorkerPool` from claiming at all, so on a held board every claim still inside the
+    window was stamped BEFORE the hold opened: the accusation was counting history the
+    hold itself made by stopping claims, and it died on its own the moment the 6 h
+    look-back slid past the hold's opening edge — which is why the 8.0 h and 12.9 h
+    lines of the same hold carry the hold clause alone. Measured on
+    `~/lloyd-data/workers.db` for the post at `~/obsidian/memory/2026-11-22.md:18`,
+    written 56 min into a person hold taken at 2026-11-22T21:17:25.838782+00:00: of the
+    64 claims in that alert's own window (`owed-check` excluded) — autotriage 39,
+    autocode 14, scheduled-task 4, youtube-digest 2, board-steward 2, backlog-cluster
+    2, autoresearch 1, the printed "39 autotriage rows, plus work from 6 other
+    sources" — the number stamped at or after the hold's opening instant is ZERO, and
+    the newest claim before it is 21:07:07.829403+00:00, ten minutes ahead of the
+    pause. The one sentence accused priority starvation and then said "claims are held
+    by that pause, not by this scheduler". A hold that really did claim is still
+    accused, with the shorter window it was weighed over; a hold older than the window
+    leaves the floor, and so the printed figure, at 360.
 
     The alarm drops the word "stalled" whenever this clause is non-empty, because on that
     board the word is false. Measured on this box 2026-10-14 with the command at the head
@@ -1315,10 +1335,20 @@ def _outranked_clause(
         return ""
     import datetime as _dt
     now = _dt.datetime.now(_dt.timezone.utc)
-    since = (now - _dt.timedelta(
-        seconds=MAX_LEGITIMATE_QUEUE_WAIT_SECONDS)).isoformat()
+    floor = now - _dt.timedelta(seconds=MAX_LEGITIMATE_QUEUE_WAIT_SECONDS)
+    # The window's SECOND bound (#4530): an engaged operator hold stops `WorkerPool`
+    # from claiming at all, so every claim the first 6 h of one finds was stamped
+    # BEFORE it opened. `held > floor` is the only case that moves the floor: a hold
+    # older than the window leaves it alone, because then no claim can post-date the
+    # hold and the read below returns nothing on its own.
+    held = _operator_hold_instant(queue)
+    if held is not None and held > floor:
+        floor = held
+    # Printed below: the window THIS read weighed, whichever of the two bounds set it.
+    window_min = int((now - floor).total_seconds() // 60)
     try:
-        claims = queue.claims_by_source(since, exclude_source=starving_source)
+        claims = queue.claims_by_source(floor.isoformat(),
+                                        exclude_source=starving_source)
     except Exception:
         # A claims read that will not answer is not evidence the pool is busy. The
         # sentence falls back to the one that accuses nothing beyond the wait itself,
@@ -1333,8 +1363,50 @@ def _outranked_clause(
         ahead += f", plus work from {others} other source" + ("s" if others != 1 else "")
     return (
         f" — priority starvation: it is outranked by higher-priority work,"
-        f" {ahead} claimed inside {MAX_LEGITIMATE_QUEUE_WAIT_SECONDS // 60} min"
+        f" {ahead} claimed inside {window_min} min"
     )
+
+
+def _operator_hold_instant(queue: WorkQueue):
+    """When the engaged operator hold opened, or None if nothing bounds the read.
+
+    #4530's bound on `_outranked_clause`. #1550 gave the due-ness alarm its hold
+    clause and #4210 handed the same read to the nextrun alert's cause clause; this
+    is the third seat, the one that still had the queue in front of it and did not
+    look. One `operator_pause_state(queue)` read, on the alert path like the claims
+    read it bounds — one row of the `watermarks` table in `workers/queue.py`'s
+    `_SCHEMA`, whose `PRIMARY KEY (source, key)` is its own index, so this is not a
+    second scan of `queue`.
+
+    None is the answer that leaves today's behaviour exactly alone, and it is the
+    answer for four different situations: no hold engaged; a hold whose watermark
+    carries no parsable `since`; an automod hold, which `worker_pause` keeps
+    unpersisted by design; and a read that raises. The last is why the whole body
+    sits in one `try`: a database hiccup here must fall back to the accusation the
+    board already proved, never to the held-pool sentence, because "the pool is
+    paused" printed for a pool that is merely outranked would send someone to
+    Mission Control to release a hold that is not engaged. `operator_pause_state`
+    swallows its own failures already, so that `except` is reached by a failure to
+    import or to read the returned mapping, and it is logged rather than silent.
+
+    A returned instant is tz-aware. `app.autonomy._parse_iso` stamps UTC onto a
+    naive value (`app/autonomy.py:1290-1291`), so the `tzinfo is None` arm below is
+    a guard on that other module's promise and not a live path today; it stays
+    because the alternative is a `TypeError` from a comparison inside the tick, and
+    the failure this whole function is built to avoid is a silenced alert.
+    """
+    try:
+        from workers.pool import operator_pause_state
+        state = operator_pause_state(queue)
+        if not state["paused"]:
+            return None
+        opened = _parse_iso_safe(state["since"])
+        if opened is None or opened.tzinfo is None:
+            return None
+        return opened
+    except Exception:
+        logger.exception("fleet watchdog: could not read the operator hold state")
+        return None
 
 
 def _operator_pause_clause(queue: WorkQueue) -> str:

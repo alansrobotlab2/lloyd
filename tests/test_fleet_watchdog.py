@@ -2265,6 +2265,210 @@ async def test_a_wait_with_nothing_claimed_in_the_window_keeps_today_s_sentence(
         f"sentence the guardian watch keys on: {alerts}")
 
 
+#: How long the hold in the #4530 nodes below has been open, and where its board's
+#: claims sit relative to it. 56 min is not a round number: the post at
+#: `~/obsidian/memory/2026-11-22.md:18` printed `held 0.9 h`, and of the 64 claims in
+#: that alert's own window the newest was stamped 21:07:07.829403+00:00, ten minutes
+#: BEFORE the hold opened at 21:17:25.838782+00:00 — so 120 min is a claim the 360-min
+#: window counts and the hold excludes, and 20 min is one a held pool should never have
+#: made and must still be accused of.
+_HOLD_OPENED_MIN = 56
+_CLAIM_BEFORE_HOLD_MIN = 120
+_CLAIM_AFTER_HOLD_MIN = 20
+
+
+def _hold_opened_minutes_ago(q: WorkQueue, *, minutes: int) -> str:
+    """Engage a real person hold and wind its opening instant back `minutes`.
+
+    `WorkerPool.pause` stamps the watermark from the wall clock, so the age is raw SQL
+    on the row `operator_pause_state` reads `since` from — the same workaround
+    `wm_updated_at`'s docstring names and the hold-clause nodes above use. The value is
+    read back through `operator_pause_state` and asserted, because the alternative is a
+    fixture whose aging silently failed: with a hold opened a second ago the claims
+    below would fall outside it for the wrong reason, and clause 1 would pass proving
+    nothing about a 56-minute window.
+    """
+    from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE, WorkerPool
+    from workers.pool import operator_pause_state
+
+    WorkerPool(q, slots=1).pause(True, holder_kind="person")
+    opened = (dt.datetime.now(dt.timezone.utc)
+              - dt.timedelta(minutes=minutes)).isoformat()
+    with sqlite3.connect(str(q.db_path)) as conn:
+        conn.execute("UPDATE watermarks SET updated_at=? WHERE source=? AND key=?",
+                     (opened, PAUSE_WM_SOURCE, PAUSE_WM_KEY))
+        conn.commit()
+    state = operator_pause_state(q)
+    assert state["paused"] and state["since"] == opened, (
+        f"the hold is not 56 min old, it is {state['since']!r} vs {opened!r}, so the "
+        f"window this board is supposed to straddle is not the one being weighed")
+    return opened
+
+
+def _board_held_since_with_claims(tmp_path, name: str, *, claim_age_min: int):
+    """The 2026-11-22 22:13Z state as one `workers.db`: starving head, person hold,
+    and claims that exist only on one side of the hold's opening instant.
+
+    Order is the fixture. The claims are made first because `claim_next` is not
+    pause-aware (`workers/queue.py` never reads the watermark), which is what lets a
+    node place a claim relative to a hold the pool itself would never have made; the
+    head is aged last for the reason `_starve_head` gives. `claim_age_min` is the only
+    lever: above `_HOLD_OPENED_MIN` every claim predates the hold, below it the pool
+    really did claim while held.
+    """
+    q = _starved_board_queue(tmp_path, name, head=False)
+    _claim_rows(q, source="autotriage", n=3, age_min=claim_age_min)
+    opened = _hold_opened_minutes_ago(q, minutes=_HOLD_OPENED_MIN)
+    _starve_head(q)
+    _assert_starving(q)
+    return q, opened
+
+
+async def test_a_hold_whose_claims_all_predate_it_is_not_called_priority_starvation(
+        board, monkeypatch, tmp_path):
+    """Clause 1: a person hold wins the sentence over a claim count made of history.
+
+    At base this posts `queue behind higher-priority work: the owed-check stream has a
+    claimable row 915 min old — priority starvation: ... 3 autotriage rows claimed
+    inside 360 min`, and the same line then carries "claims are held by that pause, not
+    by this scheduler" — one sentence accusing priority and then naming the pause. The
+    6 h look-back is the only reason that lie has an end: it dies when the window slides
+    past the hold, which is why the 8.0 h and 12.9 h lines of the same hold (`memory/
+    2026-11-22.md:20`, `memory/2026-11-23.md:12`) carry the hold clause alone.
+    """
+    _starve_config(monkeypatch)
+    q, opened = _board_held_since_with_claims(
+        tmp_path, "held-history.db", claim_age_min=_CLAIM_BEFORE_HOLD_MIN)
+    # The premise that makes this a regression and not an empty board: the claims ARE
+    # inside the window the clause used to weigh, so only the hold bound removes them.
+    inside_old_window = q.claims_by_source(
+        (dt.datetime.now(dt.timezone.utc)
+         - dt.timedelta(seconds=MAX_LEGITIMATE_QUEUE_WAIT_SECONDS)).isoformat(),
+        exclude_source="owed-check")
+    assert inside_old_window, (
+        "no source claimed inside the 360 min window, so this board proves nothing "
+        "about a claim the hold's opening instant is supposed to exclude")
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, f"expected exactly the one due-ness alert: {alerts}"
+    msg = alerts[0]
+    assert "priority starvation" not in msg and "outranked" not in msg, (
+        f"the accusation survived on a board whose only claims predate the hold that "
+        f"stopped them: {msg}")
+    assert msg.startswith("autonomy scheduler may be stalled: "), (
+        f"this is the prefix `agent-services/guardian/detect.py:336` watches and the "
+        f"daily-note family matches; a hold's own silence must not cost the alarm its "
+        f"chronic signature: {msg}")
+    assert f"{_STARVE_HEAD_MIN} min old" in msg, (
+        f"the wait is a true reading of a real row and stays quoted whatever the cause "
+        f"clause says: {msg}")
+    assert "PAUSED by operator (person hold)" in msg and opened in msg, (
+        f"the hold clause with its opening instant is the sentence a reader can act "
+        f"on: {msg}")
+
+
+async def test_no_hold_engaged_leaves_the_accusation_and_its_window_byte_for_byte(
+        board, monkeypatch, tmp_path):
+    """Clause 2 (first half): with nothing held, the bound is inert to the byte.
+
+    Pinned as a whole-message equality rather than substring checks, because the risk
+    of this change is a word moving in the sentence the guardian cites. The second half
+    of the clause — a board with NOTHING claimed in the window still posting
+    `autonomy scheduler may be stalled: oldest claimable queue item is … min old` — is
+    pinned by `test_a_wait_with_nothing_claimed_in_the_window_keeps_today_s_sentence`
+    in this file, and by
+    `tests/test_autonomy_scheduler.py::test_a_starving_queue_with_no_pause_alerts_byte_identically`
+    across the process seam to `tick`.
+    """
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "unheld.db")
+    _claim_rows(q, source="autotriage", n=3)
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, f"expected exactly the one due-ness alert: {alerts}"
+    assert alerts[0] == (
+        f"queue behind higher-priority work: the owed-check stream has a claimable "
+        f"row {_STARVE_HEAD_MIN} min old — priority starvation: it is outranked by "
+        f"higher-priority work, 3 autotriage rows claimed inside "
+        f"{_STARVE_WINDOW_MIN} min"), (
+        f"an unheld board's bytes moved: {alerts[0]}")
+
+
+async def test_a_hold_the_pool_claimed_under_is_still_accused_with_its_own_window(
+        board, monkeypatch, tmp_path):
+    """Clause 3: the bound excludes history, never a live count — and the printed
+    minutes move with the window that was weighed.
+
+    Same builder, claims at 20 min, hold opened 56 min ago: the pool is holding the
+    fleet and claiming anyway, which is the anomaly worth a page. `#4506`'s rule is what
+    makes the printed figure part of this clause — a 56-minute window must not be
+    accused of 360 minutes, because that is the count and the sentence being about two
+    intervals again.
+    """
+    _starve_config(monkeypatch)
+    q, opened = _board_held_since_with_claims(
+        tmp_path, "held-claiming.db", claim_age_min=_CLAIM_AFTER_HOLD_MIN)
+
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, f"expected exactly the one due-ness alert: {alerts}"
+    msg = alerts[0]
+    assert "priority starvation" in msg and "outranked" in msg, (
+        f"a hold under which rows really were claimed lost its accusation: {msg}")
+    assert msg.startswith("queue behind higher-priority work: "), msg
+    assert f"claimed inside {_HOLD_OPENED_MIN} min" in msg, (
+        f"the sentence is not quoting the window it weighed, which since the hold bound "
+        f"is `{_HOLD_OPENED_MIN}` min and not `{_STARVE_WINDOW_MIN}`: {msg}")
+    assert f"inside {_STARVE_WINDOW_MIN} min" not in msg, (
+        f"the constant `{_STARVE_WINDOW_MIN}` outlived the shorter window it no longer "
+        f"describes: {msg}")
+    assert "PAUSED by operator (person hold)" in msg and opened in msg, (
+        f"the accusation and the hold have to be readable in one line: {msg}")
+
+
+async def test_a_hold_read_that_raises_falls_back_to_the_accusation_never_to_silence(
+        board, monkeypatch, tmp_path):
+    """Clause 4: a database hiccup cannot turn an outranked wait into a held pool.
+
+    The direction of the fallback is the whole clause. Returning "" on a failed hold
+    read would print `autonomy scheduler may be stalled: ` plus nothing, sending someone
+    to Mission Control to release a hold that is not engaged; the bound is therefore
+    computed BEFORE the claims read and dropped, not applied, when the read fails, so
+    the board falls back to the accusation it proved for itself — and the alert is still
+    posted, because an alarm that cannot report its own silencing is not an alarm.
+    """
+    from workers import pool as pool_mod
+
+    _starve_config(monkeypatch)
+    q = _starved_board_queue(tmp_path, "hold-read-raises.db")
+    _claim_rows(q, source="autotriage", n=3)
+
+    def _raising(_q):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(pool_mod, "operator_pause_state", _raising)
+    alerts = _watch_alerts(monkeypatch)
+    _streak_at_alerting_threshold(monkeypatch)
+    await fw.tick(q)
+
+    assert len(alerts) == 1, (
+        f"a failed hold read silenced the due-ness alert: {alerts}")
+    msg = alerts[0]
+    assert msg.startswith("queue behind higher-priority work: "), (
+        f"a failed hold read changed an outranked wait into a stall sentence: {msg}")
+    assert ("priority starvation" in msg
+            and f"inside {_STARVE_WINDOW_MIN} min" in msg), (
+        f"the fallback did not restore today's accusation with today's window: {msg}")
+
+
 async def test_claims_by_the_waiting_source_itself_do_not_explain_the_wait(
         board, monkeypatch, tmp_path):
     """The exclusion that keeps this an attribution and not an excuse.
