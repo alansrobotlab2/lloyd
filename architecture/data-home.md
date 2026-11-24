@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, data, safety, guardian, backup, automod]
 type: reference
 status: implemented
-date: 2026-10-23
+date: 2026-11-24
 ---
 
 # The data home: runtime data lives outside the code tree
@@ -72,7 +72,10 @@ like data:
 
 - **It is a nested btrfs subvolume.** A snapshot of `~/lloyd-data` does not
   descend into one, so the hourly snapshots do not carry the AST cache that every
-  rebuild rewrites — 691 MB of it on 2026-10-23, where this line first read ~185 MB.
+  rebuild rewrites — 691 MB of it on 2026-10-23, where this line first read ~185 MB, and
+  1.5 GB on 2026-11-24 (722 MB of that the live tree's own graph, 243 MB more per round
+  worktree still on disk). Nothing bounds it by size: `_prune_orphans` removes a graph
+  only when its tree is gone, and a round's worktree survives 30 days.
   The emptiness is measurable rather than assumed: `ls` a snapshot's `code-graph/`
   and it lists nothing. Create it once with
   `btrfs subvolume create ~/lloyd-data/code-graph` (as the user; no root
@@ -129,17 +132,20 @@ are unchanged; a script with no venv calls
 its run prints the root it resolved in both dry-run and `--apply`, because every
 number it reports is a count of that root.
 
-The stdlib readers still to convert — `agent-services/guardian/{policy,datawatch}.py`,
-`idle-worker.py`, `livekit_worker.py`, `snapshot-data.sh`, `restore-data.sh` — each
-read the variable by hand: rule 2 without the marker check and without rule 3. The
-shell ones fall back to `${LLOYD_DATA:-$HOME/lloyd-data}`; the two guardian modules
-fall back to a literal absolute path naming this account, which is right on this box
-and nobody's root on any other. They resolve the live root from any tree. For a reader
-that is wrong but harmless, and for a while the sweep was the only one with `unlink`
-behind it — that is no longer true of the guardian, whose `quarantine_inert` creates
-`$LLOYD_DATA/quarantine/tree-strays/<name>` under its own hand-resolved root and
-unlinks the code-tree copy (#3208). Import the accessor `policy.quarantine_dir`
-already loads by path when one of them next changes.
+Five stdlib readers were left unconverted; **#3208 (`c1760353`, `f444aa51`) converted the
+two that mattered.** `agent-services/guardian/policy.py` now loads `app/data_root.py` by
+path for the tree that identifies the process, applies rule 1 with **no default**, and
+reconstructs the account root off `pwd` instead of restating the literal — so the guardian
+no longer resolves the live root from any tree, and `datawatch`'s stray move refuses when
+it cannot resolve rather than guessing a directory to create under and `unlink` from.
+
+Four still read the variable by hand: rule 1 over a `$HOME`-defaulted fallback, no marker
+check and no rule 3 — `livekit_worker.py`, `idle-worker.py`, `snapshot-data.sh` and
+`restore-data.sh` (filed, #4531). `livekit_worker.py` is the one with a write behind it:
+`voice_profiles/` and `ww_diag/` land under whatever root it guessed, which is the same
+asymmetry #3208 removed from `quarantine_inert`, one reader later. The two shell scripts
+guess it on the produce and restore routes of the snapshot layer below, so a box whose
+root moved snapshots the wrong tree and restores toward somewhere else.
 
 **Nothing in production exports the live root as `LLOYD_DATA`, and nothing should.**
 The backend and the aggregator find the root by rule 2. Their Bash children inherit
@@ -210,8 +216,17 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
     its newest snapshot is every `policy.SNAPSHOT_CHECK_SECONDS` (900 s) and
     alerts `error` past `policy.SNAPSHOT_MAX_AGE_SECONDS` (3 h — three hourly
     periods, so one skipped hour is not an alarm), naming the stamp and its age.
-    It stays quiet while the data tripwire is set, because that refusal is
-    intended and already paged, and it is not armed on a machine with no data
+    While the tripwire stands the page is not skipped — it is re-routed. Silence
+    there cost nine hours on 2026-11-19 (#4360): the trip paged once in its first
+    minute and the newest snapshot stamp was still twelve hours old at hour nine,
+    past this check's own bound, with nothing saying so. The same single poll now
+    sends that reading under "Data snapshot layer down while the data tripwire
+    stands" (`guardian.DATA_TRIP_SNAPSHOT_AGE_TITLE`), naming the trip's age from
+    the marker's offset-bearing stamp plus the newest snapshot's, latched one
+    alert per trip and retracted on the tick that measures the marker gone. It
+    ships at `error`, not `critical`, so the trip stays the only page for one
+    incident — whether an outage past `SNAPSHOT_MAX_AGE_SECONDS` should page
+    anyway is owed and filed. The check is not armed on a machine with no data
     root at all — that box has nothing to snapshot and its own alert. An empty
     directory is reported when the root exists: present and listable is not the
     same as restorable.
@@ -287,7 +302,13 @@ opt-in as the tree guard. The live-data cross-checks in `tests/` read through
   the guardian kept judging against the pre-incident baseline — which re-tripped
   the 2026-10-20 incident at 14:28:32 on a folder the operator had just removed,
   re-pausing the pool, and cost a `systemctl --user restart lloyd-guardian` to
-  work around a documented one-command reset. The watch is not armed until it first sees a marked
+  work around a documented one-command reset. #4368 closed the rest of that
+  complaint: `clear` wins the race with a tick already in flight, and prints what
+  the trip left standing — clearing the latch does not give back the promotions
+  halt or the pool pause, and on 2026-11-19 both survived the clear until an
+  attended session lifted them by hand, while the clear's only output was one
+  line about the baseline. That readout is stdout, one process, unjournaled.
+  The watch is not armed until it first sees a marked
   root. Once an hour it also lists any runtime name that has come back into the
   tree (`datawatch.stray_in_tree`), which means some writer still resolves its
   path off the code.
@@ -327,8 +348,11 @@ Four layers, in the order a turn meets them:
    those tools are not bracketed and the next Bash call's before-snapshot already holds the
    file. Two are the data-home half, which reads two directories before the command and the
    same two after it: `checkout-in-data-root` for a git checkout the call laid under the
-   runtime data root (#3095, above), and `empty-db-created` for a 0-byte
-   `.db`/`.sqlite`/`.sqlite3` this call opened into existence (#3140). The two watched
+   runtime data root (#3095, above), and `empty-db-created` for a
+   `.db`/`.sqlite`/`.sqlite3` this call opened into existence (#3140) — no longer only the
+   0-byte shape, since #3567 puts a file WITH bytes through the same read-only probe: a
+   shipped schema is 80 KiB of pages over nothing to read, which is precisely the shape
+   `data_root_shadows` below spends a paragraph describing. The two watched
    directories are the data root's top level and the session's own scratch dir
    (`session-cwd/`, one directory per session id), and the
    second is the point: a call that names no `cwd` STARTS there, so a bare `sqlite3
@@ -392,8 +416,8 @@ Four layers, in the order a turn meets them:
    `_pipeline/workers.db` that held no rows — and an empty database is a valid *empty*
    SQLite database, so a probe opened at the wrong path prints 0 rows instead of failing.
    **Emptiness is rows, not bytes (#3481).** The live stray is 81,920 bytes: `KGStore(path)`
-   provisions an absent path by design (#1236's `_require_database` guards the read route
-   only), so that file carries the whole shipped schema plus a `('schema_version','1')` row
+   provisioned an absent path by design back then (#1236's `_require_database` guards the
+   read route only), so that file carried the whole shipped schema plus a `('schema_version','1')` row
    and no data — a count answers cleanly at any size a `size == 0` predicate could have
    seen. `meta` is bookkeeping and not content. The probe performs **one** open per
    candidate, chosen by `datawatch._read_open` from what stands beside the file, because the
@@ -430,6 +454,17 @@ Four layers, in the order a turn meets them:
    `notify.resolve` matches a daily-note heading literally and a retired heading the walk
    stops passing seals a section forever — and a scan that cannot walk the root raises
    rather than answering `[]`, so the day's note is not cleared on a tree-only measurement.
+
+**Beside these four, one library refuses.** Four is the count of what a turn meets through
+the prompt, the Bash tool and the guardian; a fifth defence sits inside `app/kg_store.py`
+and reaches one library. `KGStore(path)` refuses to provision an absent path inside the
+data root unless it is the declared store or sits in that store's own directory, with
+`create=True` the deliberate override and `configure()` the caller that passes it
+(`_refuse_stray_create`, `5348fadd`). It is the creator half of the pair whose attribution
+half is layer 2 — it stops the file before it exists — and it exists because the
+81,920-byte `kg.sqlite` above was laid by a worker's own `KGStore('<data root>/kg.sqlite')`
+that nothing refused. `sqlite3`, `touch` and a redirect are not `KGStore`, which is why the
+count of layers a turn meets is still four and why layer 2 is the wider of the two.
 
 ## The move (2026-09-22)
 
@@ -494,3 +529,23 @@ stop of `agent-supervisord.service` with the guardian stopped, not a series of
   48-hourly + 14-daily prune, both timers live with the newest snapshot 21 minutes old,
   the five journal kinds and `actionable_by`'s two values, the inert-move conditions,
   and `data_root_shadows` raising rather than answering `[]`.
+- 2026-11-24 — `stale`, corrected in place (arch review of the whole page). Five
+  statements had moved under it since 10-23, all of them landings the page had not
+  absorbed: the guardian's two stdlib readers are converted (#3208, `c1760353` +
+  `f444aa51`), so the unconverted set is four and one of them — `livekit_worker.py` —
+  writes (filed #4531); the snapshot-age check no longer stays quiet under a standing
+  data trip, it re-routes to an `error` readout (#4360, `e2de4c3f`, after nine hours of
+  silence on 2026-11-19), and whether `error` is enough for an outage past the bound is
+  OWED and unfiled here (this review could file one item); `datawatch.py clear` now reports the halt and the pool pause its trip left
+  standing and wins the race with a tick in flight (#4368, `d9d003db`); the
+  `empty-db-created` kind is no longer 0-byte-only (#3567 — a schema-only database with
+  bytes is measured by the same probe); and `KGStore` refuses an absent path in the data
+  root, so the "provisions by design" sentence that explained the 81,920-byte stray is now
+  past tense and the refusal is written in beside the four layers it does not join.
+  Re-measured: `code-graph/` is 1.5 GB, not 691 MB, and nothing bounds it by size. Left as
+  written after checking: the three rules, the marker and `DataRootMissing`; every
+  isolation row; each threshold (10 % / 200 / 900 s / 20, `INERT` 600 s, scratch horizon
+  24 h, snapshot poll 900 s and limit 3 h, stray poll 3600 s); the 48+14 prune, both
+  timers live with the newest snapshot 35 minutes old; the five journal kinds and the two
+  watched data-home directories; the nested-subvolume claim, proven by listing a
+  snapshot's empty `code-graph/`; and `protected_roots()`' coverage of the data roots.
