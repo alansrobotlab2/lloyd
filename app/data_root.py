@@ -13,9 +13,13 @@ the LIVE root — invisible to the Bash delete guard (a Python `unlink` is not a
 
 This module is the fix for the copy: the same three rules, in one stdlib-only
 file that `app.paths` imports and re-exports and that a script can import with
-plain `python3`. Its two constraints are that it imports nothing from `app` and
-nothing third-party, and that importing it touches the filesystem only through
-`pwd` and an `is_file()` — no `mkdir`, so importing it cannot create a root.
+plain `python3`. A caller that is not Python asks the same file across the process
+boundary: `python3 <tree>/app/data_root.py` prints the resolved root on stdout and
+exits 0, or refuses — non-zero, the reason on stderr, no path on stdout — so a
+shell can never capture a guess (#4531). Its two constraints are that it imports
+nothing from `app` and nothing third-party, and that importing it touches the
+filesystem only through `pwd` and an `is_file()` — no `mkdir`, so importing it
+cannot create a root.
 
 The three rules, first match wins (identical to `app.paths` before the move):
 
@@ -36,6 +40,7 @@ The three rules, first match wins (identical to `app.paths` before the move):
 from __future__ import annotations
 
 import os
+import sys
 from pathlib import Path
 
 DATA_ROOT_MARKER = ".lloyd-data-root"
@@ -259,3 +264,58 @@ def vault_root() -> Path:
     """
     override = os.environ.get(VAULT_ROOT_ENV) or os.environ.get(VAULT_ROOT_FALLBACK_ENV)
     return Path(override) if override else (Path.home() / "obsidian")
+
+
+#: Exit code for a refused resolution, distinct from the shell's own 1 and from
+#: the 64 (`EX_USAGE`) a bad argument list gets, so a caller that branches on the
+#: refusal never branches on a typo.
+CLI_REFUSED = 2
+
+
+def cli_main(argv: "list[str] | None" = None) -> int:
+    """The shell-facing answer: print the resolved data root, or refuse without one.
+
+    `scripts/backup/snapshot-data.sh` and `scripts/backup/restore-data.sh` used to
+    spell the resolution as `${LLOYD_DATA:-$HOME/lloyd-data}` — rule 1 over a
+    `$HOME` default, which is a *guess* the moment the root moves or loses its
+    `.lloyd-data-root` marker, and on the snapshot route it is a guess the guardian
+    then measures as if it were the root, while `btrfs subvolume snapshot` and the
+    restore guard both use the shell's own value (#4531). This is that answer asked
+    of the same three rules every Python reader uses, so the shell has no copy of
+    the resolution left to drift.
+
+    The tree the answer is about is this file's own (`code_tree()`), which is the
+    checkout the calling script sits in — that is the whole point of shipping the
+    entry point with the resolver rather than letting a script name a tree it
+    guessed. So there are no arguments to parse: a tree argument here would be the
+    same hand-roll in a friendlier costume, and `snapshot-data.sh` already knows
+    its own checkout by `dirname "$0"`.
+
+    Exits 0 with the root on stdout. On a refusal — a production checkout whose root
+    has no marker, the one case that must never yield a value — stdout stays empty
+    and the reason goes to stderr: the caller's `DATA="$(python3 app/data_root.py)"`
+    must come back empty rather than with a path to snapshot, and the merged reason
+    is what it logs.
+
+    A function rather than inline code under the `__main__` guard, so a test can
+    call it with the resolver monkeypatched into the refusing state: rule 2
+    compares the tree against the account's own checkout, so no scratch tree can
+    reach a refusal by being built, and a subprocess-only entry point would have
+    the unmarked-production-root arm untested. The guard below is the same call
+    with the real arguments.
+    """
+    args = sys.argv[1:] if argv is None else list(argv)
+    if args:
+        print("usage: python3 app/data_root.py — prints the data root this"
+              " checkout resolves; it takes no arguments", file=sys.stderr)
+        return 64
+    try:
+        print(resolve_data_root_for_tree())
+    except DataRootMissing as exc:
+        print(f"data-root: refusing: {exc}", file=sys.stderr)
+        return CLI_REFUSED
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(cli_main())

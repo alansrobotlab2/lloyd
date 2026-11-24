@@ -139,13 +139,31 @@ reconstructs the account root off `pwd` instead of restating the literal — so 
 no longer resolves the live root from any tree, and `datawatch`'s stray move refuses when
 it cannot resolve rather than guessing a directory to create under and `unlink` from.
 
-Four still read the variable by hand: rule 1 over a `$HOME`-defaulted fallback, no marker
-check and no rule 3 — `livekit_worker.py`, `idle-worker.py`, `snapshot-data.sh` and
-`restore-data.sh` (filed, #4531). `livekit_worker.py` is the one with a write behind it:
-`voice_profiles/` and `ww_diag/` land under whatever root it guessed, which is the same
-asymmetry #3208 removed from `quarantine_inert`, one reader later. The two shell scripts
-guess it on the produce and restore routes of the snapshot layer below, so a box whose
-root moved snapshots the wrong tree and restores toward somewhere else.
+Four read the variable by hand until 2026-11-24 (#4531): rule 1 over a `$HOME`-defaulted
+fallback, no marker check and no rule 3 — `livekit_worker.py`, `idle-worker.py`,
+`snapshot-data.sh` and `restore-data.sh`. **Three of the four ask `app/data_root.py` now**
+(#4531's round): the voice worker imports it, which needed no path surgery because the file
+already had the tree on its path for `app.ww_diag`, and the two shell scripts get the answer
+across a process boundary from the entry point at the bottom of that file — print the
+resolved root on stdout and exit 0, or exit non-zero with the reason on stderr and **no path
+on stdout**, so a caller that captures the output into its root variable comes back empty
+rather than with a directory it guessed. `idle-worker.py` still guesses it: the loader is the
+same `policy.py` by-path pattern, already written and green, but the path is in no
+`ALLOWED_GLOBS` tuple and the #1376 rail counts only a verbatim grant, which a round cannot
+write for itself — #4532 carries it. (The idle worker is not deployed: no
+`~/lloyd-data/idle-worker`, no idle unit, no supervisord program, so the outstanding guess is
+latent, and its state dir, log and PID file are what would land on a gate round's `$HOME`.)
+
+`livekit_worker.py` was the one with a write behind it, though narrower than the paragraph
+this replaces claimed: `ww_diag` was already resolver-backed (`app.ww_diag`, which the worker
+imports at the top of its file), so the guess reached `voice_profiles/` only — and it reached
+it through the `${LLOYD_DATA}` expansion, not the unused default, because `config.yaml` spells
+`profiles_dir` against that name. That is the same asymmetry #3208 removed from
+`quarantine_inert`, one reader later. The two shell scripts guessed it on the produce and
+restore routes of the snapshot layer below: the guardian measured the root the script handed
+it, so a box whose root moved took **no** snapshot at all (the gate refuses an unmarked root,
+`exit 0`, silent) while `btrfs` and the restore-into-live-root guard both used the script's
+own guess.
 
 **Nothing in production exports the live root as `LLOYD_DATA`, and nothing should.**
 The backend and the aggregator find the root by rule 2. Their Bash children inherit

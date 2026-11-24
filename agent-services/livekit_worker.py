@@ -82,6 +82,10 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 from app.ww_diag import diag_dir as _ww_diag_dir  # noqa: E402
+# The data root itself, from the same package for the same #1444 reason. Imported
+# as the module, not the function, so a test can swap the resolver on the module
+# and this unit sees the swap at call time.
+from app import data_root as _data_root_mod  # noqa: E402
 # The per-spoken-turn latency store, for the same #1444 reason: one module owns
 # where `<data root>/voice/turns.jsonl` is, and this unit is only one of its
 # three users. Imported as the module, not the function, so a test can swap
@@ -131,8 +135,21 @@ def _load_env_file(path: Path) -> None:
 
 
 def _data_root() -> str:
-    """The runtime data root, as app.paths resolves it for production."""
-    return os.environ.get("LLOYD_DATA") or os.path.expanduser("~/lloyd-data")
+    """The runtime data root, as `app.data_root` resolves it for THIS checkout.
+
+    Until #4531 this was rule 1 over a `$HOME` default — `LLOYD_DATA`, else the
+    account's own `lloyd-data` — which is a guess the moment the root moves or loses
+    its `.lloyd-data-root` marker. It was
+    also the guess that a WRITER used: `livekit.voiceprint.profiles_dir` is
+    `${LLOYD_DATA}/voice_profiles` (config.yaml:1517), and `_expand_env` asks this
+    function for that name, so a worktree or sandbox clone of this worker with
+    nothing exported enrolled voiceprints into the LIVE root — the asymmetry #3208
+    removed from the guardian's `quarantine_inert`, one reader later. A production
+    checkout whose root lost its marker now raises `DataRootMissing` while the
+    config loads, which is the refusal the data move exists for; every other
+    checkout keeps its profiles under its own `.lloyd-data`.
+    """
+    return str(_data_root_mod.resolve_data_root_for_tree(REPO_ROOT))
 
 
 def _expand_env(value):

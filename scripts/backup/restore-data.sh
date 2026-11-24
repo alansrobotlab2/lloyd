@@ -17,7 +17,6 @@
 set -euo pipefail
 
 SNAPS="${LLOYD_DATA_SNAPSHOTS:-$HOME/.lloyd-data-snapshots}"
-LIVE="${LLOYD_DATA:-$HOME/lloyd-data}"
 # This checkout, resolved from the script's own path, so the age check has a
 # copy of `datawatch.py` to fall back on when the pinned one cannot answer.
 REPO_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -59,6 +58,20 @@ if [[ $# -eq 0 ]]; then
     echo "              $GSTATE/bin/datawatch.py or $REPO_WATCH (needs python3)" >&2
   fi
   exit 0
+fi
+# The live root, from the one resolver (#4531). It used to be rule 1 over a `$HOME`
+# default, and that guess is what the guard a few lines below compares a requested
+# DEST against — so on a box whose root
+# moved or lost its `.lloyd-data-root` marker the guard protected a directory that
+# was never the live root while leaving the real one open. Resolving it here rather
+# than at the top is deliberate: the listing above never needed a live root, and a
+# machine that cannot resolve one is exactly the machine whose snapshot ages an
+# operator still needs to read. A refusal here exits non-zero: no live root means no
+# guard, and this script's whole safety claim is the guard.
+if ! LIVE="$(/usr/bin/python3 "$REPO_DIR/app/data_root.py" 2>&1)"; then
+  echo "restore-data: refusing: ${LIVE//$'\n'/ } — no live root to protect, so no" \
+       "side-directory restore is safe" >&2
+  exit 1
 fi
 SRC="$SNAPS/$1"
 DEST="${2:-$HOME/lloyd-data-restore-$(date +%Y%m%d-%H%M%S)}"

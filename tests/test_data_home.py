@@ -2077,3 +2077,531 @@ def test_the_watchdog_still_starts_when_its_resolver_refuses(tmp_path):
         f"positive control broken: with the shipped resolver installed the source was "
         f"{control['source']!r} ({control['why']!r}), so the refusal above proves nothing "
         "about which branch the assertions read")
+
+
+# ── the readers that guessed the root (#4531) ────────────────────────────────
+#
+# `architecture/data-home.md` lists the code that resolves the data root by hand
+# instead of asking `app/data_root.py`. Four of them are #4531's, and all four spelled
+# the same half-resolution: rule 1 over a `$HOME` default, no `.lloyd-data-root` check,
+# no rule 3. Two of them are the deployed voice worker and the idle worker, both of
+# which WRITE under the root they name — the worker's `livekit.voiceprint.profiles_dir`
+# is `${LLOYD_DATA}/voice_profiles`, and `_expand_env` asks the worker's own
+# `_data_root()` for that name, so a clone of it with nothing exported enrolled
+# voiceprints into the live root. That is `quarantine_inert`'s asymmetry (#3208) one
+# reader later: harmless while every consumer was a reader, not harmless the day one of
+# them wrote.
+#
+# The two backup scripts get the same answer across a process boundary, so the boundary
+# is what these tests cross: real `bash`, real `/usr/bin/python3`, and `btrfs` stubbed on
+# `$PATH` so no arm here can snapshot or clone a subvolume.
+#
+# Three of the four are converted here. The fourth, the idle worker, is refused by gate
+# preflight — its path is in no `ALLOWED_GLOBS` tuple and the #1376 rail counts only a
+# verbatim grant, which a round cannot write for itself — so it stays a guess until #4532
+# lands the grant, and these nodes say which file that is rather than going quiet about
+# it. Its traffic was measured first: not deployed (no `~/lloyd-data/idle-worker`, no idle
+# unit, no supervisord program), so the outstanding half is latent, not an open break.
+
+#: The spellings of the guess, as the four files wrote them: the `:-$HOME/lloyd-data`
+#: shell default, `os.path.expanduser("~/lloyd-data")` and `Path.home() /
+#: "lloyd-data"` in Python. The same three alternatives the item's re-verify grep takes.
+ROOT_GUESS = re.compile(
+    r'LLOYD_DATA:-\$HOME/lloyd-data'
+    r'|expanduser\("[^"]*lloyd-data"\)'
+    r"""|Path\.home\(\)\s*/\s*["']lloyd-data["']""")
+
+#: Three of #4531's four readers, converted and in the diff: the checkout paths whose
+#: guess this change removes.
+ITEM_4531_READERS = (
+    "agent-services/livekit_worker.py",
+    "scripts/backup/snapshot-data.sh",
+    "scripts/backup/restore-data.sh",
+)
+
+#: The fourth, left in the tree because gate preflight refuses the path: `ALLOWED_GLOBS`
+#: in scripts/automod/spec.py names `agent-services/livekit_worker.py` verbatim and has no
+#: `agent-services/**` entry, so a grant for this one is a person's edit (#1376) and a
+#: round may not write itself one. #4532 carries the grant and the ready-made change; when
+#: it lands, add this path to the tuple above and the assertion below flips to the same
+#: no-guess rule as the other three.
+ITEM_4531_BLOCKED_READER = "agent-services/services/idle-worker/idle-worker.py"
+
+BACKUP_DIR = ROOT / "scripts" / "backup"
+DATA_ROOT_CLI = ROOT / "app" / "data_root.py"
+STUB_BTRFS = """#!/usr/bin/env bash
+echo "$@" >> "$BTRFS_STUB_LOG"
+"""
+
+
+def _stub_btrfs(tmp_path):
+    """A `btrfs` on `$PATH` that records its arguments instead of running.
+
+    Nothing in this file may reach `btrfs subvolume snapshot`: the source would be a
+    real subvolume and the destination a directory full of read-only snapshots of the
+    round's data. The log file is how an arm proves the call never happened.
+    """
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir(exist_ok=True)
+    stub = bin_dir / "btrfs"
+    stub.write_text(STUB_BTRFS, encoding="utf-8")
+    stub.chmod(0o755)
+    log = tmp_path / "btrfs-calls.txt"
+    return {"PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}",
+            "BTRFS_STUB_LOG": str(log)}, log
+
+
+def _run_backup_script(script, env, *args, drop=(), tree=None):
+    """One backup script, with an environment this test owns.
+
+    `_run` merges `os.environ` in, and the suite always exports `LLOYD_DATA` — so an arm
+    that has to show no `$HOME` default standing in must REMOVE that name rather than
+    shadow it, and say so at the call site. `tree` runs a copy of the script that lives
+    in another checkout, which is how an arm gets a resolver answer this machine's own
+    checkout cannot produce.
+    """
+    base = {k: v for k, v in os.environ.items() if k not in set(drop)}
+    base.update(env)
+    path = (Path(tree) / "scripts" / "backup" / script) if tree else (BACKUP_DIR / script)
+    return subprocess.run(["bash", str(path), *args], capture_output=True,
+                          text=True, env=base, timeout=120)
+
+
+#: A checkout's `app/data_root.py` driven into the one state that must never yield a
+#: value: the tree IS the production checkout and its root carries no
+#: `.lloyd-data-root`. Everything that answers the caller — `cli_main`, `CLI_REFUSED`,
+#: the `DataRootMissing` wording, the empty stdout — is the shipped code loaded from
+#: `DATA_ROOT_CLI`, so what crosses the process boundary below is a real refusal and
+#: not a stand-in for one. Which tree and which root the resolver is told about is
+#: stated here for the same reason `test_the_data_root_cli_refuses_an_unmarked_production_root`
+#: monkeypatches them: no scratch directory can BE the account's `~/lloyd` by being
+#: built, because rule 2 compares against the passwd home's checkout — the running
+#: system, which no test may boot a script from.
+REFUSING_RESOLVER = '''#!/usr/bin/env python3
+import importlib.util
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("shipped_resolver", "{real}")
+shipped = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(shipped)
+tree = Path("{tree}").resolve()
+prod = Path("{prod}").resolve()
+shipped.code_tree = lambda here=None: tree
+shipped.live_checkout = lambda: tree
+shipped.production_data_root = lambda: prod
+raise SystemExit(shipped.cli_main([]))
+'''
+
+
+def _clone_checkout(tmp_path, script, name, *, with_guardian=True, resolver="real",
+                    refusing_prod=None):
+    """A minimal second checkout holding one backup script, and what it needs.
+
+    `name` distinguishes two clones of the SAME script inside one node, which is how a
+    refusal arm and a broken-installation arm can share a test.
+
+    `snapshot-data.sh` and `restore-data.sh` derive their whole world from
+    `dirname "$0"`, so a copy under `tmp_path` is a checkout as far as they are
+    concerned — which is what lets an arm be a non-production tree with an unmarked
+    `.lloyd-data` instead of hoping the round's tree is in that state by accident.
+
+    `resolver` is which answer that checkout's `app/data_root.py` gives:
+
+    * `"real"` — the shipped file, answering for its own (non-production) tree;
+    * `"refusing"` — `REFUSING_RESOLVER`, the shipped `cli_main` refusing an unmarked
+      production root: exit `CLI_REFUSED` (2), empty stdout, the reason on stderr;
+    * `"missing"` — the broken installation: no `app/data_root.py` at all, so the
+      caller meets python's file-not-found. A different real state, and a different
+      thing for the script to survive, so it keeps its own arm.
+    """
+    import shutil
+    clone = tmp_path / f"clone-{name}"
+    (clone / "scripts" / "backup").mkdir(parents=True)
+    shutil.copy(BACKUP_DIR / script, clone / "scripts" / "backup" / script)
+    if resolver in ("real", "refusing"):
+        (clone / "app").mkdir(parents=True)
+        if resolver == "real":
+            shutil.copy(DATA_ROOT_CLI, clone / "app" / "data_root.py")
+        else:
+            prod = refusing_prod or (tmp_path / f"unmarked-{name}")
+            prod.mkdir(parents=True, exist_ok=True)
+            (clone / "app" / "data_root.py").write_text(
+                REFUSING_RESOLVER.format(real=DATA_ROOT_CLI, tree=clone, prod=prod),
+                encoding="utf-8")
+    if with_guardian:
+        shutil.copytree(GUARDIAN_DIR, clone / "agent-services" / "guardian",
+                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+    return clone
+
+
+def test_the_converted_readers_guess_the_root_no_more():
+    """Clause 1's second half, as the item's own re-verify grep: none of the converted
+    files may contain a `$HOME`-defaulted lloyd-data literal, and each must now name the
+    resolver it asks instead. An absence alone would also be satisfied by deleting the
+    reader, so the second assertion is the positive one.
+
+    The refused fourth file is asserted the other way, on purpose: while #4532 is open its
+    guess is the outstanding half of this clause, and a node that quietly stopped counting
+    it is how a partial landing comes to read as a finished one.
+    """
+    for rel in ITEM_4531_READERS:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        hits = [(i, line.strip()) for i, line in enumerate(text.splitlines(), 1)
+                if ROOT_GUESS.search(line)]
+        assert not hits, f"{rel} still resolves the data root by hand: {hits}"
+        assert "app/data_root.py" in text or "app import data_root" in text, (
+            f"{rel} no longer guesses the root but never names what it asks instead, so "
+            "a later edit could put the guess back and this node would still pass")
+
+    blocked = (ROOT / ITEM_4531_BLOCKED_READER).read_text(encoding="utf-8")
+    still_guessing = [line.strip() for line in blocked.splitlines()
+                      if ROOT_GUESS.search(line)]
+    assert still_guessing == [
+        'DATA_DIR = Path(os.environ.get("LLOYD_DATA") or Path.home() / "lloyd-data")'], (
+        f"{ITEM_4531_BLOCKED_READER} changed shape ({still_guessing}) — either #4532's "
+        "grant landed and this file is converted, in which case move it into "
+        "ITEM_4531_READERS and assert it like the others, or something else edited the "
+        "line that #4531 was about")
+
+
+def _livekit_worker():
+    """The deployed voice worker, imported the way `test_livekit_client_wake.py`
+    imports it: `agent-services` on the path, then the module by name.
+
+    Not `pytest.importorskip`: that is how a clause of this item would be skipped and
+    still read as a pass. The worker is the file whose write the clause is about, so an
+    environment that cannot import it must fail the node, not shrink it.
+    """
+    agent_services = ROOT / "agent-services"
+    if str(agent_services) not in sys.path:
+        sys.path.insert(0, str(agent_services))
+    import livekit_worker
+    return livekit_worker
+
+
+def test_the_voice_worker_names_the_root_the_environment_names(tmp_path, monkeypatch):
+    """Clause 1's first half, across the worker's own import boundary: with `LLOYD_DATA`
+    exported to a temp root, `livekit_worker._data_root()` answers that root — rule 1
+    honoured through the resolver rather than through the deleted `or expanduser(...)`
+    default.
+
+    The clause's other half, the idle worker's `DATA_DIR`, is not here: gate preflight
+    refused that path, so the file still carries the guess and #4532 carries the grant.
+    Rule 1 is the same code path for every reader (`resolve_data_root_for_tree` reads the
+    variable first), so this node pins the mechanism; what it cannot pin is a file this
+    round may not write.
+    """
+    root = tmp_path / "delegated"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+    assert _livekit_worker()._data_root() == str(root)
+
+
+def test_the_voiceprint_write_follows_the_resolved_root(tmp_path, monkeypatch):
+    """Clause 2: the worker's `${LLOYD_DATA}` expansion, not its unused default.
+    `config.yaml` ships profiles_dir as `${LLOYD_DATA}/voice_profiles`, so the default at
+    the `vp_cfg.get` call never fires and the guess reached the voiceprint writer through
+    `_expand_env` alone — a fix that changed only the default would change nothing
+    observable, which is what this node refuses to accept."""
+    cfg = (ROOT / "config.yaml").read_text(encoding="utf-8")
+    assert "profiles_dir: ${LLOYD_DATA}/voice_profiles" in cfg, (
+        "the tracked config no longer spells profiles_dir against ${LLOYD_DATA} "
+        "(config.yaml:1517), so the expansion pinned here is not the shipped one")
+    spelling = "${LLOYD_DATA}/voice_profiles"
+    worker = _livekit_worker()
+
+    root = tmp_path / "delegated"
+    monkeypatch.setenv("LLOYD_DATA", str(root))
+    assert worker._expand_env(spelling) == str(root / "voice_profiles")
+
+    # The arm the old body failed: nothing exported, and `$HOME` belonging to a round
+    # whose `lloyd-data` exists — the wrong-root non-answer #1525 names, because it
+    # created the profiles directory instead of failing.
+    decoy = tmp_path / "round-home"
+    (decoy / "lloyd-data").mkdir(parents=True)
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+    monkeypatch.setenv("HOME", str(decoy))
+    expanded = worker._expand_env(spelling)
+    assert expanded != str(decoy / "lloyd-data" / "voice_profiles"), (
+        f"the voiceprint write followed $HOME to {expanded}, which is what a clone of "
+        "this worker did to the live root before #4531")
+    assert expanded == str(ROOT / ".lloyd-data" / "voice_profiles"), (
+        f"a non-production checkout must keep voiceprints under its own .lloyd-data "
+        f"(rule 3), and it answered {expanded}")
+
+
+def test_the_data_root_cli_prints_the_root_it_resolves(tmp_path, capsys):
+    """Clause 3's first half, over the same process boundary the shell scripts use:
+    `/usr/bin/python3`, not the venv — the resolver is stdlib-only, which is the whole
+    reason the answer can be shipped as a CLI at all."""
+    from app import data_root
+
+    root = tmp_path / "delegated"
+    r = subprocess.run(["/usr/bin/python3", str(DATA_ROOT_CLI)],
+                       env={**os.environ, "LLOYD_DATA": str(root)},
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout == f"{root}\n", (
+        "a caller captures this stdout straight into its root variable, so it must be "
+        f"the path and nothing else; got {r.stdout!r}")
+
+    home = tmp_path / "round-home"
+    (home / "lloyd-data").mkdir(parents=True)
+    env = {k: v for k, v in os.environ.items() if k != "LLOYD_DATA"}
+    env["HOME"] = str(home)
+    r = subprocess.run(["/usr/bin/python3", str(DATA_ROOT_CLI)], env=env,
+                       capture_output=True, text=True, timeout=60)
+    assert r.returncode == 0, r.stderr
+    assert r.stdout.strip() == str(ROOT / ".lloyd-data"), (
+        f"with nothing exported a non-production checkout resolves its own .lloyd-data "
+        f"(rule 3); it answered {r.stdout.strip()!r}")
+    assert str(home / "lloyd-data") not in r.stdout, "the $HOME default is still there"
+
+    # An argument list it ignored would be the same hand-roll in a friendlier costume: a
+    # caller that passed one and got an answer would believe the tree it named.
+    assert data_root.cli_main(["--tree", str(home / "lloyd")]) == 64
+    assert capsys.readouterr().out == "", "a refused argument list prints no root"
+
+
+def test_the_data_root_cli_refuses_an_unmarked_production_root(tmp_path, monkeypatch,
+                                                               capsys):
+    """Clause 3's second half: `LLOYD_DATA` unset and the account's `lloyd-data`
+    carrying no marker, the CLI exits non-zero and prints NO path — a caller that
+    captured its stdout must come back empty rather than with a directory to
+    snapshot."""
+    from app import data_root
+
+    live = (tmp_path / "lloyd").resolve()
+    live.mkdir()
+    prod = tmp_path / "lloyd-data"
+    prod.mkdir()                                     # production root, unmarked
+    monkeypatch.delenv("LLOYD_DATA", raising=False)
+    monkeypatch.setattr(data_root, "live_checkout", lambda: live)
+    monkeypatch.setattr(data_root, "production_data_root", lambda: prod)
+    # The tree IS the production checkout here. No scratch directory can be that by
+    # being built — rule 2 compares against the account's own `lloyd`, which is the
+    # running system — so the tree is stated, the way this file already states a tree
+    # for `resolve_data_root_for_tree`.
+    monkeypatch.setattr(data_root, "code_tree", lambda here=None: live)
+
+    rc = data_root.cli_main([])
+    out = capsys.readouterr()
+    assert rc == data_root.CLI_REFUSED and rc != 0, rc
+    assert out.out == "", f"a refusal printed a path on stdout: {out.out!r}"
+    assert str(prod) in out.err and "has no .lloyd-data-root" in out.err, out.err
+
+
+def test_snapshot_data_snapshots_the_root_the_resolver_names(tmp_path):
+    """Clause 4, with `btrfs` stubbed. Four arms over one script, in three checkouts,
+    and each refusal arm is paired with a control that shows the SAME environment does
+    snapshot when the resolver answers — because an arm that only ever refuses is
+    satisfied by an implementation that falls back to `$HOME/lloyd-data` and is then
+    refused by something else downstream.
+
+    * exported: a snapshot IS taken, of that root, from this checkout's own script;
+    * unexported, unmarked checkout, round's `$HOME`: the root it refuses over is the
+      resolver's (`<clone>/.lloyd-data`), never `$HOME/lloyd-data`;
+    * unexported, `$HOME` a HEALTHY MARKED root, resolver genuinely refusing: no
+      snapshot, and the control in the same environment proves the marked `$HOME` root
+      is one `btrfs` would have been called on;
+    * no `app/data_root.py` at all: the broken installation also refuses rather than
+      naming a directory it guessed.
+    """
+    stub_env, calls = _stub_btrfs(tmp_path)
+    gstate = tmp_path / "gstate"
+    gstate.mkdir()
+
+    root = _data_root(tmp_path / "live" / "lloyd-data")
+    snap_dir = tmp_path / "snaps"
+    r = _run_backup_script("snapshot-data.sh", {**stub_env,
+                                                "LLOYD_DATA": str(root),
+                                                "LLOYD_GUARDIAN_STATE": str(gstate),
+                                                "LLOYD_DATA_SNAPSHOTS": str(snap_dir)})
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert calls.is_file(), f"no btrfs call recorded: {r.stdout}"
+    logged = calls.read_text(encoding="utf-8")
+    assert f"subvolume snapshot -r {root} " in logged, logged
+    assert f"snapshot-data: snapshot {snap_dir}/" in r.stdout, r.stdout
+
+    # The deploy-shape arm: nothing exported, `$HOME` is a round's whose `lloyd-data`
+    # exists and carries no marker, and the checkout is a clone.
+    clone = _clone_checkout(tmp_path, "snapshot-data.sh", "unmarked")
+    decoy_home = tmp_path / "round-home"
+    (decoy_home / "lloyd-data").mkdir(parents=True)
+    refused = clone / ".lloyd-data"
+    calls.unlink()
+    r = _run_backup_script("snapshot-data.sh", {**stub_env,
+                                                "HOME": str(decoy_home),
+                                                "LLOYD_GUARDIAN_STATE": str(gstate),
+                                                "LLOYD_DATA_SNAPSHOTS": str(snap_dir)},
+                           drop=("LLOYD_DATA",), tree=clone)
+    assert r.returncode == 0, "a refusal exits 0 so the timer does not flap to failed"
+    assert "REFUSING" in r.stdout, r.stdout
+    # Which root the refusal NAMES is the whole test: the resolver answers `<clone>/.lloyd-data`
+    # (rule 3, this checkout's own), the guardian's gate is what stops the snapshot, and the
+    # `$HOME` directory the deleted default would have named appears nowhere. Before #4531
+    # this line said `$HOME/lloyd-data` and the snapshot ran on it.
+    assert f"{refused} has no .lloyd-data-root" in r.stdout, (
+        f"the refused root must be the one this checkout resolves ({refused}); the "
+        f"script said: {r.stdout}")
+    assert str(decoy_home / "lloyd-data") not in r.stdout + r.stderr, (
+        "the script named $HOME/lloyd-data, which is the guess #4531 is about")
+    assert not calls.exists(), f"a snapshot ran after refusing: {calls.read_text()}"
+
+    # A genuine resolver refusal, met by the caller. `$HOME` here is deliberately a
+    # MARKED, populated root: a script that answered the CLI's exit 2 by falling back to
+    # `${LLOYD_DATA:-$HOME/lloyd-data}` would pass the guardian's gate (the marker is
+    # there, and this state dir has a healthy measurement of it from the control below)
+    # and call `btrfs` on it. So this arm fails on that implementation, which is the one
+    # the deleted default was.
+    fallback_home = tmp_path / "healthy-home"
+    marked = _data_root(fallback_home / "lloyd-data", sessions=4)
+    unmarked_prod = tmp_path / "unmarked-prod-root"
+    refusing = _clone_checkout(tmp_path, "snapshot-data.sh", "refusing",
+                               resolver="refusing", refusing_prod=unmarked_prod)
+
+    # Control first, in the identical environment: same clone dir layout, same stubbed
+    # `btrfs`, same guardian state dir, same `$HOME` — the only difference is that the
+    # resolver answers, naming that marked root. It snapshots. Without this the arm
+    # below could be passing because nothing in this fixture ever reaches `btrfs`.
+    calls.unlink(missing_ok=True)
+    r = _run_backup_script("snapshot-data.sh", {**stub_env,
+                                                "LLOYD_DATA": str(marked),
+                                                "HOME": str(fallback_home),
+                                                "LLOYD_GUARDIAN_STATE": str(gstate),
+                                                "LLOYD_DATA_SNAPSHOTS": str(snap_dir)},
+                           tree=clone)
+    assert r.returncode == 0 and calls.is_file(), (
+        f"positive control broken: with the root marked, this fixture did not snapshot "
+        f"({r.stdout}{r.stderr})")
+    assert f"subvolume snapshot -r {marked} " in calls.read_text(encoding="utf-8")
+
+    calls.unlink()
+    r = _run_backup_script("snapshot-data.sh", {**stub_env,
+                                                "HOME": str(fallback_home),
+                                                "LLOYD_GUARDIAN_STATE": str(gstate),
+                                                "LLOYD_DATA_SNAPSHOTS": str(snap_dir)},
+                           drop=("LLOYD_DATA",), tree=refusing)
+    assert r.returncode == 0 and "REFUSING" in r.stdout, r.stdout
+    assert "has no .lloyd-data-root" in r.stdout, (
+        f"the refusal must carry the resolver's own reason; the script said: {r.stdout}")
+    assert str(marked) not in r.stdout + r.stderr, (
+        "the script fell back to $HOME/lloyd-data after the resolver refused — the "
+        f"marked root {marked} appears in its output")
+    assert not calls.exists(), (
+        f"a snapshot ran after a resolver refusal: {calls.read_text()}")
+
+    # And a broken installation, which is a different real state and a different thing
+    # to survive: there is no `app/data_root.py` to ask, so what the script meets is
+    # python's file-not-found, not a refusal carrying a reason. It must still refuse.
+    broken = _clone_checkout(tmp_path, "snapshot-data.sh", "no-resolver",
+                             with_guardian=False, resolver="missing")
+    calls.unlink(missing_ok=True)
+    r = _run_backup_script("snapshot-data.sh", {**stub_env,
+                                                "HOME": str(fallback_home),
+                                                "LLOYD_GUARDIAN_STATE": str(gstate),
+                                                "LLOYD_DATA_SNAPSHOTS": str(snap_dir)},
+                           drop=("LLOYD_DATA",), tree=broken)
+    assert r.returncode == 0 and "REFUSING" in r.stdout, r.stdout
+    assert not calls.exists(), f"a snapshot ran with no resolved root: {calls.read_text()}"
+
+
+def test_restore_data_guards_the_resolved_root_and_still_restores_beside_it(tmp_path):
+    """Clause 5. The guard is the one place a guessed `LIVE` was never cosmetic: it is
+    what decides that a restore cannot land inside the live root, and the deleted
+    `:-$HOME/lloyd-data` default aimed it at whatever directory the script happened to
+    name. Six arms, and each guard arm is the differential of the other:
+
+    * a DEST inside the resolved root is refused, and nothing is written there;
+    * a side directory succeeds, so the guard is not simply blocking everything;
+    * a DEST under a decoy `$HOME/lloyd-data` is NO LONGER refused — the guard aims at
+      the resolver's answer now, and this checkout's answer is its own `.lloyd-data`;
+    * the mirror of that, with `$HOME` left exactly as the run found it: a DEST inside
+      the checkout's OWN resolved `.lloyd-data` IS refused. The shape the deleted guess
+      did protect — `$HOME/lloyd-data` being the live root — is the production checkout,
+      and a round cannot run its script from `~/lloyd`: that tree is the running system,
+      and its copy of this script predates the change. What can be pinned here is the
+      property that made that shape correct, which is that the comparison no longer
+      reads `$HOME` at all — so these two arms together pin it from both sides, and the
+      fourth one pins it with `$HOME` pointing somewhere the resolver will not go.
+    * a genuine resolver refusal (exit 2, no path on stdout, the reason on stderr): no
+      live root, so no guard, so no restore;
+    * no `app/data_root.py` at all: the broken installation stops for the same reason.
+    """
+    stamp = "20260922T000000Z"
+    snaps = tmp_path / "snaps"
+    (snaps / stamp).mkdir(parents=True)   # a read-only snapshot of an empty subvolume
+    root = _data_root(tmp_path / "live" / "lloyd-data", sessions=4)
+    snap_env = {"LLOYD_DATA_SNAPSHOTS": str(snaps)}
+
+    r = _run_backup_script("restore-data.sh", {**snap_env, "LLOYD_DATA": str(root)},
+                           stamp, str(root / "sub"))
+    assert r.returncode == 1 and "refusing to restore into the live data root" in r.stderr
+    assert not (root / "sub").exists(), "the refused restore wrote into the live root"
+
+    dest = tmp_path / "restore-dest"
+    r = _run_backup_script("restore-data.sh", {**snap_env, "LLOYD_DATA": str(root)},
+                           stamp, str(dest))
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert f"restored {snaps / stamp} -> {dest}" in r.stdout, r.stdout
+    assert dest.is_dir(), r.stdout
+
+    decoy_home = tmp_path / "round-home"
+    (decoy_home / "lloyd-data").mkdir(parents=True)
+    # `LLOYD_DATA` has to GO, not be shadowed: with it inherited from the suite, the
+    # deleted `${LLOYD_DATA:-…}` default and the resolver agree on the root, so this arm
+    # would pass under the code it exists to catch. With the name unset the old line read
+    # `LIVE=$HOME/lloyd-data` and would have refused this very DEST.
+    r = _run_backup_script("restore-data.sh", {**snap_env, "HOME": str(decoy_home)},
+                           stamp, str(decoy_home / "lloyd-data" / "sub"),
+                           drop=("LLOYD_DATA",))
+    assert "refusing to restore into the live data root" not in r.stderr, (
+        "the guard refused a DEST inside $HOME/lloyd-data, which is the comparison "
+        "#4531 removed: with nothing exported this checkout's live root is its own "
+        ".lloyd-data, and a decoy home's directory is not it")
+    assert (decoy_home / "lloyd-data" / "sub").is_dir(), (
+        "the restore was allowed but wrote nothing: the point of the arm is that a "
+        "directory merely named $HOME/lloyd-data is now an ordinary side directory")
+
+    # The mirror arm, and the one that keeps the relaxation above honest. Same missing
+    # `LLOYD_DATA`, `$HOME` untouched — whatever the run's home is, it is not what the
+    # guard reads any more — and a DEST inside the checkout's OWN resolved root. The old
+    # `LIVE=$HOME/lloyd-data` aimed the guard away from here, so the old script restored
+    # straight into a checkout's `.lloyd-data`.
+    own = _clone_checkout(tmp_path, "restore-data.sh", "own-root")
+    r = _run_backup_script("restore-data.sh", snap_env, stamp,
+                           str(own / ".lloyd-data" / "sub"), drop=("LLOYD_DATA",),
+                           tree=own)
+    assert r.returncode == 1, (
+        f"a DEST inside this checkout's resolved .lloyd-data was not refused: "
+        f"{r.stdout}{r.stderr}")
+    assert "refusing to restore into the live data root" in r.stderr, r.stderr
+    assert not (own / ".lloyd-data" / "sub").exists(), (
+        "the restore wrote into the checkout's own data root, which is what the guard "
+        "is for")
+
+    # A genuine resolver refusal met by the shell: `cli_main` exits 2 with the reason on
+    # stderr and NO path on stdout, and the script's own contract is that no live root
+    # means no guard and therefore no restore. Under the deleted default this arm copied
+    # happily, because `$HOME/lloyd-data` was always available as a name.
+    unmarked_prod = tmp_path / "unmarked-prod-root"
+    refusing = _clone_checkout(tmp_path, "restore-data.sh", "refusing",
+                               resolver="refusing", refusing_prod=unmarked_prod)
+    r = _run_backup_script("restore-data.sh", snap_env, stamp,
+                           str(tmp_path / "dest-refused"), drop=("LLOYD_DATA",),
+                           tree=refusing)
+    assert r.returncode == 1, (
+        f"a restore ran despite the resolver refusing: {r.stdout}{r.stderr}")
+    assert "refusing" in r.stderr, r.stderr
+    assert "has no .lloyd-data-root" in r.stderr, (
+        f"the refusal must carry the resolver's reason, not just a non-zero exit; said "
+        f"{r.stderr}")
+    assert not (tmp_path / "dest-refused").exists(), r.stdout
+
+    # A broken installation — no `app/data_root.py` to ask, so the script meets python's
+    # file-not-found rather than a refusal — stops for the same reason.
+    broken = _clone_checkout(tmp_path, "restore-data.sh", "no-resolver",
+                             with_guardian=False, resolver="missing")
+    r = _run_backup_script("restore-data.sh", {**snap_env, "HOME": str(decoy_home)},
+                           stamp, str(tmp_path / "dest-broken"), tree=broken)
+    assert r.returncode == 1 and "refusing" in r.stderr, r.stderr
+    assert not (tmp_path / "dest-broken").exists(), r.stdout
