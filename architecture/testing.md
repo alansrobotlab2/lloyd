@@ -3,18 +3,20 @@ segment: architecture
 tags: [architecture, lloyd, testing, gate, pytest]
 type: reference
 status: implemented
-date: 2026-10-24
+date: 2026-11-24
 ---
 
 # Lloyd — the test suite
 
-~21,300 tests under `tests/` — the `tests` rung collected 21,298–21,348 across
-the full runs of 2026-10-24, against ~9,600 at this doc's last pass — run by
+~26,500 tests under `tests/` — the `tests` rung collected 26,531–26,558 across
+the full runs of 2026-11-23, against ~21,300 at this doc's last pass; a
+`--collect-only` of 2026-11-24 collects 26,801 nodes, 26,558 after the gate's
+deselection — run by
 every automod round's `tests` rung
 ([[automod]]) and by hand from a throwaway worktree. This doc is about the
 suite's own structure: the two kinds of test in it, the rule for tests that read
 data off the machine, and the isolation the parallel runner requires. The gate's
-thirteen rungs and the promotion flow are in [[automod]].
+sixteen rungs and the promotion flow are in [[automod]].
 
 ## Never run the suite against the production tree
 
@@ -47,8 +49,10 @@ runs at conftest import and is
 not conditional on the selection — naming one file, or passing `-m live_vault`,
 buys nothing, because a single file is the same fixtures with the same teardowns.
 `LLOYD_ALLOW_LIVE_TREE_TESTS` remains a human-only opt-in and nothing in this tree
-sets it: the two code sites are `tests/conftest.py`, which reads it, and
-`tests/test_live_tree_isolation.py`, which clears it before asserting the refusal.
+sets it: three sites touch it — `tests/conftest.py`, which reads it (as
+`LIVE_TREE_OPT_IN`), `tests/test_live_tree_isolation.py`, which clears it before
+asserting the refusal, and `tests/test_conftest_data_root_scratch.py`, which pops it
+from a staged child's environment.
 
 What the runs do instead is the route above. **Every scheduled run that reads the
 vault reaches the suite through a detached on-disk worktree under `~/lloyd-work/`**
@@ -140,7 +144,8 @@ go red for a reason no commit caused — and because the `tests` rung is a gate 
 noticed. On 2026-09-22 that was 98 nodes red at base.
 
 Keep both. A file usually holds a synthetic majority and a small live section;
-`test_uptake.py` is the shape to copy — 112 tests (measured 2026-10-24), all but
+`test_uptake.py` is the shape to copy — 123 tests collected (2026-11-24; 118 in the
+`-n 4` profile run below, which deselects the marked ones), all but
 a marked handful synthetic, and a small live section whose baseline cross-checks
 call the helpers below instead of hard-asserting. `test_promotion_fp_rate.py` is
 what a file looks like *after* retirement: 26 all-synthetic tests, its ten live
@@ -220,25 +225,26 @@ floors are `max(literal, PYTEST_FLOOR_FRACTION x base)`, one fraction named once
 `gate.PYTEST_FLOOR_FRACTION = 0.25`, with `base` the median `collected` / `passed` of
 the five newest green **full** `tests` rungs in the rounds store — the same accepted
 set the skip rail reads (rung `ok`, detail not `REUSED`, no `partial` key), and the
-round being gated excluded from its own base. On the ledger of 2026-10-24 the bases are
-collected 21,341 and passed 21,300, which yields floors of 5,335 and 5,325 (against the
+round being gated excluded from its own base. On the ledger of 2026-11-23 the bases are
+collected 26,546 and passed 26,501, which yields floors of 6,636 and 6,625 (against the
 literals' 1000).
 
 Why the absolute 1000 stopped being enough: it was budgeted when the suite was ~9,600 across the `tests` rounds of
 2026-09-24, where 1000 was a tenth of it;
-against ~21,300 it is under 5%. And `collected` here is what the run reports having
+against ~26,500 it is under 4%. And `collected` here is what the run reports having
 **run plus skipped**, not pytest's collection report (`gate._PYTEST_COUNT_WORDS`), so it
 cannot tell a full run from a twentieth of one: a truncated full run that executed 1,200
 of ~21,300 nodes and failed nothing cleared both floors and the rung still printed "all
-green" (#3250, #3249). With no readable ledger each floor is exactly its literal, which
+green" (#3250, #3249) — that hole is closed, since 1,200 is now far under the derived
+floor. With no readable ledger each floor is exactly its literal, which
 is what every unit test here and the vacuity probe's floor-at-0 mutant see, because
 `tests/conftest.py` points `LLOYD_AUTOMOD_STATE` at scratch before
 `scripts.automod.state` is imported. A rung detail says which happened in the same words
 the skip rail uses, and both rails are printed on every green full rung as well as on
 the two refusals (#3431) — beside the skip clause, ahead of the parallel-flinch clause
 and the pin findings, so the 2000-char cap on a stored detail (#2726) cannot drop them:
-`collected floor 5335 (base 21341, fraction 0.25, floor 1000); passed floor 5325 (base
-21300, fraction 0.25, floor 1000)`. A partial rung prints and records neither, because
+`collected floor 6636 (base 26546, fraction 0.25, floor 1000); passed floor 6625 (base
+26501, fraction 0.25, floor 1000)`. A partial rung prints and records neither, because
 the whole-suite floors do not apply to a run over the changed test files.
 
 The skip rail is derived per run as of #3143: `max(PYTEST_MAX_SKIPPED, base +
@@ -295,11 +301,12 @@ once there and not re-derived here.
 
 The subtraction is gated on the probe having reached a conclusion. Failures
 outside the round's own files that the base probe does **not** reproduce leave the
-rung unable to attribute them, and it fails closed — *"every failure outside the
+rung unable to attribute them: an inconclusive probe fails the round, and it fails
+closed — *"every failure outside the
 round's own files was unexplained, and the base probe could not say whose they
-are"* (`scripts/automod/gate.py:3669`) — filing nothing. Only a conclusive pass with an inherited
+are"* (`scripts/automod/gate.py:4372`, the fail-closed branch of `rung_tests`) — filing nothing. Only a conclusive pass with an inherited
 red files the debt: `_file_red_tree` runs on `pre_existing and conclusive`
-(`scripts/automod/gate.py:3640`), and the verdict names the nodes under `pre_existing_failures`
+(`scripts/automod/gate.py:4343`), and the verdict names the nodes under `pre_existing_failures`
 with the tracker's id in `red_tree_item`. There is no `external_blocker` /
 `external_failures` pair in the gate — that was the pre-#2876 shape, and a round
 whose report contains neither key did not hit an inherited red.
@@ -442,8 +449,9 @@ nobody ran `npm install`, the ten nodes keep skipping with the reason they alway
 named, the `DASHBOARD_PINS_NOT_EXECUTED` finding is still printed, and the run exits 0.
 `LLOYD_FRONTEND_PINS_AVAILABLE` stays unset by the same reasoning: that declaration
 means *on this box the pins really measured*, and `tests/dashboard_pins.py` turns a
-declaration contradicted by an unavailable-pin skip into a failing run
-(`PinNotExecuted`) rather than a quiet pass — a pin that ran and failed is a
+declaration contradicted by an unavailable-pin skip into a failing run (a
+`pytest.fail` naming the pending pins, in `tests/dashboard_pins.py::PinLedger.report`)
+rather than a quiet pass — a pin that ran and failed is a
 regression, a pin that never ran is a machine fact, and the second must never be
 filed as the first.
 Provisioning therefore happens in `tests/`, not in `scripts/automod/gate.py`: the gate
@@ -1045,3 +1053,28 @@ suite exercises · [[data-home]] for where the live data moved on 2026-09-22.
   process-state leaks behind "failed only under parallel load" (fixed), the rails'
   share of red rungs, and the proposals not taken. The opening "~21,300 tests" is
   stale by ~4,900 and was left for the next pass that re-verifies the whole page.
+- 2026-11-24 — **stale** (the whole-page pass the last entry asked for): the page's
+  own number is out by another ~5,200 — green full `tests` rungs of 2026-11-23 report
+  `collected` 26,531–26,558, and a 2026-11-24 `--collect-only` measures 26,801 nodes,
+  26,558 after the gate's deselection — so the opening line, the "under 5%" clause,
+  the derived floors' worked example (bases 26,546 / 26,501 → floors 6,636 / 6,625)
+  and `test_uptake.py` (123 collected today, 118 in the deselected profile run) are
+  re-measured in place; "thirteen rungs" is the ladder's sixteen; the two
+  `scripts/automod/gate.py` citations for the fail-closed sentence and the
+  `pre_existing and conclusive` filing had drifted ~700 lines (now 4372 and 4343);
+  `PinNotExecuted` names no symbol in the tree — the declared-pin contradiction is a
+  `pytest.fail` in `tests/dashboard_pins.py::PinLedger.report`; and the opt-in
+  variable now has a third touching site, `tests/test_conftest_data_root_scratch.py`.
+  Verified current and untouched: the 1000/1000/40 literals, `PYTEST_FLOOR_FRACTION`
+  0.25 and `PYTEST_SKIP_HEADROOM` 14 with their printed clauses, `TESTS_MARK_EXPR`,
+  `-n 8` (`automod.gate.test_workers`) and its serial fallback, the three
+  `tests/_live_data.py` helpers with `KG_ENTITY_FLOOR` 1000, `MAX_CHILD_TMPDIR` 48 and
+  tmpwatch's 80/95/70, the ten dashboard pin nodes with their symlink hook and
+  `PR_SET_PDEATHSIG` test, the 84-script bench inventory, the seven-bench manifest
+  (35 of 60 engine minutes) and every `noise_max_spread`, the noise floors against
+  `eval/fitness_noise.json`, `workers.sources.fitness` on since 2026-11-23, scorecard
+  row 22, `scripts/automod/affected_tests.py` in mode `shadow`, the 42-case triage
+  replay (40/2, 1,996 available for the first label) with `MIN_N` 20 and the
+  quarter-no-verdict refusal, the three removed dead names, and `dbfddc60`'s 55 still
+  unreferenced by `main`. Filed #4536: `tests/dashboard_pins.py`'s three `gate.py`
+  line citations all point at the wrong code.
