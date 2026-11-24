@@ -345,8 +345,9 @@ def _iso_lt(a: str, b: str) -> bool:
     return x.replace("Z", "+00:00") < y.replace("Z", "+00:00")
 
 
-def below_floor(window: dict, ledger: Path | None = None) -> tuple[bool, str]:
-    """Is this window a MEASURED disagreement with the steward? (and if not, why.)
+def below_floor(window: dict, ledger: Path | None = None) -> tuple[bool, str, list[dict]]:
+    """Is this window a MEASURED disagreement with the steward? (and if not, why, and
+    which reverted pairs the verdict keyed on.)
 
     Two legs, and the second one is why this function survived the flip.
 
@@ -366,32 +367,48 @@ def below_floor(window: dict, ledger: Path | None = None) -> tuple[bool, str]:
     this alarm was kept alive for, and it fires with the item and both statuses named.
     Both legs silent means the steward applied nothing the machine argued with and is
     still agreeing: no item, and the reason says which half is quiet.
+
+    The THIRD element is every pair `reverted_moves` returned for this window (#4514), handed
+    to the caller so the filing can put them on its ledger row. A row's own `item_id` is the
+    disagreement item and its `tick_item_ids` are the tick's disagree ids, so the item the leg
+    keyed on was readable only by replaying the store — and the replay bounds BELOW only
+    (`window_since`), so replaying an old firing today returns pairs stamped years later. The
+    list is `[]` on every early return here, INCLUDING the sub-floor rate return that comes
+    BEFORE the leg is evaluated, so an empty list reaching a row means "this leg never ran",
+    never "nothing was put back"; `leg_from_trigger` on the reason is the discriminator. The
+    reason text is unchanged by all of this — the trigger still names the ONE pair it named
+    before, which is #4381's asymmetry and exactly why the whole list belongs on the row.
     """
     if not window or not window.get("judged"):
-        return False, "nothing judged in the window"
+        return False, "nothing judged in the window", []
     if window.get("truncated"):
-        return False, "window read truncated: sums understate, no verdict"
+        return False, "window read truncated: sums understate, no verdict", []
     if int(window["judged"]) < FLIP_MIN_JUDGED:
-        return False, f"volume leg unmet: judged {window['judged']} < {FLIP_MIN_JUDGED}"
+        return False, f"volume leg unmet: judged {window['judged']} < {FLIP_MIN_JUDGED}", []
     rate = window.get("rate")
     if rate is None:
-        return False, "rate is None: nothing judged, so nothing measured"
+        return False, "rate is None: nothing judged, so nothing measured", []
     if float(rate) < FLIP_MIN_RATE:
         # The pre-flip leg is evaluated FIRST and still wins: a sub-floor rate files on its
         # own reading, so the post-flip leg below can only ADD a firing, never re-word one.
-        return True, f"judged {window['judged']} with rate {rate} under the {FLIP_MIN_RATE} floor"
-    for rev in reverted_moves(window, ledger):
+        return True, (f"judged {window['judged']} with rate {rate} under the "
+                      f"{FLIP_MIN_RATE} floor"), []
+    pairs = reverted_moves(window, ledger)
+    if pairs:
+        rev = pairs[0]
         # Built FROM `REVERT_TRIGGER_PREFIX`: the same string is what `leg_from_trigger`
         # keys on, and a drift between the two would mislabel the direction in the body,
-        # the ledger row and the widening heading together. The rendered text is unchanged.
+        # the ledger row and the widening heading together. The rendered text is unchanged,
+        # and it still names only this FIRST pair — the pair set goes to the caller, which
+        # writes all of them onto the row (#4514).
         return True, (
             f"{REVERT_TRIGGER_PREFIX} to #{rev['item_id']} as `{rev['applied']}` was moved "
             f"back to `{rev['reverted_to']}` by the state machine on {rev['at']} "
             f"(reason: {rev['reason'] or 'unrecorded'}): the steward's applied move was "
             f"undone inside the window, which is the disagreement `rate` can no longer "
-            f"score post-flip")
+            f"score post-flip"), pairs
     return False, (f"rate {rate} is at or above the {FLIP_MIN_RATE} floor — a PRE-FLIP "
-                   f"only figure post-flip; `reverted_moves` found nothing to undo")
+                   f"only figure post-flip; `reverted_moves` found nothing to undo"), []
 
 
 def disagreement_rows(ids: list[int], moves: list[dict],
@@ -819,7 +836,7 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     tick_ids = sorted({int(i) for i in (agree.get("disagree") or []) if isinstance(i, int)})
     if not tick_ids:
         return None
-    should, reason = below_floor(window, ledger)
+    should, reason, rev_pairs = below_floor(window, ledger)
     if not should:
         logger.debug("disagreement filing skipped: %s", reason)
         return None
@@ -887,10 +904,11 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
         # population and denominator are the same list by construction.
         return _merge(openers[0], B, ids, wide_moves, wide_expected, window, stamp,
                       backlog_dir=backlog_dir, ledger=ledger, trigger=reason,
+                      revert_pairs=rev_pairs,
                       **{k: v for k, v in stats.items() if k != "recorded"})
     return _create(B, ids, wide_moves, wide_expected, window, stamp,
                    backlog_dir=backlog_dir, ledger=ledger, rules_note=rules_note,
-                   trigger=reason, **stats)
+                   trigger=reason, revert_pairs=rev_pairs, **stats)
 
 
 def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: int = 0,
@@ -995,6 +1013,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
             distinct: int | None = None, unruled: int = 0,
             recorded: int | None = None, rules_note: str = "",
             trigger: str = "",
+            revert_pairs: list[dict] | None = None,
             abstained: dict[int, str] | None = None) -> dict:
     rows = disagreement_rows(ids, moves, expected)
     # The direction sentence, derived (#4251). This used to be one unconditional f-string
@@ -1077,7 +1096,7 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
     it = B.new_item(NAME, body, priority="medium", tags=[TAG], status="draft",
                     board=BOARD, backlog_dir=backlog_dir)
     _event(ledger, item_id=it.id, action="filed", ids=ids, window=window,
-           stamp=stamp, new_ids=ids, trigger=trigger)
+           stamp=stamp, new_ids=ids, trigger=trigger, revert_pairs=revert_pairs)
     return {"action": "filed", "item_id": it.id, "path": str(it.path),
             "ids": ids, "rows": len(rows)}
 
@@ -1111,6 +1130,7 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
            backlog_dir: Path | None, ledger: Path | None, trigger: str = "",
            unrecoverable: int = 0,
            dropped: int = 0, distinct: int | None = None,
+           revert_pairs: list[dict] | None = None,
            unruled: int = 0, abstained: dict[int, str] | None = None) -> dict | None:
     """Add the ids this item does not name yet, into the same file.
 
@@ -1120,6 +1140,12 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
     named rows carry the machine's side" over a body whose five earlier rows each print
     one — so the count is recomputed here, over `pop`, the same list the denominator is
     measured from.
+
+    `revert_pairs` is CARRIED through to the ledger row, never re-derived here (#4514). It is
+    the pair set the trigger fired on — a fact about the window at the instant this filing was
+    decided — and `reverted_moves` bounds only BELOW by `window_since`, so re-reading the
+    store from inside a widening would append pairs the machine put back AFTER the trigger
+    spoke and credit this firing with reverts it never saw.
     """
     try:
         text = Path(item.path).read_text(encoding="utf-8")
@@ -1173,7 +1199,7 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
     _write_body(Path(item.path), fm, appended, B,
                 activity=f"board-steward disagreement: {len(fresh)} row(s) added")
     _event(ledger, item_id=item.id, action="merged", ids=ids, window=window,
-           stamp=stamp, new_ids=fresh, trigger=trigger)
+           stamp=stamp, new_ids=fresh, trigger=trigger, revert_pairs=revert_pairs)
     return {"action": "merged", "item_id": item.id, "path": str(item.path),
             "ids": ids, "new_ids": fresh, "rows": len(rows)}
 
@@ -1298,7 +1324,8 @@ def _stamp() -> str:
 def _event(ledger: Path | None, *, item_id: int | None, action: str,
            ids: list[int], window: dict, stamp: str,
            new_ids: list[int] | None = None,
-           trigger: str = "") -> None:
+           trigger: str = "",
+           revert_pairs: list[dict] | None = None) -> None:
     """One ledger row per file-or-merge, carrying the window's own numbers.
 
     The run's `summary` is capped at 500 characters (#1606) and 77 of the 154
@@ -1325,5 +1352,20 @@ def _event(ledger: Path | None, *, item_id: int | None, action: str,
         # a widening's heading read too (#4251), so no filing can print "below" while its own
         # row says "post-flip revert".
         "leg": leg_from_trigger(trigger),
+        # Every pair `reverted_moves` returned for this window — the items the revert leg
+        # actually keyed on (#4514). A row's `item_id` is the disagreement item and its
+        # `tick_item_ids` are the tick's disagree ids, so for each of the six post-flip
+        # firings of 2026-11-16..20 the keyed item sat in NO field of its own row, and the
+        # only way to recover it was replaying `reverted_moves` over the store — a replay
+        # bounded BELOW only, so it also returns pairs stamped after the firing. A row
+        # written at the firing's own instant is the only record there is. These four keys
+        # are all an audit has to ask; `reverted_moves`' own `reason` stays off the row
+        # because the body's trigger sentence already quotes it verbatim.
+        # An EMPTY list is NOT a finding that nothing was put back: `below_floor` answers a
+        # sub-floor rate before the leg is evaluated, so on a `pre-flip rate` row this field
+        # means "the leg never ran". `leg` above is the only discriminator — do not SELECT
+        # on the empty list.
+        "revert_pairs": [{k: p.get(k) for k in ("item_id", "applied", "reverted_to", "at")}
+                         for p in (revert_pairs or ())],
         "at": stamp,
     }, path=ledger)

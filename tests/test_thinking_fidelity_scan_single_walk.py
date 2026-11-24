@@ -599,9 +599,12 @@ def test_archiving_a_session_in_place_moves_no_day_rows_denominator(store,
     #3590 clause 3, run twice for real rather than argued: a full
     `--record --per-day` over the fixture store, then `sweep_sessions`' own
     gzip-and-unlink on one 2026-09-26 session, then the same command again. Every
-    field of every row is compared except `recorded_at` (the run moved) and
+    field of every row is compared except `recorded_at` (the run moved),
     `files_archived` (the one field the sweep is ALLOWED to move, and the number
-    that says so). The literals are the fixture's stated arithmetic, so a
+    that says so) and `scan_seconds` (the walk's own wall clock, which rounds
+    differently on two runs of the same bytes when the box is busy — see the
+    comment in the loop; its presence and range are another node's assertion).
+    The literals are the fixture's stated arithmetic, so a
     denominator that dropped the archived file fails here even against a
     self-consistent pair of runs.
 
@@ -634,7 +637,16 @@ def test_archiving_a_session_in_place_moves_no_day_rows_denominator(store,
         "archiving one session changed WHICH rows exist, not just their numbers")
     for key, old in first.items():
         for field in sorted(old):
-            if field in ("recorded_at", "files_archived"):
+            # `recorded_at` is when the run happened and `files_archived` is the one count
+            # the sweep is allowed to move. `scan_seconds` belongs with `recorded_at`: it is
+            # `round(walk_seconds, 3)` — the walk's own wall clock, not a property of the
+            # store — so under CPU contention the two runs round differently (0.0 vs 0.001
+            # on either side) and this node reddens on a box doing eight other things. It was
+            # measured flaky at a1ad8934 in a clean throwaway worktree, without the change it
+            # refused, on 2026-11-24. The field's presence and sane range are another node's
+            # job and stay pinned there (`scan_seconds` is asserted, not unexamined); what
+            # this node grades is the DENOMINATOR, and every count is still compared.
+            if field in ("recorded_at", "files_archived", "scan_seconds"):
                 continue
             assert second[key][field] == old[field], (
                 f"{key}: field {field!r} moved from {old[field]} to "

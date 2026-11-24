@@ -3213,9 +3213,9 @@ def test_the_pair_is_found_only_in_the_field_names_the_writers_actually_stamp(tm
                    "needs_human", "owed"})}
     assert not [r for r in rows if "at" in r or "to_status" in r]
 
-    hit, why = D.below_floor(_post_flip_window(), real)
+    hit, why, _pairs = D.below_floor(_post_flip_window(), real)
     assert hit is True and f"#{REVERT_ITEM}" in why, why
-    miss, why2 = D.below_floor(_post_flip_window(), invented)
+    miss, why2, _pairs = D.below_floor(_post_flip_window(), invented)
     assert miss is False and "at or above" in why2, why2
     assert D.reverted_moves(_post_flip_window(), invented) == []
 
@@ -3314,7 +3314,7 @@ def test_a_superseded_applied_move_is_not_a_revert_the_latest_one_is(tmp_path, m
     assert pairs[0]["applied"] == "up_next" and pairs[0]["reverted_to"] == "in_progress"
     assert pairs[0]["at"] == "2026-11-16T07:17:31Z", pairs[0]
 
-    miss, why = D.below_floor(win, led)
+    miss, why, _pairs = D.below_floor(win, led)
     assert miss is True and "#4172" in why and "#4240" not in why, why
 
     # The mutation: pair on the FIRST applied move, which is what shipped until #4409.
@@ -3359,7 +3359,7 @@ def test_the_machines_abstention_echo_is_not_a_revert_even_when_its_to_differs(
     ]
     led = _pair_ledger(tmp_path / "echo", rows)
     assert D.reverted_moves(win, led) == []
-    miss, why = D.below_floor(win, led)
+    miss, why, _pairs = D.below_floor(win, led)
     assert miss is False and "at or above" in why, (
         "the abstention echo fired the disagreement alarm: " + why)
 
@@ -3528,7 +3528,7 @@ def test_a_reverted_applied_move_fires_the_alarm_on_a_window_the_rate_clears(tmp
     own floor passes and the ONLY thing that can fire the alarm is the ledger pair.
     """
     led = _flip_ledger(tmp_path / "fire")
-    hit, why = D.below_floor(_post_flip_window(), led)
+    hit, why, _pairs = D.below_floor(_post_flip_window(), led)
     assert hit is True, why
     assert f"#{REVERT_ITEM}" in why and REVERT_TO in why and REVERT_APPLIED in why, why
     # The moment and the machine's own reason are in the string. The stop condition counts
@@ -3549,34 +3549,34 @@ def test_the_same_post_flip_window_with_no_reverted_move_does_not_fire(tmp_path)
     half of this clause would be measuring a revert it just wrote itself.
     """
     agree = _flip_ledger(tmp_path / "agree", moved_to=REVERT_APPLIED)
-    miss, why = D.below_floor(_post_flip_window(), agree)
+    miss, why, _pairs = D.below_floor(_post_flip_window(), agree)
     assert miss is False and "at or above" in why, why
 
     other = _flip_ledger(tmp_path / "other", same_item=False)
-    miss, why = D.below_floor(_post_flip_window(), other)
+    miss, why, _pairs = D.below_floor(_post_flip_window(), other)
     assert miss is False and "at or above" in why, why
 
     # The leg does not reach outside the window either: a revert stamped BEFORE
     # `window_since` is history, not a live disagreement, and re-fires every tick otherwise.
     old = _flip_ledger(tmp_path / "old", revert_at="2026-11-10T01:15:00Z")
-    miss, why = D.below_floor(_post_flip_window(), old)
+    miss, why, _pairs = D.below_floor(_post_flip_window(), old)
     assert miss is False and "at or above" in why, why
 
     # And an apply the machine never touched cannot fire, however the rate reads.
     quiet = _flip_ledger(tmp_path / "quiet", order=("steward_move",))
-    miss, why = D.below_floor(_post_flip_window(), quiet)
+    miss, why, _pairs = D.below_floor(_post_flip_window(), quiet)
     assert miss is False and "at or above" in why, why
 
     # The rate's own leg is UNCHANGED by the flip: a window under the floor fires with the
     # rate's reason and no ledger at all. This is the node that keeps the flip from
     # replacing the pre-flip alarm instead of adding to it.
-    under, why = D.below_floor(_post_flip_window(rate=0.5))
+    under, why, _pairs = D.below_floor(_post_flip_window(rate=0.5))
     assert under is True and "under the" in why, why
 
     # Precedence when both would fire: the rate names the measurement, and the leg is the
     # post-flip instrument, so a reader must not have to open the ledger to learn which
     # half of the gate moved.
-    both, why = D.below_floor(_post_flip_window(rate=0.5), _flip_ledger(tmp_path / "both"))
+    both, why, _pairs = D.below_floor(_post_flip_window(rate=0.5), _flip_ledger(tmp_path / "both"))
     assert both is True and "rate 0.5 under the" in why and "reverted_moves" not in why, why
 
 
@@ -3588,11 +3588,11 @@ def test_a_quiet_window_still_reports_the_volume_leg_not_agreement(tmp_path):
     three ticks is what the volume leg exists to stop. With `apply: true` the volume leg
     gets MORE important, not less: the ticks are now writing to the board.
     """
-    miss, why = D.below_floor(_post_flip_window(judged=30, rate=0.5),
-                              _flip_ledger(tmp_path))
+    miss, why, _pairs = D.below_floor(_post_flip_window(judged=30, rate=0.5),
+                                      _flip_ledger(tmp_path))
     assert miss is False and "volume leg unmet" in why and "judged 30" in why, why
-    miss2, why2 = D.below_floor(_post_flip_window(truncated=True),
-                                _flip_ledger(tmp_path / "trunc"))
+    miss2, why2, _pairs = D.below_floor(_post_flip_window(truncated=True),
+                                        _flip_ledger(tmp_path / "trunc"))
     assert miss2 is False and "truncated" in why2, why2
 
 
@@ -3783,9 +3783,9 @@ def test_the_bodies_direction_and_the_ledger_leg_are_one_derivation(board, tmp_p
     a sub-floor window, and both surfaces move together — which is the only way to show a
     reader that neither one keeps its own copy of the rule.
     """
-    hit, revert_reason = D.below_floor(_post_flip_window(), _flip_ledger(tmp_path / "k1"))
+    hit, revert_reason, _pairs = D.below_floor(_post_flip_window(), _flip_ledger(tmp_path / "k1"))
     assert hit is True and revert_reason.startswith(D.REVERT_TRIGGER_PREFIX), revert_reason
-    hit2, rate_reason = D.below_floor(_post_flip_window(rate=0.5))
+    hit2, rate_reason, _pairs = D.below_floor(_post_flip_window(rate=0.5))
     assert hit2 is True and not rate_reason.startswith(D.REVERT_TRIGGER_PREFIX), rate_reason
     assert D.leg_from_trigger(revert_reason) == D.LEG_REVERT
     assert D.leg_from_trigger(rate_reason) == D.LEG_RATE
@@ -3889,8 +3889,8 @@ def test_only_the_direction_phrase_moves_between_the_two_legs_bodies(tmp_path):
     clause 5 lets move.
     """
     w = _window7()
-    _hit, revert_trigger = D.below_floor(_post_flip_window(), _flip_ledger(tmp_path / "sk"))
-    _hit2, rate_trigger = D.below_floor(w)
+    _hit, revert_trigger, _pairs = D.below_floor(_post_flip_window(), _flip_ledger(tmp_path / "sk"))
+    _hit2, rate_trigger, _pairs = D.below_floor(w)
     assert revert_trigger.startswith(D.REVERT_TRIGGER_PREFIX), revert_trigger
     assert not rate_trigger.startswith(D.REVERT_TRIGGER_PREFIX), rate_trigger
 
@@ -4085,6 +4085,241 @@ def test_each_file_or_merge_appends_one_ledger_event_with_the_window(tmp_path):
     assert rows[0]["item_id"] == rows[1]["item_id"]
     assert rows[0]["tick_item_ids"] == DIS_AGREE
     assert rows[1]["new_item_ids"] == [3119]
+
+
+# ── the revert pairs ON THE ROW: which item the leg keyed on (#4514) ────────
+#
+# A `board_steward_disagreement` row carries `leg`, `judged`, `rate` and `window_since`, but
+# never the pair the revert leg keyed on. `item_id` is the disagreement item being filed and
+# `tick_item_ids` are the tick's disagree ids, and for each of the six `leg: "post-flip
+# revert"` firings of 2026-11-16..20 (#4184, #4247, #4251, #4377, #4397, #4405) the ids the
+# leg actually keyed on intersect NEITHER. Reading them back means replaying `reverted_moves`
+# over the store — and the replay is unfaithful, not merely extra work: `reverted_moves` reads
+# the whole file (`workers/board_disagreement.py` `S.read_events(ledger, 0)`) and bounds it
+# only BELOW by `window_since`, so replaying the 2026-11-16 firing today also returns a pair
+# stamped six days later. Only a row written at the firing's own instant is a record. These
+# nodes pin `revert_pairs`, the field that makes an item-by-item audit one read of the row.
+
+#: The two genuine reverts inside the post-flip window, copied from the live rows of
+#: `~/.local/state/lloyd-automod/promotions.jsonl` — both are named in `config.yaml`'s
+#: stop-condition record. #4172: applied `up_next` at 2026-11-16T07:07:00Z, put back to
+#: `in_progress` ten minutes later. #4151: applied `up_next` at 2026-11-17T00:59:08Z, parked
+#: to `draft` at 03:47:29Z. The order below is the store's first-appearance order, which is
+#: the order `reverted_moves` returns and the order `below_floor`'s reason reads its one
+#: named pair from (#4381) — the row carries both, the trigger names the first.
+EXPECTED_REVERT_PAIRS = [
+    {"item_id": 4172, "applied": "up_next", "reverted_to": "in_progress",
+     "at": "2026-11-16T07:17:31Z"},
+    {"item_id": 4151, "applied": "up_next", "reverted_to": "draft",
+     "at": "2026-11-17T03:47:29Z"},
+]
+
+#: #4172's put-back row verbatim — the text the trigger sentence quotes and clause 4 asserts.
+IN_FLIGHT_REASON = "an automod round is in flight for it"
+
+#: The nine non-clock fields of the rate-leg row as they shipped before #4514. Every field
+#: the filer can know before it writes: `item_id` comes from the fixture and is added at the
+#: assert, and the three stamps `_row_fields` drops move with the clock. Clause 2's "every
+#: other key and value exactly as today" is one comparison against this, not nine assertions.
+RATE_LEG_ROW_FIELDS = {
+    "event": D.EVENT, "action": "filed", "judged": 127, "disagree": 26, "rate": 0.7953,
+    "window_since": "2026-10-20T23:49:13+00:00", "tick_item_ids": DIS_AGREE,
+    "new_item_ids": DIS_AGREE, "leg": D.LEG_RATE,
+}
+
+
+def _four_keys(pairs):
+    """`reverted_moves`' own pairs, projected to the four keys the row stores.
+
+    The reader also returns the machine's `reason`, which `_event` deliberately does not copy
+    onto the row (the trigger sentence already quotes it), so comparing the reader's raw
+    output to the row's list is a category error. This is the same projection `_event`
+    applies, which is what makes a row-level equality below a statement about the reader too.
+    """
+    return [{k: p.get(k) for k in ("item_id", "applied", "reverted_to", "at")} for p in pairs]
+
+
+def _two_revert_ledger(tmp_path, name):
+    """A `promotions.jsonl` holding a genuine revert for TWO different items.
+
+    Built by `_pair_ledger` from the same real-payload rows `_applied` and `_machine_moved`
+    write, so the stamps are the live ones and the field names are the ones the two writers
+    emit (#4147's first round invented `at`/`to_status`, and its node passed while the shipped
+    reader found nothing on the production store). #4151 also carries its earlier spent-park
+    `status_moved` of 2026-11-16T21:13:45Z, which is stamped BEFORE that item's latest
+    `steward_move`: the pairing rule must skip it, so the row's list is the reader's output
+    and not a constant this file hand-wrote.
+    """
+    return _pair_ledger(tmp_path / name, [
+        _applied(4172, "2026-11-16T07:07:00Z", "in_progress", "up_next",
+                 "Fresh red-tree item, confirmed 06:59, no round live."),
+        _machine_moved(4172, "2026-11-16T07:17:31Z", "up_next", "in_progress",
+                       IN_FLIGHT_REASON),
+        _machine_moved(4151, "2026-11-16T21:13:45Z", "in_progress", "draft",
+                       MACHINE_PARK_REASON),
+        _applied(4151, "2026-11-17T00:59:08Z", "draft", "up_next",
+                 "the spent-park of 11-16T21:13 was answered by a reopened row granting "
+                 "another attempt; the line still carries its triage verdict"),
+        _machine_moved(4151, "2026-11-17T03:47:29Z", "in_progress", "draft",
+                       "landed with a clause not met and its one unattended attempt is "
+                       "spent; owed-check decides (reopen_item to grant another)"),
+    ])
+
+
+def _row_fields(row):
+    """A disagreement row minus the three stamps that differ on every run.
+
+    `ts` and `created_at` are prepended by `append_event`
+    (`scripts/automod/state.py:181` builds `{"ts": …, "created_at": now_iso(), **entry}`) and
+    `at` is this filer's own `_stamp()`, so all three move with the wall clock. Every OTHER
+    key is a value a test can pin, which is what makes a whole-dict comparison the instrument
+    for "nothing else about this row changed".
+    """
+    return {k: v for k, v in row.items() if k not in ("ts", "created_at", "at")}
+
+
+def _pair_rows(ledger):
+    """The `revert_pairs` field of every disagreement row in a ledger, in the order written.
+
+    Subscripted, not `.get`: a row that lost the key has to raise. That is what makes
+    deleting the key from `_event` redden a node on BOTH filing paths rather than leaving the
+    merge path mute, which is the gap #4251 left open for the fields it did not pin.
+    """
+    return [e["revert_pairs"] for e in S.read_events(path=ledger)
+            if e.get("event") == D.EVENT]
+
+
+def test_a_revert_leg_row_carries_every_pair_the_leg_keyed_on(tmp_path):
+    """Clause 1: the row names every pair `reverted_moves` returned, item by item.
+
+    Driven end to end through `file_or_update` on `_post_flip_window()` — both floors cleared,
+    so the revert leg is the only thing that can file — against a ledger whose reverts span TWO
+    item ids. The row's `revert_pairs` has to hold BOTH, and the comparison is whole-dict
+    equality on each entry: `item_id`, `applied`, `reverted_to` and `at` exactly, so a missing
+    key reddens it as surely as a fifth one (`reverted_moves` also returns the machine's own
+    `reason`, and the body already quotes that verbatim in the trigger sentence — a row that
+    copied it again would be storing one sentence in two places of a store this module is
+    asked to keep readable).
+
+    The two assertions under that comparison are the premise the field exists to close. The
+    keyed ids appear in no other field of the row, so before this field the item the leg
+    keyed on was unreadable from it; and the trigger names only the FIRST pair, which is
+    #4381's asymmetry — the reason the row carries the whole list rather than one item.
+    """
+    board = _new_board(tmp_path, "b-pairs")
+    led = _two_revert_ledger(tmp_path, "two-reverts")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_post_flip_window(), backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    rows = [e for e in S.read_events(path=led) if e.get("event") == D.EVENT]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["leg"] == D.LEG_REVERT, row["leg"]
+    assert row["revert_pairs"] == EXPECTED_REVERT_PAIRS, json.dumps(row, sort_keys=True)
+    keyed = {p["item_id"] for p in row["revert_pairs"]}
+    assert keyed == {4172, 4151}, keyed
+    assert not keyed & ({row["item_id"]} | set(row["tick_item_ids"])), (
+        "the premise is gone: the keyed item is reachable from another field, so the field "
+        f"above is a copy rather than the only record — {row}")
+
+    hit, why, _pairs = D.below_floor(_post_flip_window(), led)
+    assert hit is True and "#4172" in why and "#4151" not in why, why
+    assert "`up_next`" in why and "`in_progress`" in why, why
+
+
+def test_a_rate_leg_row_carries_an_empty_revert_pairs_and_nothing_else_moves(tmp_path):
+    """Clause 2: the rate leg's row gains the key and no other field of it moves.
+
+    `_window7()` is the 2026-10-27 published reading — `rate` 0.7953 under the 0.90 floor — so
+    the filing is a rate-leg one. The assertion is a whole-dict equality over the row's
+    non-clock fields, which pins both directions at once: `revert_pairs` must be present and
+    empty, and the other ten non-clock fields — `RATE_LEG_ROW_FIELDS`' nine plus this row's own
+    `item_id` — must be exactly what they were before the key existed.
+
+    The second half is what an empty list does NOT mean. `below_floor` returns for a sub-floor
+    rate BEFORE it calls `reverted_moves`, so on a rate-leg row `[]` says this leg never
+    evaluated, not that nothing was put back: the ledger beside the filing below holds two
+    genuine reverts and the row still reads `[]`. `leg` is the only discriminator, and this is
+    the witness for the comment beside the new key — a later reader must not SELECT on the
+    empty list.
+    """
+    plain = tmp_path / "rate-plain.jsonl"
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                           backlog_dir=_new_board(tmp_path, "b-rate"), ledger=plain)
+    assert out is not None and out["action"] == "filed", out
+    rows = [e for e in S.read_events(path=plain) if e.get("event") == D.EVENT]
+    assert len(rows) == 1, rows
+    row = rows[0]
+    assert row["revert_pairs"] == [], json.dumps(row, sort_keys=True)
+    pinned = {**RATE_LEG_ROW_FIELDS, "item_id": row["item_id"]}
+    assert _row_fields(row) == {**pinned, "revert_pairs": []}, (
+        "the rate-leg row changed by more than the one new key: "
+        + json.dumps(_row_fields(row), sort_keys=True))
+    assert set(_row_fields(row)) - set(pinned) == {"revert_pairs"}, (
+        "the field set grew by something other than `revert_pairs`")
+
+    with_reverts = _two_revert_ledger(tmp_path, "rate-with-reverts")
+    out2 = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                            window=_window7(), backlog_dir=_new_board(tmp_path, "b-rate-2"),
+                            ledger=with_reverts)
+    assert out2 is not None and out2["action"] == "filed", out2
+    rows2 = [e for e in S.read_events(path=with_reverts) if e.get("event") == D.EVENT]
+    assert len(rows2) == 1, rows2
+    assert rows2[0]["leg"] == D.LEG_RATE and rows2[0]["revert_pairs"] == [], (
+        "a rate-leg row's empty list stopped meaning 'leg never evaluated': "
+        + json.dumps(rows2[0], sort_keys=True))
+
+
+def test_revert_pairs_is_pinned_on_a_merged_row_as_well_as_on_a_created_one(tmp_path):
+    """Clause 3: a merge can speak about this field, so losing the key reddens both paths.
+
+    #4251 fixed the DIRECTION of a widening but left the per-row fields asserted on the create
+    only, which is why a merge could not be said to carry them. One create and one merge run on
+    the SAME revert-leg ledger and the SAME board here, and `_pair_rows` subscripts the field
+    on both rows — `_create` and `_merge` reach the store through the one `_event`, so the
+    field is written by both and this assertion is what makes that load-bearing rather than
+    incidental. Deleting the key from `_event` reddens this node and the two above it, one on
+    each path.
+    """
+    board = _new_board(tmp_path, "b-merge")
+    led = _two_revert_ledger(tmp_path, "merge-reverts")
+    first = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_post_flip_window(), backlog_dir=board, ledger=led)
+    assert first is not None and first["action"] == "filed", first
+    more = DIS_MOVES + [{"item_id": 3119, "status": "draft",
+                         "note": "the vec0 index needs a hand-side copy rebuild"}]
+    want = dict(DIS_EXPECTED)
+    want[3119] = ("up_next", "in_progress by no round, ready by its acceptance")
+    second = D.file_or_update(_agree(3119), more, want, window=_post_flip_window(),
+                              backlog_dir=board, ledger=led)
+    assert second is not None and second["action"] == "merged", second
+    actions = [e["action"] for e in S.read_events(path=led) if e.get("event") == D.EVENT]
+    assert actions == ["filed", "merged"], actions
+    assert _pair_rows(led) == [EXPECTED_REVERT_PAIRS, EXPECTED_REVERT_PAIRS], (
+        "the widening lost the pairs the create wrote: "
+        + json.dumps(_pair_rows(led), sort_keys=True))
+
+
+def test_the_reason_the_pairs_hands_back_alongside_is_still_the_old_sentence(tmp_path):
+    """Clause 4: `below_floor` gained a third return element; its sentence did not move.
+
+    Widening the tuple is a shape change on the ONE surface the trigger sentence is built
+    from, so the sentence is pinned here against the rendered text as well as through the body
+    the existing nodes read — the pair set and the reason come off the SAME call, the row
+    carries both reverts, and the sentence still names #4172 alone. That asymmetry is #4381's
+    finding, and this round deliberately leaves WHICH pair to name as owed-check's ruling.
+    """
+    led = _two_revert_ledger(tmp_path, "reason-wording")
+    hit, why, pairs = D.below_floor(_post_flip_window(), led)
+    assert hit is True, why
+    assert _four_keys(pairs) == EXPECTED_REVERT_PAIRS, json.dumps(pairs, sort_keys=True)
+    first = EXPECTED_REVERT_PAIRS[0]
+    assert why == (
+        f"{D.REVERT_TRIGGER_PREFIX} to #{first['item_id']} as `{first['applied']}` was moved "
+        f"back to `{first['reverted_to']}` by the state machine on {first['at']} "
+        f"(reason: {IN_FLIGHT_REASON}): the steward's applied move was undone inside the "
+        f"window, which is the disagreement `rate` can no longer score post-flip"), why
+    assert "#4151" not in why and "2026-11-17" not in why, why
 
 
 def test_a_filing_that_raises_cannot_change_the_tick(board, monkeypatch):
