@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""How much the eval pin costs production qmd on GPU 0 (#1495): read it off the logs.
+"""How much the eval pin costs production qmd on GPU 4 (#1495): read it off the logs.
 
 Production's daemon (:8181) logs every `/query` with its phases
 (`[fts=.. embed=.. vec=.. chunk=.. rerank=..]`, UTC wall clock, no date). The
@@ -9,11 +9,21 @@ question #1495 is waiting on without booting anything: is a production request
 slower while a pin is serving an eval on the same card, and how often does that
 happen?
 
-Only the GPU phases can be contended by a second daemon on GPU 0 — `embed` (the
+Only the GPU phases can be contended by a second daemon on GPU 4 — `embed` (the
 query embedding) and `rerank` (the cross-encoder, which production only reaches on
 the recall's fallback path, `vault_search`, and backlog dedupe since djev ranks
-the recall, #1336). `vec` is the in-memory VecIndex on the CPU. The TTS server
-on the same card leaves no request log to join, so it is not separated here.
+the recall, #1336). `vec` is the in-memory VecIndex on the CPU. The eval pin is the
+only other tenant of that card, so there is nothing third to separate here. TTS
+pins a different card, and the vendored TTS server that used to live on qmd's was
+retired in the move that brought qmd here (a372c876, 2026-11-10).
+
+GPU 4 is the card `agent-services/supervisor/conf.d/agent-qmd-daemon.conf` sets, not
+a value this script reads: it opens only the two logs below. That is why the number
+above is a claim about the conf rather than a constant, and
+`tests/test_qmd_contention.py::test_the_docstring_names_the_card_the_daemon_conf_pins`
+is what keeps the claim true — it parses `CUDA_VISIBLE_DEVICES` out of that conf and
+goes red if this docstring ever names another card, so the next move is a failing
+test and not a stale premise (#4474).
 
 Reads two files, writes nothing. Stdlib only.
 
