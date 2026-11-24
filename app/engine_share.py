@@ -764,11 +764,17 @@ def main(argv: "list[str] | None" = None) -> int:
                         help="usage.db path (default: app.paths.USAGE_DB)")
     parser.add_argument("--out-dir", default=None,
                         help="row-set directory (default: app.paths.ENGINE_SHARE_DIR)")
+    parser.add_argument("--today", default=None,
+                        help="day the window ends at and the name the row set is"
+                             " written under, as YYYY-MM-DD or YYYYMMDD (the"
+                             " spelling a transcript file name carries);"
+                             " unparseable means today's clock")
     parser.add_argument("--dry-run", action="store_true",
                         help="print without writing the dated row set")
     args = parser.parse_args(argv)
     report = sweep(sessions_dir=args.sessions_dir, db_path=args.db,
-                   out_dir=args.out_dir, days=args.days, write=not args.dry_run)
+                   out_dir=args.out_dir, days=args.days, today=args.today,
+                   write=not args.dry_run)
     print(report["text"])
     return 0
 

@@ -506,13 +506,67 @@ def test_sweep_writes_one_dated_row_set_and_prunes_its_own(corpus, tmp_path):
 
 def test_the_cli_reads_the_two_stores_it_did_not_write(corpus, capsys):
     """The process boundary: run as a separate process by whatever schedules it,
-    over rows two other modules left behind."""
+    over rows two other modules left behind.
+
+    `--today` names the day the window ends at, because this corpus is a dated
+    one: every file `transcript_paths` walks is selected on the date in its *name*
+    (#1001's rule, pinned by `test_the_window_is_a_file_name_and_never_a_clock_subtraction`),
+    and every reader above pins its anchor with `today=TODAY`. The CLI was the one
+    surface that could not, so its anchor was `datetime.now()`: the transcripts
+    here are dated 2026-11-16, `days=7` is inclusive so the window from a
+    2026-11-24 clock starts 2026-11-17, and from that day on the walk admitted none
+    of them. The run did not look broken — rc 0, a full table, a `decision:` block,
+    only the class rows gone — which is why the fix is a day the caller names
+    rather than a corpus re-cut to today's date. The expected output below is
+    unchanged from the day this node was written; only the argv gained the day.
+    """
     rc = engine_share.main(["--sessions-dir", str(corpus["sessions"]),
-                            "--db", str(corpus["db"]), "--dry-run"])
+                            "--db", str(corpus["db"]), "--today", "2026-11-17",
+                            "--dry-run"])
     assert rc == 0
     printed = capsys.readouterr().out
     assert "decision:" in printed and "autotriage" in printed
     assert "report-only" in printed
+
+
+def test_the_cli_day_moves_the_window_and_names_the_row_set(corpus, capsys,
+                                                            tmp_path):
+    """`--today` is read, not accepted: the same store answers twice, differently.
+
+    Both arms read one corpus, one `usage.db`, one `days=7`. Pinned to the day the
+    files carry it prints the classes; pinned seven days later the same files are
+    outside the window and no class is published. A flag parsed and dropped before
+    `collect` would leave both arms printing `autotriage`, and a CLI with no such
+    flag would die on `unrecognized arguments` with exit 2 rather than return 0 —
+    so this node fails on either regression, and it fails for the same reason the
+    red run did: an empty window prints a confident report, `joined_to_usage=0`
+    being the only thing on the page that says so.
+
+    The third arm crosses the writing half of the same boundary in the compact
+    spelling `YYYYMMDD` — the one a transcript file name carries — and the row set
+    still lands under the ISO name `2026-11-17.json`: two spellings in, one out,
+    because the store's names sort as dates only in ISO (#4136's ruling in
+    `app/tool_quality.py`).
+    """
+    stores = ["--sessions-dir", str(corpus["sessions"]),
+              "--db", str(corpus["db"])]
+    assert engine_share.main(stores + ["--today", "2026-11-17",
+                                       "--dry-run"]) == 0
+    in_window = capsys.readouterr().out
+    assert "autotriage" in in_window
+
+    assert engine_share.main(stores + ["--today", "2026-11-24",
+                                       "--dry-run"]) == 0
+    moved = capsys.readouterr().out
+    assert "autotriage" not in moved
+    assert "joined_to_usage=0" in moved
+    assert "session files dated 2026-11-17 or newer" in moved
+
+    out = tmp_path / "engine-share"
+    assert engine_share.main(stores + ["--out-dir", str(out),
+                                       "--today", "20261117"]) == 0
+    capsys.readouterr()
+    assert [p.name for p in out.iterdir()] == ["2026-11-17.json"]
 
 
 def test_the_dead_column_is_reported_as_dead_until_it_is_filled(corpus):
