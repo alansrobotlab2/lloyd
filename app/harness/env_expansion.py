@@ -255,5 +255,21 @@ def check_empty_expansion_measurement(command: str) -> str | None:
                    "variable you meant to write is not this one"
                    if not braced else "")
                 + f". Spell the value, or write "
-                f"`${{{name}:-something}}` to say what the fallback is.")
+                f"`${{{name}:-something}}` to say what the fallback is."
+                # The third remedy, and the only one a refused run cannot infer from
+                # the two above: the pass that blanks this reference rewrites the
+                # BRACED form alone, so the bare spelling reaches bash and bash
+                # expands it from the shell's own state — which means a name this
+                # command assigns has a value (`for d in one two; do echo "u=$d
+                # b=${d}"; done` printed `u=one b=` twice, measured 2026-11-24).
+                # Without this arm the sentence offers only an inlined literal, and a
+                # loop has to be flattened to take it: that is how the 2026-10-24/25
+                # and 2026-11-24 passes talked themselves into doubting the rail
+                # itself (`backlog/data/refuted-claims.md`, the 2026-11-24 row).
+                # Gated on `braced` because the BARE form is the offence on the
+                # lengthening arm — `$d_` — so advising it there would contradict the
+                # refusal this same call just made.
+                + (f" The unbraced `${name}` is left for bash to expand, so it works "
+                   "when this same command assigns the name."
+                   if braced else ""))
     return None

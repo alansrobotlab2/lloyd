@@ -1178,6 +1178,125 @@ def test_the_unbraced_refusal_is_the_dispatch_gates_answer_not_just_the_lanes():
     )
 
 
+# ── #4527: the braced refusal has to TEACH the spelling that survives ─────────
+#
+# The rail is right to refuse `${d}`: the pass upstream of every Bash spawn rewrites
+# that form before bash parses, so the pattern which reaches the shell has a hole in
+# it. What was missing is the third remedy. The sentence stopped at "Spell the value,
+# or write ${d:-something}", and a run reading only that concludes a literal is the
+# only way out — which flattens the loop, and is how the 2026-10-24/25 and 2026-11-24
+# passes talked themselves into doubting the rule instead of their own spelling
+# (`backlog/data/refuted-claims.md`, the 2026-11-24 row). The unbraced `$d` is NOT
+# rewritten by that pass: bash expands it, so a name the same command assigns has a
+# value. Measured 2026-11-24 with both spellings in one loop —
+# `for d in one two; do echo "unbraced=$d braced=${d}"; done` — the harness printed
+# `Referenced but unset environment variable evaluates to an empty string: d` and then
+# `unbraced=one braced=` / `unbraced=two braced=`. A teacher inside the guard is read
+# at the moment of need; a rule in a topic file is not. Traffic is real: 87 lines
+# containing "expands to nothing inside" across `~/lloyd-data/logs` on 2026-11-23.
+
+#: Braced refusals, one per measurement position. Each must carry the new arm.
+_BRACED_REF_TEXT = [
+    ("a find -name pattern",
+     'cd /home/alansrobotlab/lloyd-data/autonomy-runs && '
+     'find . -name "run_*_${RUNDATE}_*.md" | wc -l',
+     "RUNDATE", "the `find -name` pattern"),
+    ("the glob word",
+     'ls -1 /tmp/*_${RUNDATE}_*/x.md', "RUNDATE", "the glob word"),
+]
+
+
+def _quoted_literals(msg):
+    """The backtick-quoted literals of a refusal, as the two pinned invariants read them."""
+    return msg.split("`")[1::2]
+
+
+def test_the_braced_refusal_offers_the_unbraced_spelling_bash_expands():
+    """Clause 1: a braced refusal names the unbraced spelling, in both positions.
+
+    Asserted per position rather than once, because the remedy sentence is appended to
+    a message whose shape differs between them (the `find -name` refusal names a
+    predicate, the glob refusal does not), and clause 3 requires each to keep naming
+    its OWN position — a glob refusal that started blaming `find` would be a behaviour
+    change dressed as a wording change.
+
+    The two invariants this file already pins on the closer are re-pinned here on the
+    longer text: no backtick-quoted literal may begin or end in `,` or `;` (the
+    operator's own punctuation must not read as part of the pattern), and the message
+    may carry neither `..` nor ` .` — the defect #3707 inherited when it appended a
+    clause to a sentence that already ended in a period.
+    """
+    for label, cmd, name, position in _BRACED_REF_TEXT:
+        msg = _EE(cmd)
+        assert msg is not None, f"{label}: the braced arm reached the shell"
+        assert "unbraced" in msg, f"{label}: no unbraced arm offered: {msg}"
+        assert "Spell the value" in msg, f"{label}: the older remedies vanished: {msg}"
+        assert f"The unbraced `${name}`" in msg, (
+            f"{label}: advice about a name other than the one written: {msg}")
+        assert "assigns" in msg, f"{label}: the arm is not conditioned on assignment: {msg}"
+        assert position in msg, f"{label}: {msg[:140]}"
+        bad = [q for q in _quoted_literals(msg) if q[-1:] in ",;" or q[:1] in ",;"]
+        assert not bad, f"refusal quoting the caller's syntax, not the pattern: {bad} | {msg}"
+        assert ".." not in msg and " ." not in msg, msg
+        print(f"braced remedy ({label}): …{msg[-95:]}")
+
+    # The seam: this text teaches only if it is the string the DISPATCH GATE returns.
+    # `agent_mcp` refuses on the raw `arguments["command"]` and the run reads that
+    # reason, never this module, so the boundary is `safety.check_bash_command` — the
+    # same entry `test_the_unbraced_refusal_is_the_dispatch_gates_answer_not_just_the_lanes`
+    # crosses for the bare arm, and the same one whose `empty-expansion` label the
+    # owed live-traffic count greps for in mcp.err.
+    def gate(command):
+        with corpus._scratch_tree() as home:
+            return corpus.check_bash_command(command, str(home / "lloyd"),
+                                             session_id=corpus._CHAT_SESSION,
+                                             parent_of=corpus._parent_of)
+
+    match = gate('echo "n=$(ls -1 /tmp/*_${RUNDATE}_* 2>/dev/null | wc -l)"')
+    assert match is not None, "the dispatch gate stopped refusing the glob census"
+    assert corpus._deciding_gate(match) == "empty-expansion", match[0][:140]
+    assert "unbraced" in match[0], f"the gate's reason lacks the arm: {match[0]}"
+    assert "Spell the value" in match[0], match[0]
+    # …and the leave-alone arm beside it is still allowed, or the "teacher" widened.
+    assert gate('echo "result=[${RUNDATE}]"') is None, (
+        "the gate now refuses braced text output, which #3630 clause 3 leaves alone")
+
+
+def test_the_lengthening_refusal_gains_no_bare_form_advice():
+    """Clause 2: the arm where the bare form IS the offence must not recommend it.
+
+    `$d_` is bash's greedy `[A-Za-z0-9_]` scan, not a variable the caller meant, so the
+    point of that refusal is that the spelling is wrong. Appending the braced arm's new
+    sentence unconditionally would tell the operator to reach for the form the same
+    message just refused, so the clause rides the existing `braced` flag
+    (`name, braced = refs[0]`, app/harness/env_expansion.py:231 — the flag already
+    driving the trailing-`_` explanation).
+
+    Checked two ways on every refused row, because "no new advice" is otherwise a
+    negative a deletion could satisfy for free: the word `unbraced` must be absent, AND
+    the un-lengthened name must not appear as a backtick suggestion — `` `$d` `` next to
+    a refusal of `$d_` is precisely the contradiction — while everything the refusal had
+    to say before (its reference, its position, the trailing-`_` lesson, the literal
+    remedy) is still there and still punctuates cleanly.
+    """
+    for label, cmd, ref, position in _BARE_REF_REFUSE:
+        msg = _EE(cmd)
+        assert msg is not None, f"{label}: the lengthening arm reached the shell"
+        assert "unbraced" not in msg, (
+            f"{label}: bare-form advice on the arm that refuses the bare form: {msg}")
+        assert f"`${ref.rstrip('_')}`" not in msg, (
+            f"{label}: recommends the un-lengthened name it just refused: {msg}")
+        assert "Spell the value" in msg, f"{label}: the older remedies vanished: {msg}"
+        assert "$" + ref in msg, f"{label}: refusal does not name ${ref}: {msg[:140]}"
+        assert "trailing `_`" in msg, f"{label}: the lengthening lesson vanished: {msg}"
+        if position:
+            assert position in msg, f"{label}: {msg[:140]}"
+        bad = [q for q in _quoted_literals(msg) if q[-1:] in ",;" or q[:1] in ",;"]
+        assert not bad, f"refusal quoting the caller's syntax, not the pattern: {bad} | {msg}"
+        assert ".." not in msg and " ." not in msg, msg
+        print(f"lengthening remedy ({label}): …{msg[-60:]}")
+
+
 TESTS = [
     test_seeding_a_broad_pattern_makes_the_benign_arm_strictly_worse,
     test_removing_a_pattern_makes_the_true_positive_arm_strictly_worse,
@@ -1203,6 +1322,10 @@ TESTS = [
     test_underscore_is_shell_owned_so_the_last_argument_parameter_survives,
     test_the_refusal_quotes_the_pattern_without_the_caller_s_delimiters,
     test_the_unbraced_refusal_is_the_dispatch_gates_answer_not_just_the_lanes,
+    # #4527. Registered for the same reason as the six above: this list is how the
+    # file runs itself, and an omission is invisible to pytest but total here.
+    test_the_braced_refusal_offers_the_unbraced_spelling_bash_expands,
+    test_the_lengthening_refusal_gains_no_bare_form_advice,
 ]
 
 
