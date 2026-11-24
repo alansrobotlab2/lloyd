@@ -960,25 +960,6 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'scripts/state.json':
    ('other-tree: a path inside the skill directory the sentence'
     "names; the job's own state lives under its runtime root"),
-  '~/.local/state/lloyd-automod/landed_outcomes.jsonl':
-   ('generated: the row #2572\'s daily record appends is created by '
-    'its first `--record` run, and #97 had run 0 times when #2630 '
-    'wrote the entry — `select count(*) from runs where task_id=97` '
-    'was 0 on 2026-10-12, and the doc says in the same breath that '
-    'the file does not exist yet. The one citation here whose '
-    'absence is the fact being reported, not a pointer to a file'),
-  '~/lloyd-data/supply-chain/observed/': (
-      "generated: the scan makes this directory; nothing ships it. `observed_dir()` in "
-      "`app/harness/supply_chain_inventory.py` computes it under the runtime root, and the "
-      "`target_dir.mkdir(parents=True, exist_ok=True)` inside `synthesize_lockfiles` is what "
-      "takes it, so a box holds it only from the run that writes a scan target — and #99 had "
-      "run 0 times when `cffd22e6` wrote the row on 2026-10-16: `select count(*) from runs "
-      "where task_id='99'` over `~/lloyd-data/workers.db` was 0, against 4 for #97 in the "
-      "same query. The row therefore states where the job puts its outputs, which is what a "
-      "job card is for, not what the box happens to hold today. "
-      "`tests/test_supply_chain_inventory.py::test_the_observed_scan_creates_the_directory_"
-      "the_job_card_cites` pins both halves: the location, and that a run creates it"
-  ),
     '~/obsidian/memory/facts/': (
       "historical: the sentence exists to report that 15,299 queue rows name a vault prefix "
       "that is gone, and it names the layout that replaced it — "
@@ -1014,11 +995,6 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
     'never in a worktree'),
  },
  'data-home.md': {
-  '$LLOYD_DATA/quarantine/tree-strays/':
-   ('generated: the directory the watch moves a tree stray into, under'
-    ' the runtime root, created on the first quarantine. Dated'
-    ' 2026-10-25: measured absent at the data root that day, where'
-    ' `quarantine` names no directory at all'),
   '.venvs/':
    ('generated: interpreter venvs the install scripts build, never'
     'committed, so no worktree has them'),
@@ -1438,6 +1414,32 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: re-spelling of a sentence `git grep` will find wrong the next time a rebuild moves
 #: the function again. The list is 110 exemptions across 28 docs — other-tree 44,
 #: generated 33, historical 33 — and NONE of them is `stale:`.
+#: Re-measured 2026-11-24, the day #4335 deleted three `generated:` entries for the reason
+#: this list exists to refuse rather than the reason it exists to carry: the path each one
+#: excuses now EXISTS, so each reason is dead text. The spans are
+#: `~/.local/state/lloyd-automod/landed_outcomes.jsonl` and `~/lloyd-data/supply-chain/observed/`
+#: in `autonomy-jobs.md`, and `$LLOYD_DATA/quarantine/tree-strays/` in `data-home.md`. Two
+#: rested on a job having run zero times — #97 appends that JSONL row and #99's scan creates
+#: that observed tree — and the third on a directory `quarantine` names no part of; measured
+#: on 2026-11-24 the row file is 343,620 bytes over 38 lines (last written 2026-11-23), the
+#: observed tree holds 8 site directories, and `quarantine/tree-strays` holds 2 entries, so
+#: all three spans resolve and an exemption that excuses nothing only stops the sweep
+#: noticing its reason died. The three doc sentences stayed — a job card states where its
+#: outputs go, and the sweep's verdict on a citation is `resolve_citation`, not the list — so
+#: the entries were deleted and the citations were not. The sizes above are measurements with
+#: a date, not properties, and this paragraph's whole rule is that the date is what makes a
+#: stale claim checkable: the journal is appended by #2572's daily record, so its byte count
+#: moves on its own, and 304,850 — the figure #4335's triage read on 2026-11-19 — sat in this
+#: paragraph under today's date until the re-measure above replaced it. retire_when: any later
+#: reader who needs the size runs the command rather than copying the number, and the command
+#: is `wc -l -c` plus `date -r` on the journal and `ls -1` / `ls -A | wc -l` on the two
+#: directories, where `$LLOYD_DATA` is `app.paths.DATA_ROOT` — the production root, named off
+#: the passwd entry, even when the reader sits in a round's worktree.
+#: `test_no_generated_exemption_outlives_the_appearance_of_its_path` is the bounded
+#: generalization of #4182's single-span node: it asks "does this still fail to resolve?" of
+#: every remaining `generated:` entry, so the next exemption whose path appears is caught by a
+#: node instead of by a survey. The list is 107 exemptions across 28 docs — other-tree 44,
+#: generated 30, historical 33 — and NONE of them is `stale:`.
 #: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
 #: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
 #: beside the number, because it is the rail's own text: the failure message of
@@ -1691,32 +1693,65 @@ def test_a_dollar_name_is_only_an_invented_root_when_no_doc_assigns_it():
             "grammar's refusals (single segment, non-ASCII, glob) came off")
 
 
-def test_the_quarantine_citation_carries_a_dated_generated_reason():
-    """Clause 4's shape: one exemption per quarantine citation, no new kind.
+def test_the_quarantine_citation_needs_no_exemption_and_has_none():
+    """The reverse of what this node pinned until #4335, because the box moved.
 
-    The directory is created the first time a stray is actually moved, so it is
-    legitimately absent today — which is exactly what `generated:` is for, the
-    kind the list already carries. The date is in the reason because the claim is
-    a measurement of this box on a day, and a reader in six months cannot tell an
-    exemption that has gone stale from one that never needed removing otherwise.
+    It used to require a dated `generated:` entry for `$LLOYD_DATA/quarantine/tree-strays/`
+    and a corpus-wide count of one, on the premise (its own words, dated 2026-10-25)
+    that the directory was "created the first time a stray is actually moved, so it is
+    legitimately absent today". That measurement stopped being true: `ls -ld` on 2026-11-24
+    shows `/home/alansrobotlab/lloyd-data/quarantine/tree-strays` holding 2 entries, and the
+    sweep's own instrument finds it there — `_resolved_or_none` asks every root the box has, which
+    is why the ruling below is stated as "the sweep explains this citation with no exemption
+    offered" rather than as "`resolve_citation` resolves it": inside a test session that answers
+    `None`, because `ENV_DATA_ROOT` is the redirected `$LLOYD_DATA`, and a node that claimed
+    otherwise would be asserting something the run contradicts. The excuse therefore excused
+    nothing and #4182's doctrine ("an exemption whose path has appeared has to be deleted",
+    `648b29d9`) removed the entry. Three things hold now, and the middle one is the load-bearing
+    half: no doc may re-excuse a quarantine span, `data-home.md` still MAKES the citation and
+    passes the sweep with an empty exemption dict, and the same call demonstrably reports an
+    invented absent span while clearing a tracked file, so that empty set is a verdict and not a
+    silence. The corpus's other quarantine mention, `$LLOYD_DATA/quarantine/tree-strays/<name>`,
+    matches no path grammar at all; that is the extractor's business and `test_a_dollar_name_is_only_an_invented_root_when_no_doc_assigns_it`
+    already rules on grammar refusals, so this node keeps no assertion about it.
     """
-    reasons = {span: reason for span, reason in
-               PATH_CITATION_EXEMPTIONS["data-home.md"].items()
-               if "quarantine/tree-strays" in span}
-    assert reasons, "the quarantine citation lost its exemption and the doc is red"
-    for span, reason in reasons.items():
-        assert span.startswith("$LLOYD_DATA/"), \
-            f"exemption keyed on an invented root: {span}"
-        assert reason.startswith("generated:"), span
-        assert re.search(r"20\d\d-\d\d-\d\d", reason), \
-            f"{span}'s reason states no date it can go stale against: {reason}"
-    # The corpus keeps exactly one such entry: the other quarantine mention,
-    # `$LLOYD_DATA/quarantine/tree-strays/<name>`, is not a citation at all (a
-    # span with `<` matches no path grammar), so it needs no reason and gets none.
-    quarantine = [s for s in PATH_DOC_SLUGS
-                  for span in PATH_CITATION_EXEMPTIONS.get(s, {})
-                  if "quarantine" in span]
-    assert len(quarantine) == 1, quarantine
+    quarantine = {s: [span for span in PATH_CITATION_EXEMPTIONS.get(s, {})
+                      if "quarantine" in span]
+                  for s in PATH_DOC_SLUGS}
+    assert not any(quarantine.values()), (
+        f"{ {s: v for s, v in quarantine.items() if v} } re-excused a quarantine span "
+        "that resolves on this box; delete the entry, do not re-spell the doc")
+    # The half that makes #4335's deletion more than bookkeeping: the page still MAKES the
+    # citation, and the sweep explains it with nothing withheld. Passing an EMPTY exemption
+    # dict is the whole point — `unexplained_citations(text, {})` asks what the rule owes
+    # `data-home.md` once no reason is on offer for any span, which is precisely the state the
+    # deleted entry used to prevent. It fails in the one case that matters: if the directory
+    # stopped existing under every root the box has, this set would name the span, and so would
+    # `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree[data-home.md]`
+    # for the same reason — the two never disagree, and that reading is what the #4335
+    # owed-check rules on.
+    surfaced = {span for span, _p, _l in cited_citations(_text("data-home.md"))}
+    assert "$LLOYD_DATA/quarantine/tree-strays/" in surfaced, (
+        "data-home.md stopped citing the quarantine directory at all, so the ruling above is "
+        "about a page that no longer needs one — the fix would be to restore the sentence, "
+        "never to re-admit an exemption")
+    naked = {span for span, _p in unexplained_citations(_text("data-home.md"), {})
+             if "quarantine" in span}
+    assert naked == set(), (
+        f"with every exemption withheld the sweep still calls the quarantine citation "
+        f"unexplained ({naked}), which means the path stopped existing under any root the box "
+        "has; the page would then genuinely need a fresh dated reason, and #4335's deletion "
+        "should be revisited in the open rather than quietly undone")
+    # That empty set is worth nothing unless the same call can report something, so it is
+    # asked about two spans in one invented sentence: an absent directory, which it must name,
+    # and a tracked file, which it must clear. Both halves are the node's own text, so this
+    # cannot redden because a directory appeared or a box changed hands.
+    probe = "one sentence citing `$LLOYD_DATA/no-such-dir-4335-xyzzy/` and `app/paths.py`"
+    assert {span for span, _p in unexplained_citations(probe, {})} == {
+        "$LLOYD_DATA/no-such-dir-4335-xyzzy/"}, (
+        "`unexplained_citations` no longer separates an absent span from a tracked file, so the "
+        "empty ruling above is not evidence that the quarantine citation is explained — it would "
+        "be the same empty set returned by a call that never reports anything")
 
 
 def test_the_path_extractor_is_what_the_check_depends_on():
@@ -9658,6 +9693,295 @@ def test_the_moved_upstream_module_exemption_is_earned_and_load_bearing():
 NEXT_SESSION_NOTES_SPAN = "~/lloyd-data/next-session-notes.json"
 
 
+#: The three spans #4335 deleted from `PATH_CITATION_EXEMPTIONS`, spelled once so this
+#: node, the measurement in the block above `STALE_EXEMPTION_CEILING`, and every failure
+#: message quote the same bytes the two pages cite.
+DELETED_GENERATED_SPANS = {
+    "autonomy-jobs.md": ("~/.local/state/lloyd-automod/landed_outcomes.jsonl",
+                         "~/lloyd-data/supply-chain/observed/"),
+    "data-home.md": ("$LLOYD_DATA/quarantine/tree-strays/",),
+}
+
+
+def _cited_path_of(slug: str, span: str) -> Path | None:
+    """The `Path` the extractor builds for `span` in `slug`; None if the doc stopped citing it."""
+    return next((path for s, path, _line in cited_citations(_text(slug)) if s == span), None)
+
+
+def _span_paths_on_the_box(span: str) -> list[Path]:
+    """Every place `span` can point at on THIS box — one path per root its spelling admits.
+
+    The candidate set is the span's own grammar, nothing more. `$LLOYD_DATA/x` names one
+    root and gets one path; `$HOME/x` and `~/x` name the account home and get one path; a
+    BARE relative span gets TWO, because that is what the corpus actually uses it for. The
+    docs write ROOT-relative paths and runtime paths in the same bare grammar — `data-home.md`
+    means the checkout by `desktop/` in one sentence and the data root in the page it is
+    describing, `subliminal.md`'s `sessions-background/` is the runtime directory — so asking
+    only the checkout about a bare span is exactly how a `generated:` entry whose directory
+    appeared at the production data root would stay green. Asking `ACCOUNT_HOME` about a bare
+    span, on the other hand, is a false witness: bare grammar never denotes home, and
+    `ACCOUNT_HOME/.venvs` genuinely exists, so a rail that asked it reports the four
+    `.venvs/` entries as having appeared from inside every round's worktree, which is the
+    fixture speaking and not the box.
+
+    Deliberately not `resolve_citation`, which is right for the sweep and wrong for a
+    measurement of the box: it prefers `ENV_DATA_ROOT`, and a gate round points `LLOYD_DATA`
+    at its own empty scratch root (`scripts/automod/gate.py::_child_env`) where nothing has
+    ever been written, and it re-roots a bare `.venvs/` onto `ACCOUNT_HOME/.venvs` when the
+    checkout lacks it. `DATA_ROOT` and `ACCOUNT_HOME` here are `app.data_root`'s
+    passwd-derived names (`:130`), not `$HOME`'s or `$LLOYD_DATA`'s, so they name the same
+    directories whether the reader is a chat turn or a rung in a worktree with `$HOME`
+    relocated — which is the difference between this node reporting the box and reporting the
+    fixture it happens to run in.
+    """
+    for prefix, base in (("$LLOYD_DATA/", DATA_ROOT), ("$HOME/", ACCOUNT_HOME),
+                         ("~/", ACCOUNT_HOME)):
+        if span.startswith(prefix):
+            return [base / span[len(prefix):]]
+    if span.startswith("$"):
+        return []                                    # an invented root: none exists to ask
+    return [ROOT / span, DATA_ROOT / span]
+
+
+def _span_outlived_its_absence(span: str) -> Path | None:
+    """The path `span` appeared at that makes a `generated:` excuse dead; None while alive.
+
+    Alive: the span points at nothing in any root its spelling admits, or at something under
+    `ROOT`, where `.gitignore` is the thing that keeps an untracked build product out of the
+    commit. Dead: it exists somewhere the checkout's `.gitignore` says nothing about, which is
+    the state #4182 deleted an entry for (`648b29d9`).
+    """
+    for candidate in _span_paths_on_the_box(span):
+        if not candidate.exists():
+            continue                                 # absent: all `generated:` licences
+        try:
+            candidate.relative_to(ROOT)
+        except ValueError:
+            return candidate                         # appeared where gitignore cannot speak
+    return None
+
+
+#: The remedy, spelled once so the rail's message and the probe of the rail cannot drift
+#: apart on the one thing the message exists to say.
+_GENERATED_RAIL_REMEDY = (
+    "The remedy is to DELETE the entry, not to re-spell the doc's sentence: the kind's "
+    "licence is that the path has not appeared yet, and it has. #4182's doctrine is that an "
+    "exemption whose path has appeared has to be deleted (`648b29d9`), and "
+    "`test_no_new_path_citation_exemptions_beyond_the_reviewed_bound` refuses an entry no doc "
+    "cites, so re-wording the citation to keep an excuse cannot work either.")
+
+
+def _generated_entries_that_outlived_their_absence(entries: dict) -> list[str]:
+    """Every `generated:` entry in `entries` whose span has appeared outside the checkout.
+
+    The rail's whole predicate as a function of a list, so the list it rails over is an
+    argument and not a constant: the node below calls it on `PATH_CITATION_EXEMPTIONS`, and
+    `test_the_generated_class_rail_fires_on_an_exemption_it_exists_to_catch` calls it on a
+    list holding one planted entry. That split is the only way to show that a rail whose
+    verdict is an empty list today has arms, since an empty verdict is the same bytes for a
+    working rule and for one that never fires.
+    """
+    offenders = []
+    for slug, spans in entries.items():
+        for span, reason in spans.items():
+            if not reason.startswith("generated:"):
+                continue          # other-tree:/historical: widening is the owed-check's call
+            appeared = _span_outlived_its_absence(span)
+            if appeared is not None:
+                offenders.append(f"{slug}: {span} -> {appeared}")
+    return offenders
+
+
+def test_no_generated_exemption_outlives_the_appearance_of_its_path():
+    """#4335: #4182's rule for a whole kind, so an entry cannot outlive its own excuse.
+
+    `test_no_exemption_excuses_the_next_session_notes_citation_that_resolves` above asks
+    "does this span still fail to resolve?" for the single span #4182 ruled on, and names
+    the rest as a corpus question for the owed-check. This is that question, bounded to the
+    one kind whose entire licence is absence: for every `generated:` entry, the path the
+    doc's own span points at must either exist in no root at all or lie under `ROOT`, where
+    `.gitignore` is what keeps an untracked build product out of the commit — a `generated:`
+    entry whose path has appeared somewhere else is excusing a file the sweep could have
+    resolved, which is the state #4182 deleted an entry for.
+
+    Measured on this box, over the 30 entries left after the drop: **8 resolve under the
+    checkout** (`.venvs/` in automod.md, data-home.md, guard-coverage.md and testing.md,
+    `agent-services/cert/` in infrastructure.md, mission-control.md and testing.md, and
+    `agent-services/services/tts/qwen3-tts/` in voice.md — every one git-ignored) **and 22
+    resolve nowhere** in both roots its spelling admits; none resolves outside `ROOT`. Run
+    from a round's worktree the split is 0 and 30, because all eight are untracked paths a
+    worktree by definition does not carry, and the production data root holds none of them
+    either. Both readings pass, and both are readings of the box rather than of the run,
+    because the measurement goes through `_span_paths_on_the_box` on the passwd-derived roots
+    and not through `resolve_citation`'s answer.
+
+    The 22 absent paths are box state, and the first run that creates one of them at the data
+    root turns this node red. That is the intended reading, and the remedy is below: delete
+    the entry, whose reason will by then describe a directory that exists.
+    `test_the_generated_class_rail_fires_on_an_exemption_it_exists_to_catch` is the arm that
+    shows this assert can fire, since its verdict today is an empty list.
+    """
+    offenders = _generated_entries_that_outlived_their_absence(PATH_CITATION_EXEMPTIONS)
+    for slug, spans in PATH_CITATION_EXEMPTIONS.items():
+        for span, reason in spans.items():
+            if reason.startswith("generated:"):
+                assert _cited_path_of(slug, span) is not None, (
+                    f"{slug}'s `generated:` entry on {span!r} excuses no citation the doc makes; "
+                    "delete the entry — " + _GENERATED_RAIL_REMEDY)
+    assert not offenders, (
+        f"these `generated:` exemptions excuse a path that exists outside the checkout: "
+        f"{offenders}. " + _GENERATED_RAIL_REMEDY)
+
+    # The drop this node generalizes, re-read rather than remembered: the three pages still
+    # write their sentences, the three paths really exist, and no doc re-excuses any of them.
+    for slug, spans in DELETED_GENERATED_SPANS.items():
+        page = _text(slug)
+        for span in spans:
+            assert span in page, (
+                f"{slug} stopped citing `{span}` — deleting the citation is the other way to "
+                "make an exemption look unnecessary, and #4335 deletes the entry, not the "
+                "sentence that needed it")
+            dead = _span_outlived_its_absence(span)
+            assert dead is not None, (
+                f"{slug}'s `{span}` points at nothing on this box — the predicate that condemns "
+                "an exemption now says the deleted entries were right to go, and if the path "
+                "vanished again that is the case the #4335 owed-check rules on; until it rules "
+                "the answer is a re-admitted `generated:` entry with a dated reason, not a "
+                "re-spelled citation")
+    dropped = {sp for spans in DELETED_GENERATED_SPANS.values() for sp in spans}
+    re_excused = [(s, sp) for s, spans in PATH_CITATION_EXEMPTIONS.items()
+                  for sp in spans if sp in dropped]
+    assert re_excused == [], (
+        f"{re_excused} excuses one of the three dropped spans again under some doc key; each "
+        "resolves on this box, so that entry hides nothing (see #4182 and the block above "
+        "the ceiling)")
+
+
+def test_the_generated_class_rail_fires_on_an_exemption_it_exists_to_catch(tmp_path,
+                                                                           monkeypatch):
+    """A rail whose verdict today is `[]` is proved only by an input that makes it non-empty.
+
+    Clause 5 asks for the class rail; #4182's own node came with a planted control for
+    exactly the reason worth repeating here — a check over the live corpus has one observable
+    output, and that output is the same for a rule that works and a rule that never fires. So
+    this node drives the function the rail calls and the node that calls it. No arm below can
+    be reddened by box state: every path one needs is built in `tmp_path` or is tracked code,
+    and nothing is written into `~/lloyd`, the data root, or the account's home.
+
+      (a) the real list offends no one — the rail's green reading, stated as its own arm;
+      (b) two spans the predicate must PASS, so a predicate that condemns everything is
+          ruled out: a bare span sitting under the checkout (`.gitignore`'s business) and a
+          spelled `$LLOYD_DATA/` span that exists in no root;
+      (c) the grammar boundary itself, from a home the node builds: one directory read under
+          both spellings must be condemned as `~/.venvs/` and absent as `.venvs/`. That is the
+          only way to pin "home is not a root a bare span may denote" without asserting that
+          some real home does or does not hold a `.venvs`;
+      (d) the three spans #4335 actually deleted, which the predicate must FAIL — the control
+          that proves the new class rule is the same rule the single-span node applied, since
+          those three entries are precisely what that node would have named;
+      (e) one planted `generated:` entry in a doc that exists in no corpus, its path created
+          under a patched `ACCOUNT_HOME`, named exactly once with the path in it;
+      (f) the rail's own failure text, read out of the raised `AssertionError` after the
+          quarantine entry is re-admitted under the doc that really cites it. Clause 5 asks for
+          a message naming deletion as the remedy, and a message is evidence only when it is the
+          one the node actually raises.
+    """
+    assert _generated_entries_that_outlived_their_absence(PATH_CITATION_EXEMPTIONS) == []
+    assert _span_outlived_its_absence("tests/") is None, (
+        "a path under the checkout is `.gitignore`'s business, not an appeared path; the "
+        "rail would go red on every round for the eight untracked entries it tolerates")
+    assert _span_outlived_its_absence("$LLOYD_DATA/no-such-dir-4335-xyzzy/") is None, (
+        "an absent path is what `generated:` licenses; the rail would condemn every entry "
+        "in the kind, including the 22 that are legitimately absent")
+    # The one divergence from `resolve_citation` that this rail exists to refuse, and it is
+    # proved from a home the node builds, never from the account's. A reader who added
+    # ACCOUNT_HOME to the roots a BARE span may denote would see the four `.venvs/` entries
+    # "appear" from inside every round's worktree — `~/.venvs` is a real venv that no bare span
+    # in the corpus points at — so the pair below asks the same directory under both grammars:
+    # spelled at the home it must condemn, bare and denoting the checkout or the data root it
+    # must find absent. Neither half can be satisfied by anything on the box, so neither
+    # reddens because a home directory came or went.
+    grammar_home = tmp_path / "grammar-home"
+    (grammar_home / ".venvs").mkdir(parents=True)
+    with monkeypatch.context() as narrower:
+        narrower.setattr(sys.modules[__name__], "ACCOUNT_HOME", grammar_home)
+        assert _span_outlived_its_absence(".venvs/") is None, (
+            "a bare `.venvs/` was read as an appeared path while a home holding a .venvs was "
+            "patched in, which means the account home became a root a bare span may denote — the "
+            "rail would then go red on all four venv entries in every worktree, reporting the "
+            "run's tree instead of the box")
+        assert _span_outlived_its_absence("~/.venvs/") is not None, (
+            "a span spelled at the home was NOT condemned while the home held it, so the "
+            "spelling half of the grammar stopped being read and the three spans #4335 deleted "
+            "would be read as alive too")
+
+    for slug, spans in DELETED_GENERATED_SPANS.items():
+        for span in spans:
+            assert _span_outlived_its_absence(span) is not None, (
+                f"{slug}'s deleted span `{span}` is now read as absent or in-checkout, so the "
+                "class rail no longer condemns the three entries #4335 deleted — it has stopped "
+                "being the generalization of #4182's node and must be fixed before the kind is "
+                "railed at all")
+
+    planted_home = tmp_path / "home"
+    (planted_home / "lloyd-4335-planted").mkdir(parents=True)
+    monkeypatch.setattr(sys.modules[__name__], "ACCOUNT_HOME", planted_home)
+    planted = {"planted-doc.md": {"~/lloyd-4335-planted/": "generated: planted by this node"}}
+    offenders = _generated_entries_that_outlived_their_absence(planted)
+    assert offenders == [
+        f"planted-doc.md: ~/lloyd-4335-planted/ -> {planted_home / 'lloyd-4335-planted'}"], (
+        f"the rail's predicate did not name the one planted entry built to offend it: "
+        f"{offenders}. A class rail that cannot name a planted offender cannot be trusted to "
+        "name a real one, and its empty verdict on the live list means nothing")
+    # Clause 5's last demand is about the MESSAGE, so it is proved by reading the message the
+    # rail raises rather than by comparing a constant to its own text. The regression planted
+    # here is #4335's own reversal: the quarantine entry re-admitted under the doc that really
+    # cites it, so the `generated:` entry is one the doc supports (the anti-growth half stays
+    # satisfied) and only the predicate can catch it. Everything the reader needs to act
+    # correctly has to be in the raised text: the remedy is deletion, re-spelling the doc is
+    # named as the wrong answer, and the offending span is in it.
+    quarantine_span = "$LLOYD_DATA/quarantine/tree-strays/"
+    with monkeypatch.context() as re_admitted:
+        re_admitted.setattr(
+            sys.modules[__name__], "PATH_CITATION_EXEMPTIONS",
+            {"data-home.md": {quarantine_span: "generated: re-admitted by this node"}})
+        with pytest.raises(AssertionError) as raised:
+            test_no_generated_exemption_outlives_the_appearance_of_its_path()
+    message = str(raised.value)
+    assert "DELETE the entry" in message and "not to re-spell the doc" in message, (
+        f"the rail's failure text no longer names deletion as the remedy and re-spelling as the "
+        f"wrong answer; a reader handed only this would fix the doc instead of the list: "
+        f"{message[:400]}")
+    assert quarantine_span in message and "data-home.md" in message, (
+        f"the rail condemned the re-admitted entry without naming the doc and span that have to "
+        f"be edited, which is the difference between a red node and an hour of reading: "
+        f"{message[:400]}")
+
+
+def test_the_three_dropped_generated_exemptions_leave_both_docs_populated():
+    """The deletion was three entries out of two docs, not two docs out of the list.
+
+    Both keys had other business: `autonomy-jobs.md` carries eleven more spans and
+    `data-home.md` three, so removing `~/.local/state/lloyd-automod/landed_outcomes.jsonl`
+    and `~/lloyd-data/supply-chain/observed/` from the first and
+    `$LLOYD_DATA/quarantine/tree-strays/` from the second cannot empty either. An emptied
+    key is what the validator tells a clearer to drop, and a doc whose exemptions all
+    vanished would silently stop being swept by the entries it still needs.
+    """
+    for slug, spans in DELETED_GENERATED_SPANS.items():
+        assert slug in PATH_CITATION_EXEMPTIONS, f"{slug}'s key was dropped with its entries"
+        assert PATH_CITATION_EXEMPTIONS[slug], f"{slug}'s key is now empty"
+        for span in spans:
+            assert span not in PATH_CITATION_EXEMPTIONS[slug], (
+                f"{slug} still excuses `{span}`, which resolves on this box")
+    assert len(PATH_CITATION_EXEMPTIONS["autonomy-jobs.md"]) == 11, (
+        "autonomy-jobs.md holds 11 entries after #4335's two deletions (13 before); the "
+        "count is what tells the next reader whether a third entry went with them")
+    assert len(PATH_CITATION_EXEMPTIONS["data-home.md"]) == 3, (
+        "data-home.md holds 3 entries after #4335's one deletion (4 before): `.venvs/`, "
+        "`desktop/` and `qmd/`")
+
+
 def test_no_exemption_excuses_the_next_session_notes_citation_that_resolves():
     """#4182: the one exemption on `ambient-context-injection.md` excused nothing.
 
@@ -9712,10 +10036,11 @@ def test_the_dropped_exemption_stays_dropped_with_home_and_data_root_emptied(tmp
     `gate._child_env` points `$HOME` at the round's symlink farm and `$LLOYD_DATA` at
     the round's empty data root, and `worktree.py::HOME_LINK_SKIP` carries neither
     `lloyd` nor `lloyd-data` into that farm — which is exactly why `_resolve` expands
-    `~/` to the passwd entry instead of `Path.home()`. This node re-runs the two nodes
-    #4182 depends on, the doc-wide citation sweep for `ambient-context-injection.md`
-    and the ceiling ruling that recomputes the exemption figures, in a child pytest
-    whose `$HOME` and `$LLOYD_DATA` are empty directories. A future `_resolve` that
+    `~/` to the passwd entry instead of `Path.home()`. This node re-runs the nodes that
+    depend on it — the doc-wide citation sweep for `ambient-context-injection.md` and the
+    ceiling ruling that recomputes the exemption figures, and since #4335 the seven others
+    spelled in the body — in a child pytest whose `$HOME` and `$LLOYD_DATA` are empty
+    directories. A future `_resolve` that
     reaches for `$HOME` therefore reddens a node instead of quietly re-earning an
     exemption six weeks later.
 
@@ -9724,6 +10049,22 @@ def test_the_dropped_exemption_stays_dropped_with_home_and_data_root_emptied(tmp
     the module has already forgotten. `addopts` is emptied and no `-n` is passed, so the
     child stays one process even under an xdist parent, and
     `-p no:cacheprovider` keeps it from writing into this tree.
+
+    #4335 widens the set from #4182's two nodes to the nine that decide this item, because
+    two of #4335's claims are about the gate's environment and a worktree run only proves
+    them by accident. The class rail and its probe deliberately measure the PRODUCTION
+    roots off the passwd entry, precisely so an exemption cannot be re-earned by running in
+    a tree that lacks the untracked paths — which makes "this rail is green where the gate
+    runs it" a claim about a run, and a run sitting in a worktree says nothing about the
+    gate. The only honest way to pin it is to build the gate's environment here: the
+    `HOME`/`LLOYD_DATA` pair `gate._child_env` moves together, and the nine nodes in a
+    child. The sweeps for `autonomy-jobs.md` and `data-home.md` are in the set because
+    those are the two pages whose exemptions #4335 deleted, and clause 2's verdict that
+    neither doc has an unexplained citation is a claim about the sweep under these roots.
+    The rest pin that the deletion is load-bearing rather than cosmetic: the ceiling
+    recomputes, the quarantine span stays unexcused, both docs stay populated, the #4182
+    span stays dropped, and the rail plus its probe still agree about the three real spans
+    with `$HOME` pointing at an empty directory.
     """
     empty_home, empty_data = tmp_path / "home", tmp_path / "data"
     empty_home.mkdir()
@@ -9732,19 +10073,28 @@ def test_the_dropped_exemption_stays_dropped_with_home_and_data_root_emptied(tmp
            "PYTHONDONTWRITEBYTECODE": "1"}
     env.pop("PYTEST_CURRENT_TEST", None)
     name = "tests/test_architecture_coverage_doc_claims.py"
+    sweep = f"{name}::test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree"
     proc = subprocess.run(
         [sys.executable, "-m", "pytest", "-o", "addopts=", "-p", "no:cacheprovider",
          "-q", "--no-header",
-         f"{name}::test_every_path_an_architecture_doc_cites_resolves_in_the"
-         f"_working_tree[ambient-context-injection.md]",
-         f"{name}::test_the_ceiling_s_ruling_is_recorded_in_its_own_comment"],
+         f"{sweep}[ambient-context-injection.md]",
+         f"{sweep}[autonomy-jobs.md]",
+         f"{sweep}[data-home.md]",
+         f"{name}::test_the_ceiling_s_ruling_is_recorded_in_its_own_comment",
+         f"{name}::test_the_quarantine_citation_needs_no_exemption_and_has_none",
+         f"{name}::test_the_three_dropped_generated_exemptions_leave_both_docs_populated",
+         f"{name}::test_no_exemption_excuses_the_next_session_notes_citation_that_resolves",
+         f"{name}::test_no_generated_exemption_outlives_the_appearance_of_its_path",
+         f"{name}::test_the_generated_class_rail_fires_on_an_exemption_it_exists_to_catch"],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=600)
     assert proc.returncode == 0, (
         f"exit {proc.returncode} with $HOME and $LLOYD_DATA emptied at "
-        f"{empty_home} / {empty_data} — the tilde citation stopped resolving through "
-        f"ACCOUNT_HOME:\n{proc.stdout[-3000:]}")
-    assert "2 passed" in proc.stdout, (
-        f"expected the citation sweep and the ceiling ruling to run and pass; got "
+        f"{empty_home} / {empty_data} — either the tilde citation stopped resolving through "
+        f"ACCOUNT_HOME, or a #4335 node measured the fixture instead of the box:"
+        f"\n{proc.stdout[-3000:]}")
+    assert "9 passed" in proc.stdout, (
+        f"expected the three citation sweeps, the ceiling ruling, the quarantine ruling, the "
+        f"population node, the #4182 node and both class-rail nodes to run and pass; got "
         f"{proc.stdout[-1500:]}")
 
 
