@@ -3622,3 +3622,183 @@ def test_an_unlatched_clear_asks_the_pool_nothing(tmp_path, monkeypatch, capsys)
     out = capsys.readouterr().out
     assert "was not set" in out, out
     assert "still held" not in out and "unknown:" not in out, out
+
+
+# --------------------------------------------------------------------------- #
+# #4454 — an abandoned trip, and a clear that names its own effects, must leave
+# a row a later session can read, not only a line in the journal.
+# --------------------------------------------------------------------------- #
+
+def _fixture_ledger_rows(path: Path, event: "str | None" = None) -> list[dict]:
+    """Rows in a fixture automod ledger, in append order, optionally only one event.
+
+    The name filter is not tidiness. Staging the halt that the clear is meant to report
+    books a real `promotion_halt_set` row on the same file, so a whole-file equality
+    assertion there would be reading my own staging, not the change.
+    """
+    if not path.exists():
+        return []
+    rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+    return rows if event is None else [r for r in rows if r.get("event") == event]
+
+
+def test_an_abandoned_data_trip_leaves_one_durable_row_and_nothing_else(tmp_path,
+                                                                       monkeypatch,
+                                                                       capsys):
+    """Clause 1: the abandonment the journal keeps is also a ledger row.
+
+    The node above this one pins that the cancelled trip takes NOTHING. This pins that it
+    still SAYS SO somewhere a later session can read: `log()` is a bare
+    `print(..., flush=True)` into the unit's stdout, so "did the guard fire?" was only ever
+    answerable from `journalctl --user -u lloyd-guardian`, inside a window the journal's
+    SIZE decides — measured 2026-11-20, 0 `TRIPWIRE abandoned` lines survived back to
+    2026-10-16 (~5.4 weeks) with every retention key in /etc/systemd/journald.conf still
+    commented out, and #4368's owed entry asks exactly that question of a trip months old.
+
+    One row, and it is named `data_trip_abandoned` rather than `data_tripwire` so that the
+    trip-row assertion above keeps its meaning; no new effect is taken, which is what the
+    other three assertions here are for.
+    """
+    g, root = _race_guardian(tmp_path)
+    state = tmp_path / "state"
+    assert g.check_data() is None
+    shutil.rmtree(root / "tmp")
+    monkeypatch.setattr(g.data, "tick", _clear_mid_walk(g, root, state))
+
+    assert g.check_data() is None
+
+    events = [e["event"] for e in _ledger_rows(g)]
+    assert events == ["data_trip_abandoned"], (
+        f"the abandonment is exactly one row, and no halt or trip row beside it: {events}")
+    row = _ledger_rows(g)[0]
+    assert row["watch"] == "data", f"which watch gave up: {row}"
+    assert row["state_file"] == str(g.data.state_path), (
+        f"the row must name the state file the clear replaced, not just that a clear "
+        f"happened: {row['state_file']!r} vs {str(g.data.state_path)!r}")
+    assert "clear" in row["reason"] and "tmp" in row["reason"], (
+        f"the reason must say a clear cancelled it and name the folder it stopped "
+        f"latching on: {row['reason']!r}")
+    assert not (state / "data-tripped.json").exists(), "no marker"
+    assert not g.state.halted.exists(), "no halt"
+    assert g._paused == [] and g._alerts == [], "no pause, no alert"
+    assert "abandoned" in capsys.readouterr().out, "the journal line stays too"
+
+
+def test_a_clear_of_a_down_marker_books_the_effects_it_prints(tmp_path, monkeypatch,
+                                                              capsys):
+    """Clause 3: the clear's readout is booked, not only printed.
+
+    The readout itself is #4368's, and it was stdout-only: an operator who ran `clear` and
+    then closed the terminal had no record of whether the halt and the pool pause its trip
+    left standing were ever lifted, which is the same hole #4255 closed for the halt's own
+    take. The fields and the printed lines are read off ONE measurement (`held_effects`), so
+    the row cannot report effects the human was never told about, and the human cannot be
+    told about effects the row denies.
+
+    The third leg matters as much as the first: an unreadable pool must book as unreadable.
+    A clear that wrote `{"paused": false}` because the backend did not answer would put a
+    false "nothing is held" into the durable record, which is worse than the silence.
+    """
+    import gstate
+
+    g, root = _race_guardian(tmp_path)
+    w = _watch(root, tmp_path)
+    w.trip("top-level folder 'tmp' (77 files) vanished", w.history[-1], {})
+    g.state.set_halted("data tripwire: top-level folder 'tmp' (77 files) vanished",
+                       by="datawatch")
+    monkeypatch.setattr(D.P, "AUTOMOD_STATE", tmp_path / "automod")
+    monkeypatch.setattr(D, "DataWatch", lambda: w)
+    monkeypatch.setattr(
+        D, "pool_pause_state",
+        lambda url=None, timeout=2.0: {"paused": True, "paused_by": "guardian",
+                                       "paused_since": "2026-11-19T15:43:08Z"})
+
+    assert D.main(["datawatch.py", "clear"]) == 0
+    out = capsys.readouterr().out
+
+    ledger = gstate.AutomodState(tmp_path / "automod").ledger
+    rows = _fixture_ledger_rows(ledger, "data_trip_clear")
+    assert len(rows) == 1, f"one clear, exactly one row: {_fixture_ledger_rows(ledger)}"
+    row = rows[0]
+    assert row["watch"] == "data", row
+    assert row["halt"] == g.state.halted.read_text(encoding="utf-8").strip(), (
+        f"the halt in the row must be the halt in the line it printed: {row['halt']!r} "
+        f"vs {out!r}")
+    assert row["halt"] in out and str(g.state.halted) in out, (
+        "one measurement, two renderings — the print and the row cannot disagree")
+    assert row["halt_flag"] == str(g.state.halted), row
+    assert row["pool"] == {"paused": True, "paused_by": "guardian",
+                           "paused_since": "2026-11-19T15:43:08Z"}, row
+    assert "2026-11-19T15:43:08Z" in out, "the pause it booked is the pause it showed"
+
+    # The halt lifted and the pool unreadable: the row for that clear books neither as
+    # standing, and names the failure instead.
+    assert g.state.clear_halted(by="test") is True
+    w.trip("top-level folder 'logs' (11 files) vanished", w.history[-1], {})
+
+    def dead(url=None, timeout=2.0):
+        raise OSError("backend down")
+
+    monkeypatch.setattr(D, "pool_pause_state", dead)
+    assert D.main(["datawatch.py", "clear"]) == 0
+    out2 = capsys.readouterr().out
+    rows2 = _fixture_ledger_rows(ledger, "data_trip_clear")
+    assert len(rows2) == 2, f"the second clear books its own row: {rows2}"
+    second = rows2[1]
+    assert second["halt"] == "", f"a lifted halt must not book as standing: {second}"
+    assert "pool" not in second and "backend down" in second.get("pool_error", ""), (
+        f"an unreadable pool books as unreadable, never as 'not held': {second}")
+    assert "unknown:" in out2, out2
+
+    # An un-latched clear — the nervous-operator invocation — books nothing and asks the
+    # pool nothing, which is the gate `existed` already enforced for the print. The instance
+    # comes off `type(w)` rather than `_watch(...)`, because `_watch` calls `D.DataWatch` and
+    # that name is patched above to hand `main` the latched watch.
+    w2 = type(w)(root=str(root), state_dir=tmp_path / "state")
+    assert w2.marker.exists() is False, "the second clear lifted it: this one has nothing to do"
+    monkeypatch.setattr(D, "DataWatch", lambda: w2)
+
+    def explode(url=None, timeout=2.0):
+        raise AssertionError("an un-latched clear must not ask the pool anything")
+
+    monkeypatch.setattr(D, "pool_pause_state", explode)
+    assert D.main(["datawatch.py", "clear"]) == 0
+    assert "was not set" in capsys.readouterr().out
+    assert len(_fixture_ledger_rows(ledger, "data_trip_clear")) == 2, (
+        "a clear that cleared nothing books nothing")
+
+
+def test_a_booked_trip_row_is_readable_by_the_promoter_s_merged_ledger(tmp_path,
+                                                                      monkeypatch,
+                                                                      capsys):
+    """Clause 4: the row goes to the automod ledger, not to a guardian side file.
+
+    The owed read this whole item exists for is `scripts.automod.state.ledger_rows_merged`
+    over `promotions.jsonl` plus the monthly `promotions-archive-*.jsonl.gz` — a reader a
+    person or an owed-check pass already has. Every other clause here is satisfied by a JSONL
+    anywhere the code writes, so this is the node that says WHICH file: the same path
+    `gstate.AutomodState(...).ledger` names, seen through the promoter's own reader, with no
+    second ledger beside it to be missed.
+    """
+    import gstate
+    from scripts.automod import state as S
+
+    g, root = _race_guardian(tmp_path)
+    state = tmp_path / "state"
+    assert g.check_data() is None
+    shutil.rmtree(root / "tmp")
+    monkeypatch.setattr(g.data, "tick", _clear_mid_walk(g, root, state))
+    assert g.check_data() is None
+
+    assert g.state.ledger.name == "promotions.jsonl", g.state.ledger
+    assert g.state.ledger == gstate.AutomodState(tmp_path / "automod").ledger, (
+        "the guardian's ledger attribute and the promoter's file must be one path")
+    merged = S.ledger_rows_merged(g.state.ledger)
+    assert [r["event"] for r in merged] == ["data_trip_abandoned"], (
+        f"the merged read must see the abandonment: {merged}")
+    assert merged[0]["state_file"] == str(g.data.state_path), merged[0]
+    side = sorted(p.name for p in (tmp_path / "automod").iterdir()
+                  if p.suffix == ".jsonl" and p.name != "promotions.jsonl")
+    assert side == [], (
+        f"a second JSONL beside the ledger is a file `ledger_rows_merged` never opens: {side}")

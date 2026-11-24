@@ -172,8 +172,19 @@ class TripSupersededByClear(RuntimeError):
     its own clear had just cancelled; reading a failed write as an abandoned one would
     swallow a real wipe. Each condition keeps its own exception type and its own log
     line, so the journal says which of the two happened.
+
+    `state_file` is the path of the baseline file `clear` overwrote — `data_watch.json` in
+    the data watch's state dir, `vault_watch.json` in the vault's (#4454). It is carried for
+    the two callers that catch this from OUTSIDE the watch and book the abandonment durably,
+    so their row names a file a later reader can open instead of a bare name they would have
+    to locate. Not the marker: the marker is what `clear` unlinks, and it is gone by the time
+    this is raised. The reason stays `args[0]`, which is how both callers read it — and the
+    reason quotes the bare name, because the sentence is for the journal.
     """
-    pass
+    def __init__(self, reason: str, state_file: "str | None" = None):
+        super().__init__(reason)
+        self.reason = reason
+        self.state_file = state_file
 
 
 @dataclass
@@ -738,7 +749,10 @@ class VaultWatch:
         if self._rebaselined_since_judging():
             raise TripSupersededByClear(
                 f"a clear replaced the {self.what} baseline this trip judged "
-                f"({self.state_file}); abandoning instead of re-latching on {reason}")
+                f"({self.state_file}); abandoning instead of re-latching on {reason}",
+                # The same fact as a field, resolved: the caller that books the abandonment
+                # (#4454) must not parse this sentence to record which file moved.
+                state_file=str(self.state_path))
         self.state_dir.mkdir(parents=True, exist_ok=True)
         before = self.history[-1] if self.history else None
         body = {

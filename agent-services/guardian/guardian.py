@@ -1992,6 +1992,19 @@ class Guardian:
             # `OSError` below is NOT this: an unwritable marker never once meant the
             # loss was unreal, so that branch logs and carries on halting.
             log(f"VAULT TRIPWIRE abandoned: {exc}")
+            # #4454: the line above goes to stdout, which systemd hands to journald, and the
+            # journal's retention is size-driven — measured 2026-11-20, nothing older than
+            # 2026-10-16 survived, with every retention key in journald.conf commented out.
+            # So "did the guard fire?" was answerable only inside that window, which is how
+            # #4368's owed entry is still un-settled months on. One row on the automod ledger
+            # — the file `scripts/automod/state.py:ledger_rows_merged` reads with its monthly
+            # rotations — and the effect taken stays exactly nothing. It is named
+            # `vault_trip_abandoned`, not `vault_tripwire`, so the trip-row readers keep their
+            # meaning: a row of THIS name is the guard declining to act, and always will be.
+            gstate.append_event(self.state.ledger, {
+                "event": "vault_trip_abandoned", "reason": str(exc),
+                "state_file": getattr(exc, "state_file", None),
+                "watch": self.vault.what})
             return
         except OSError as exc:
             log(f"could not write vault marker: {exc}")
@@ -2797,6 +2810,15 @@ class Guardian:
             # `data_tripwire` ledger row, no critical alert. An `OSError` below is a
             # different condition and still halts — see `vaultwatch.trip`.
             log(f"DATA TRIPWIRE abandoned: {exc}")
+            # #4454, the data twin of the vault arm above: same one row, same nothing-else.
+            # The reason carries the folder the watch stopped latching on and the baseline
+            # file the clear replaced, so the row reads on its own — `what` is the watch's own
+            # name rather than a string typed twice, which is why it cannot drift from the
+            # `data_tripwire` rows the same watch books a tick later.
+            gstate.append_event(self.state.ledger, {
+                "event": "data_trip_abandoned", "reason": str(exc),
+                "state_file": getattr(exc, "state_file", None),
+                "watch": self.data.what})
             return
         except OSError as exc:
             log(f"could not write data marker: {exc}")

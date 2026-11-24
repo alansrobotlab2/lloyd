@@ -2218,6 +2218,61 @@ def pool_pause_state(url: "str | None" = None, timeout: float = 2.0) -> dict:
         return _json.loads(resp.read(65536).decode("utf-8", "replace"))
 
 
+def held_effects(backend_health_url: "str | None" = None,
+                 automod_state: "Path | str | None" = None,
+                 pool_state: "dict | None" = None,
+                 timeout: float = 2.0) -> "tuple[list[str], dict]":
+    """Measure what a trip left standing, ONCE, as (lines for the human, fields for the row).
+
+    #4454 split this out of `still_held` so the clear's readout can be booked as well as
+    printed. Both renderings come out of one measurement on purpose: a `data_trip_clear` row
+    that measured a second time after the print could record a halt or a pause the human
+    watching the same command had just been told is not there, and an "all clear" in the
+    durable record is the false reassurance this readout exists to avoid.
+
+    The fields carry what was MEASURED, not what was standing: `halt` is the flag's contents
+    or the empty string, `pool` is present only if the backend answered, and `pool_error` only
+    when it did not. An unreadable pool never books as `{"paused": false}`.
+    """
+    lines: list[str] = []
+    effects: dict = {}
+
+    flag = promotions_halt_flag(automod_state)
+    try:
+        held = flag.read_text(encoding="utf-8").strip()
+    except OSError:
+        held = ""
+    effects["halt"] = held
+    effects["halt_flag"] = str(flag)
+    if held:
+        lines.append(f"still held: promotions are halted — {flag} says {held!r}")
+        lines.append('  lift: cd ~/lloyd && /usr/bin/python3 -m scripts.automod.round '
+                     'recover --by "<who is lifting it>"')
+
+    if pool_state is None:
+        try:
+            pool_state = pool_pause_state(P.workers_pause_url(backend_health_url),
+                                         timeout=timeout)
+        except Exception as exc:  # noqa: BLE001 — an unreachable pool is a reading, not a crash
+            effects["pool_error"] = str(exc)
+            lines.append("unknown: the worker pool's pause state could not be read "
+                         f"from {P.workers_pause_url(backend_health_url)} ({exc}); if "
+                         "the trip paused it, resume with: curl -X POST "
+                         f"{P.workers_pause_url(backend_health_url)} "
+                         "-H 'content-type: application/json' "
+                         "-d '{\"paused\": false}'")
+            return lines, effects
+    effects["pool"] = dict(pool_state)
+    if pool_state.get("paused"):
+        who = str(pool_state.get("paused_by") or "").strip()
+        since = str(pool_state.get("paused_since") or "").strip()
+        detail = "".join([f" by {who}" if who else "", f" since {since}" if since else ""])
+        lines.append(f"still held: the worker pool is paused{detail}")
+        lines.append(f"  lift: curl -X POST {P.workers_pause_url(backend_health_url)} "
+                     "-H 'content-type: application/json' -d '{\"paused\": false}'")
+    return lines, effects
+
+
 def still_held(backend_health_url: "str | None" = None,
                automod_state: "Path | str | None" = None,
                pool_state: "dict | None" = None,
@@ -2230,39 +2285,53 @@ def still_held(backend_health_url: "str | None" = None,
     NOT standing prints nothing — the readout is the list of what is left to do, not a
     status page — and an effect that could not be measured prints `unknown:`, because
     the reassuring reading of a dead backend is "nothing is held".
+
+    The measuring and the field-building are `held_effects`' now, and this stays the
+    human-facing rendering — every caller that only prints goes through it, and the one that
+    books (`main`'s `clear`) takes both halves of the same call, so the printed lines and the
+    booked row cannot disagree.
     """
-    lines: list[str] = []
+    return held_effects(backend_health_url, automod_state, pool_state, timeout)[0]
 
-    flag = promotions_halt_flag(automod_state)
+
+def book_clear(watch: "V.VaultWatch", effects: dict) -> None:
+    """Book the readout `clear` just printed, on the automod ledger (#4454).
+
+    Same reason the abandonment rows exist: this readout was stdout only, so whether the halt
+    and the pool pause a trip took were still standing an hour later — or ever lifted — was a
+    journald question, and the journal here keeps ~5 weeks at the journal's SIZE whim. The
+    file is `policy.AUTOMOD_STATE`/`promotions.jsonl`, `gstate.AutomodState(...).ledger` and
+    `scripts/automod/state.py`'s `LEDGER_PATH` at once, which is the file
+    `scripts.automod.state.ledger_rows_merged` reads with its monthly rotations: no
+    guardian-private side file that a reader would have to be told about.
+
+    `event` is a NEW name, not `data_trip_clear` reused from the trip side, because every
+    reader of this ledger filters on its own tuple and none whitelists — a name that meant
+    "the halt was lifted" would be read as a lift that never happened. It is a CLEAR's row:
+    the effects it names are still standing when it is written, and the lift's own row is
+    `clear_halted`'s `promotion_halt_cleared`.
+
+    The write is guarded, and the guard is not silence: a ledger that cannot be written must
+    not fail a command whose whole job is to tell a human what to do next, but it says so on
+    the same stdout the readout used, so the missing row is visible at the moment it happens
+    rather than inferred months later from its absence.
+    """
+    import gstate
+
+    row = {"event": "data_trip_clear", "watch": watch.what,
+           "marker": str(watch.marker)}
+    halt = str(effects.get("halt") or "")
+    row["halt"] = halt
+    if halt:
+        row["halt_flag"] = effects.get("halt_flag", "")
+    if effects.get("pool") is not None:
+        row["pool"] = effects["pool"]
+    if effects.get("pool_error"):
+        row["pool_error"] = effects["pool_error"]
     try:
-        held = flag.read_text(encoding="utf-8").strip()
-    except OSError:
-        held = ""
-    if held:
-        lines.append(f"still held: promotions are halted — {flag} says {held!r}")
-        lines.append('  lift: cd ~/lloyd && /usr/bin/python3 -m scripts.automod.round '
-                     'recover --by "<who is lifting it>"')
-
-    if pool_state is None:
-        try:
-            pool_state = pool_pause_state(P.workers_pause_url(backend_health_url),
-                                         timeout=timeout)
-        except Exception as exc:  # noqa: BLE001 — an unreachable pool is a reading, not a crash
-            lines.append("unknown: the worker pool's pause state could not be read "
-                         f"from {P.workers_pause_url(backend_health_url)} ({exc}); if "
-                         "the trip paused it, resume with: curl -X POST "
-                         f"{P.workers_pause_url(backend_health_url)} "
-                         "-H 'content-type: application/json' "
-                         "-d '{\"paused\": false}'")
-            return lines
-    if pool_state.get("paused"):
-        who = str(pool_state.get("paused_by") or "").strip()
-        since = str(pool_state.get("paused_since") or "").strip()
-        detail = "".join([f" by {who}" if who else "", f" since {since}" if since else ""])
-        lines.append(f"still held: the worker pool is paused{detail}")
-        lines.append(f"  lift: curl -X POST {P.workers_pause_url(backend_health_url)} "
-                     "-H 'content-type: application/json' -d '{\"paused\": false}'")
-    return lines
+        gstate.append_event(gstate.AutomodState(P.AUTOMOD_STATE).ledger, row)
+    except OSError as exc:
+        print(f"(could not book this readout to the automod ledger: {exc})")
 
 
 def main(argv: list[str]) -> int:
@@ -2285,9 +2354,11 @@ def main(argv: list[str]) -> int:
             # 2026-11-19 the halt and the pool pause this trip had taken both stood
             # until an attended session lifted them by hand 58 s later. Read-only, and
             # only when a latch actually came down — an un-latched `clear` costs no
-            # HTTP call.
-            for line in still_held():
+            # HTTP call and, since #4454, books no row either.
+            lines, effects = held_effects()
+            for line in lines:
                 print(line)
+            book_clear(w, effects)
         return 0
     if cmd == "snapshot-gate":
         ok, why = snapshot_gate()

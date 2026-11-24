@@ -1303,3 +1303,70 @@ def test_a_vault_clear_landing_between_the_walk_and_the_latch_abandons_the_trip(
     out = capsys.readouterr().out
     assert "VAULT TRIPWIRE abandoned" in out, out
     assert "clear" in out, f"the log must blame the clear, not stay silent: {out}"
+
+
+def _ledger_rows(g) -> list[dict]:
+    """What the guardian booked, read back off the fixture automod ledger.
+
+    This file had no such reader until #4454: the abandonment node above asserts the sync,
+    the pause, the halt, the alerts and the stdout line, and never the ledger — so nothing
+    pinned that a vault trip the clear cancelled books no `vault_tripwire` row, the property
+    `tests/test_guardian_datawatch.py:3394` has pinned for the data twin since #4368. `g.state`
+    is a real `gstate.AutomodState` over the fixture state dir (the `guardian` fixture passes
+    `state=tmp_path/'state'`), so this reads a file the code under test really writes.
+    """
+    if not g.state.ledger.exists():
+        return []
+    return [json.loads(line) for line in
+            g.state.ledger.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def test_an_abandoned_vault_trip_leaves_one_durable_row_and_nothing_else(
+        guardian, monkeypatch, capsys):
+    """#4454 clause 2: the vault half of the abandoned trip leaves a row too, and still
+    takes nothing.
+
+    The data twin's row is the same code path in `guardian.check_data`, and the reviewer of
+    a diff that added only that half would rightly ask what proves the vault arm. This is
+    the same race at the vault site — a `vaultwatch.py clear` re-baselining between the walk
+    and the latch — with the ledger asserted in both directions: exactly one
+    `vault_tripwire`-free row for the abandonment, and no halt, no sync stop, no pause, no
+    alert beside it. The name is `vault_trip_abandoned`, so a reader of the ledger can tell
+    which watch gave up without opening a second file, and the row is written by
+    `self.state.append_event`'s target — `g.state.ledger`, the automod ledger — which
+    `tests/test_guardian_datawatch.py`'s merged-ledger node proves the promoter can read.
+    """
+    g, vault, acted = guardian
+    g.check_vault()                                # arms the baseline
+    assert g.state.ledger.exists() is False or _ledger_rows(g) == [], "arming books nothing"
+    shutil.rmtree(vault / "backlog")
+
+    real_tick = g.vault.tick
+
+    def tick_then_clear():
+        why, snap = real_tick()
+        VW.VaultWatch(str(vault), g.vault.state_dir).clear()
+        return why, snap
+
+    monkeypatch.setattr(g.vault, "tick", tick_then_clear)
+    g.check_vault()
+
+    events = [e["event"] for e in _ledger_rows(g)]
+    assert events == ["vault_trip_abandoned"], (
+        f"the abandoned vault trip is exactly one row, with no trip or halt row beside "
+        f"it: {events}")
+    row = _ledger_rows(g)[0]
+    assert row["watch"] == "vault", f"which watch gave up: {row}"
+    assert row["state_file"] == str(g.vault.state_path), (
+        f"the row must name the baseline file the clear replaced: {row['state_file']!r} vs "
+        f"{str(g.vault.state_path)!r}")
+    assert "clear" in row["reason"] and "backlog" in row["reason"], (
+        f"the reason must blame the clear and name the folder: {row['reason']!r}")
+
+    assert not g.vault.marker.exists(), "no re-latch over the folder the clear blessed"
+    assert acted["sync"] == 0 and acted["workers"] == 0, acted
+    assert acted["pause_actors"] == [], acted["pause_actors"]
+    assert not g.state.halted.exists(), "a cancelled trip must not halt promotions"
+    assert acted["alerts"] == [], f"a cancelled trip must not alert: {acted['alerts']}"
+    out = capsys.readouterr().out
+    assert "VAULT TRIPWIRE abandoned" in out, out

@@ -3237,10 +3237,21 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # `datawatch.py` prints no resume curl — it does now). `evaluate_liveness` is above
     # every hunk and keeps :1035, so the T-26 row in the vault threat model still points
     # at a real line and nothing in `knowledge/` needs re-pointing; this number is
-    # re-derivable with the command in the docstring below, which prints 1035 with 3826
-    # under it.
-    assert heads[guardian]["main"] == 3826, (
-        f"`main` moved off :3826 ({heads[guardian]['main']}) — if it is gone "
+    # re-derivable with the command in the docstring below, which printed 1035 with 3826
+    # under it then; #4454 moved `main` again, below.
+    # 3826 -> 3848 is #4454: TWO hunks, `@@ -1992,6 +1992,19 @@` +13 and
+    # `@@ -2797,6 +2810,15 @@` +9, 22 added and 0 removed — the `vault_trip_abandoned` and
+    # `data_trip_abandoned` ledger bookings, one in each trip site's
+    # `TripSupersededByClear` arm (the arms #4368 put there). Both are inside `check_vault`
+    # and `check_data`, so both sit below `evaluate_liveness` and above `main`:
+    # `evaluate_liveness` keeps :1035, the T-26 row does not move, no `knowledge/` note needs
+    # re-pointing, and `main` takes the whole +22. Re-check:
+    # `git diff <base> <head> -- agent-services/guardian/guardian.py | grep '^@@'` answers
+    # those two hunks and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1035 with 3848 below it.
+    assert heads[guardian]["main"] == 3848, (
+        f"`main` moved off :3848 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1035, (
         f"`evaluate_liveness` moved off :1035 "
