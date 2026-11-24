@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, voice, livekit, tts, stt, asr, wakeword, speaker-id, vad, turn-detection]
 type: reference
 status: implemented
-date: 2026-10-24
+date: 2026-11-24
 ---
 
 # Voice
@@ -1037,10 +1037,15 @@ The backend builds its own `SpeakerIdentifier` against the same config keys and
 the same directory — it does not talk to the worker — so a new profile is a
 file the worker picks up on `reload()`.
 
-`profiles_dir` is empty as of 2026-09-11. With no enrolled profiles every
-wake-word utterance is an unknown speaker, which means no name prefix on the
-injected turn and continuation gated on LiveKit identity alone. That is the
-intended degradation, not a fault.
+`profiles_dir` held nothing until 2026-09-24, when `scripts/voice/enroll_own_voice.py`
+put Lloyd's own voice there as `lloyd-voice.campplus.npy`; as of 2026-11-24 that
+clone is all it holds — no *person*. `_enrolled_speakers()` discards
+`own_voice_profile` from the name set, so the behaviour is what an empty
+directory used to give: every wake-word utterance is an unknown speaker, no name
+prefix goes on the injected turn, and continuation is gated on LiveKit identity
+alone. That is the intended degradation, not a fault. (Room speech never scores
+near the clone anyway — 0.24–0.25 against a 0.55 threshold — so the clone changes
+the echo check, not the identification.)
 
 ### The wake-miss capture rig
 
@@ -2178,7 +2183,7 @@ clones, and voice mode keeps speaking the old voice.
 |---|---|
 | `livekit.tts.voice` / `.speed` / `.shaping` | `lloyd-agent-worker` — it reads `livekit.tts` once, at `TTSStreamer.__init__` |
 | the same, for spoken alerts | `systemctl --user restart lloyd-guardian` — re-stages, which re-runs `sync-voice-config.py` |
-| TTS model path / `default_model` | `agent-tts` |
+| TTS model path / deploy config | `agent-tts-omni` — `$TTS_OMNI_MODEL` and `agent-services/conf/qwen3-tts-omni.deploy.yaml` are both read at exec. `livekit.tts.default_model` is the *worker's* copy, so it wants `lloyd-agent-worker` too. (This row used to name `agent-tts`, retired 2026-11-10 to `supervisor/retired/agent-tts.conf`; supervisord no longer runs it.) |
 | `livekit.stt` / `.vad` / `.wake` / `.acoustic_wake` / `.voiceprint` / `.turn_detection` / `.barge_in` / `.conversation` | `lloyd-agent-worker` |
 | `livekit.voice_turn` | **both**: the backend reads `reminder`, `thinking`, `prewarm` and `typed_turns` (`round restart --only lloyd-backend`); the worker reads `stream_replies`, `typed_turns`, `filler`, `progress`, `queued_notice`, `thinking_sound`, `first_clause_chars`, `max_spoken_chars`, `prewarm`, `keep_warm`, `stall_after_seconds` and the `error_phrase`/`stall_phrase`/`lost_phrase` apologies (`lloyd-agent-worker`) |
 | `livekit.tts.fallback_url` / `.first_byte_timeout_s` / `.chunk_gap_timeout_s` / `.normalise_text` | `lloyd-agent-worker` |
@@ -2219,7 +2224,9 @@ at room start (`lloyd-agent-worker`), backend keys at boot.
 
 `SETUP.md` is the authority for the whole machine; these are the voice-specific
 assets, and the two untracked ones are the reason the 08-22 rebuild lost the
-voice.
+voice. Since 2026-10-09 there is a third that no clone restores: the uploaded
+voice under `SPEAKER_SAMPLES_DIR`, which the room's engine needs before
+`clone:dave_cullen` answers at all.
 
 | Asset | Tracked? |
 |---|---|
