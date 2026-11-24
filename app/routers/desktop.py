@@ -27,11 +27,32 @@ the frame answers as if nobody had captured, here and in
 the model's context (#1418). A tab that is already open keeps the last frame it
 was pushed until it reloads; that is the decided display behaviour, not a
 render gap.
-GET  /api/desktop/lease  — who holds the seat.
+GET  /api/desktop/lease  — who holds the seat, on the same peer-address terms as
+                           the reads above.
 POST /api/desktop/lease  — ``{op: grant, minutes}`` / ``{op: revoke}``. Human
                            only: ``safety.check_bash_command`` and the
                            aggregator refuse any tool call that names this
                            route or the lease file.
+                           A grant is accepted from the seat only:
+                           ``_peer_is_loopback`` must hold of the peer, the same
+                           requirement ``post_desktop_state`` puts on the frame
+                           publish, because lending the keyboard and mouse is a
+                           decision made where the person is sitting (#4533).
+                           Being admitted by ``ApiPeerGate`` is not being asked:
+                           every network in ``server.trusted_networks`` passes
+                           that rule, which on this box means the whole tailnet,
+                           and until #4533 that was enough to lend oneself
+                           Alan's desktop for ``MAX_TTL_MINUTES``. The Vite dev
+                           server runs on this machine, so the Desktop tab
+                           arrives through its ``xfwd`` rewrite as a loopback
+                           peer and still grants; a tab on a tailnet device
+                           arrives as its own address and is refused, which is
+                           the intent, not a regression. ``op: revoke`` stays
+                           open to any peer the gate trusts, so the kill switch
+                           keeps working from a phone across the house. A grant
+                           also ignores ``session_id`` in the body: a caller
+                           this route cannot identify must not get to choose
+                           which session the lease it requested covers.
 """
 
 from __future__ import annotations
@@ -94,10 +115,13 @@ def _frame_is_fresh(frame: dict | None, *, now: float | None = None) -> bool:
 def _peer_is_loopback(request: Request) -> bool:
     """Did this request arrive on this machine's own loopback interface?
 
-    The one legitimate publisher of a frame is the aggregator, which posts to
-    ``service_url("backend")`` — measured ``http://127.0.0.1:8080``. Anything
-    else is a peer that never took the capture, and an absent or unparseable
-    client is refused too.
+    Two writes ask it, both because a peer the network admits is not a person at
+    the keyboard. The one legitimate publisher of a frame is the aggregator,
+    which posts to ``service_url("backend")`` — measured
+    ``http://127.0.0.1:8080`` — and anything else is a peer that never took the
+    capture. The one legitimate grantor of a desktop lease is a human sitting at
+    this box, which is why ``post_desktop_lease`` started asking the same
+    question (#4533). An absent or unparseable client is refused too.
     """
     host = (request.client.host if request.client else "") or ""
     if host == "localhost":
@@ -167,15 +191,31 @@ async def get_desktop_lease():
 
 
 @router.post("/api/desktop/lease")
-async def post_desktop_lease(body: dict):
+async def post_desktop_lease(body: dict, request: Request):
     op = (body or {}).get("op")
     if op == "grant":
+        if not _peer_is_loopback(request):
+            # Refused before the write, the toast and the publish. ApiPeerGate
+            # already let this peer in — every network in
+            # server.trusted_networks, the whole tailnet by default — and its
+            # address rule is not Alan's consent: a stranger on that network
+            # could lend itself his keyboard and mouse for MAX_TTL_MINUTES
+            # without him, which is what #4533 closed. The Desktop tab on this
+            # machine still arrives on loopback, so the seat is unaffected.
+            logger.warning("desktop: refused a lease grant from peer %s",
+                           request.client.host if request.client else None)
+            raise HTTPException(status_code=403,
+                                detail="the desktop lease can only be granted "
+                                       "from this machine")
         try:
             minutes = float((body or {}).get("minutes") or 30)
         except (TypeError, ValueError):
             raise HTTPException(status_code=400, detail="minutes must be a number")
-        desktop_lease.grant(minutes, by="mission-control",
-                            session_id=str((body or {}).get("session_id") or ""))
+        # session_id is deliberately not read from the body: a pin names which
+        # session the lease covers, and a caller this route cannot identify must
+        # not choose it. desktop_lease.grant keeps the parameter for in-process
+        # grants, which sit behind the tool layer's owner check.
+        desktop_lease.grant(minutes, by="mission-control")
         _toast(f"Lloyd may use the desktop for {int(minutes)} min — move the mouse to take it back")
     elif op == "revoke":
         desktop_lease.revoke("revoked from Mission Control")

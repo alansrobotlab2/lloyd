@@ -128,20 +128,26 @@ action except `wait` needs one.
 
 - `app/desktop_lease.py` keeps `{holder, epoch, expires_at, session_id,
   last_cursor, last_window}`. A grant may be pinned to one session
-  (`session_id`); a pinned lease then covers only that session. A missing
+  (`session_id`); a pinned lease then covers only that session. That pin is
+  set in-process only: the route ignores a `session_id` in the body, because
+  #4533 found the only writer of one had been an unauthenticated caller naming
+  whichever session it liked. A missing
   file, a corrupt file or an expired grant all mean the human holds the
   lease. That is the opposite of Hermes's private-desktop default, and it is
   on purpose.
-- Only the Desktop tab asks for a lease (`POST /api/desktop/lease`, 10/30/60
-  minutes, capped at 240 — `desktop_lease.MAX_TTL_MINUTES`), and every refusal
-  below is about what Lloyd can call. What the route enforces for a peer is
-  nothing: `post_desktop_lease` takes no `Request`, where the frame publish
-  beside it requires `_peer_is_loopback` (`app/routers/desktop.py:94`, its one
-  call site `:140`). So the write that hands over the keyboard is gated only by
-  `ApiPeerGate`'s address rule — loopback or `server.trusted_networks`, which
-  this box never sets and so defaults to the whole tailnet — while the write
-  that shows a frame is loopback-only (#4533). The tripwire below only protects
-  a seat Alan has already lent; nothing refuses a grant he never made.
+- The Desktop tab is the only thing that asks for a lease (`POST
+  /api/desktop/lease`, 10/30/60 minutes, capped at 240 —
+  `desktop_lease.MAX_TTL_MINUTES`), and since #4533 the route enforces where
+  that ask may come from: `op: grant` requires the loopback peer, the same test
+  `_peer_is_loopback` puts on the frame publish beside it, so lending the
+  keyboard and mouse is a decision made at the machine. `ApiPeerGate`'s address
+  rule is not that test — it admits every network in `server.trusted_networks`,
+  which this box never sets and so defaults to the whole tailnet — and before
+  #4533 that was the only thing between a stranger and a four-hour lease, while
+  the tripwire below protected only a seat Alan had already lent. `op: revoke`
+  deliberately stays open to a trusted peer, so a phone across the house keeps
+  the kill switch; the tab on the seat is unaffected, because the Vite dev
+  server runs here and its `xfwd` rewrite hands the backend a `127.0.0.1` peer.
   A grant or a revoke toasts through `hyprctl notify`.
 - Before each action the tripwire compares the pointer and the focused window
   with where Lloyd left them. A move of more than `tripwire_px` (24), or a focus
@@ -338,3 +344,13 @@ This is what made any of the above visible to a model, and it also fixed
   while `post_desktop_state` beside it demands the loopback peer, so a
   trusted-network peer (the tailnet by default, since `config.yaml` never sets
   `server.trusted_networks`) can grant the lease outright. Filed #4533.
+- 2026-11-24 — §3's open grant is closed (#4533). `post_desktop_lease` now takes
+  the `Request` and requires `_peer_is_loopback` of an `op: grant` before it
+  writes the lease, toasts or publishes, so the seat is lent at the machine and
+  a tailnet peer gets 403; `op: revoke` is deliberately left open to a trusted
+  peer, which is the kill switch, and a `session_id` in the body no longer pins
+  a lease. The two dated anchors this section used to carry are gone rather
+  than re-pointed: which two callers `_peer_is_loopback` has is the code's own
+  story, and a line number in a doc is the part that rots. `tests/test_desktop_frame_mirror.py`
+  gained the grant boundary as its third crossed pair, including the tailnet
+  browser's rewritten peer under the real uvicorn producer.

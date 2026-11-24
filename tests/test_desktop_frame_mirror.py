@@ -24,7 +24,7 @@ stream therefore stays reachable to a trusted peer, and
 mitigation, not a claim that the read path is closed. A tab that is already open
 keeps the last frame it was pushed until it reloads, by decision.
 
-Two boundaries, both crossed rather than grepped.
+Three boundaries, each crossed rather than grepped.
 
 1. **The peer boundary.** Production does not hand the router the socket peer:
    uvicorn fronts the app with ``ProxyHeadersMiddleware`` by default
@@ -47,6 +47,17 @@ Two boundaries, both crossed rather than grepped.
    assertion here checks the summary as well as the route: an expiry honoured in
    one read path and not the other would leave the last window title readable
    after the frame itself was gone.
+3. **The grant peer boundary** (backlog #4533). ``op: grant`` on
+   ``/api/desktop/lease`` lends Alan's keyboard and mouse for up to
+   ``desktop_lease.MAX_TTL_MINUTES``, and until this round the only thing in
+   front of it was the address rule that also admits the tailnet — while the
+   frame *publish* beside it demanded the seat. ``TestGrantPeerBoundary``
+   crosses it the same way as boundary one: a tailnet peer's grant is refused by
+   this route before the lease file, the toast or the pushed event; the seat's
+   own POST still grants, which is what Vite's rewrite leaves a tab at
+   ``https://localhost:5173`` (``127.0.0.1``); and ``op: revoke`` from that same
+   tailnet peer still revokes. That asymmetry is the decision, not an oversight:
+   a device across the house is how the seat gets taken back.
 
 Refusals are asserted by *detail text*, not just status, so a 403 from
 ``ApiPeerGate`` or from request validation can never be mistaken for this
@@ -441,6 +452,256 @@ class TestPublisherIdentityUnderTheProducer:
         assert body["image_b64"] == "QUJD" * 400
 
 
+# ── who may grant the lease (backlog #4533) ───────────────────────────────
+#
+# The frame publish two sections above has refused a non-loopback peer since
+# #1418; the grant beside it did not, so the write that lends the keyboard and
+# mouse for up to `desktop_lease.MAX_TTL_MINUTES` was reachable by any peer
+# ApiPeerGate trusts — the whole tailnet by default, because config.yaml never
+# sets server.trusted_networks (server.py's DEFAULT_TRUSTED_NETWORKS is
+# 100.64.0.0/10). What follows is the corrected half of that asymmetry.
+
+#: This route's own refusal of a grant, kept apart from ``PEER_GATE_REFUSAL``
+#: for the same reason ``PUBLISHER_REFUSAL`` is: an assert has to be able to
+#: tell "this route decided" from "the network gate decided", and under the
+#: producer stack a tailnet peer passes the gate, so only the route can be what
+#: refused it.
+GRANT_REFUSAL = "can only be granted from this machine"
+
+
+@pytest.fixture
+def seat(monkeypatch, tmp_path):
+    """The lease file on a temp path, and the seat's toast recorded rather than run.
+
+    Every grant node below would otherwise write the real
+    ``~/lloyd-data/desktop/lease.json`` and pop a real ``hyprctl notify`` on
+    Alan's desktop from inside a test run. ``_toast`` is the router's only
+    compositor call, so replacing it both keeps the seat out of the suite and
+    *is* the instrument for "no notify ran" — and
+    ``test_the_same_trusted_peer_keeps_the_revoke_kill_switch`` asserts it
+    records a real toast, so an empty list elsewhere is a refusal, not a
+    broken spy.
+    """
+    from app import desktop_lease
+
+    monkeypatch.setattr(desktop_lease, "DESKTOP_LEASE_PATH", tmp_path / "lease.json")
+    toasts: list[str] = []
+    monkeypatch.setattr(desktop_router, "_toast", toasts.append)
+    return desktop_lease, toasts
+
+
+class TestGrantPeerBoundary:
+    """A grant is a seat decision; a revoke is available from anywhere trusted.
+
+    Clauses 2 and 4 of #4533 name ``tests/test_desktop_module.py``, and their
+    nodes are here instead: that file's skips are in the machine-fact population
+    of the before-inventory, and
+    ``tests/test_skip_inventory.py::test_no_machine_fact_skip_was_deleted_to_buy_headroom``
+    refuses a diff that edits any file in it, whatever the edit is for. The
+    library-level half of clause 4 — the in-process pin still working — is pinned
+    there by ``test_a_grant_pinned_to_a_session_covers_only_it``, untouched by
+    this round. What is new here is the route's side of both clauses, which
+    belongs beside the other lease-route nodes in this file anyway.
+    """
+
+    def test_a_trusted_peer_is_refused_a_grant_before_it_changes_anything(
+            self, seat):
+        """#4533 clause 1: the 403 has nothing behind it.
+
+        Alan lent the seat by hand first, so the lease file exists and is live:
+        a refusal that still wrote would be visible as a bumped ``epoch``, and
+        one that toasted or pushed would be visible to the seat and to any
+        open Desktop tab. The peer is ``TAILNET``, which ``ApiPeerGate`` trusts
+        — under the bare app here the gate is not even in the stack, and the
+        assert on ``PEER_GATE_REFUSAL`` is what proves the refusal below is the
+        route's and not a gate that happened to be standing in the way.
+        """
+        desktop_lease, toasts = seat
+        desktop_lease.grant(30)
+        before = desktop_lease.read()
+        assert before["holder"] == "agent", before
+
+        pushed: asyncio.Queue = asyncio.Queue(maxsize=8)
+        desktop_router._subscribers.add(pushed)
+        refused = _client(TAILNET).post(
+            LEASE_ROUTE, json={"op": "grant", "minutes": 240})
+        assert refused.status_code == 403, refused.text
+        assert GRANT_REFUSAL in refused.text, refused.text
+        assert PEER_GATE_REFUSAL not in refused.text, (
+            "the peer gate refused this, so the route's own check is untested")
+        after = desktop_lease.read()
+        assert after["holder"] == before["holder"], after
+        assert after["epoch"] == before["epoch"], (
+            "the grant ran and the 403 lied: the epoch moved")
+        assert after["expires_at"] == before["expires_at"], after
+        assert toasts == [], f"the refusal toasted the seat: {toasts}"
+        assert pushed.empty(), "a Desktop tab was pushed a lease nobody granted"
+
+    def test_an_untrusted_peer_is_refused_the_same_way_by_this_route(self, seat):
+        """The refusal is the loopback test, not a favour from the address rule.
+
+        ``PUBLIC`` is trusted by nothing, so a 403 there alone would be
+        ambiguous; what matters is that the detail text is *this* route's
+        refusal, which is only reachable if the peer got past the gate — and in
+        the bare app here there is no gate, so both peers reach the same line.
+        """
+        desktop_lease, toasts = seat
+        before = desktop_lease.read()
+        refused = _client(PUBLIC).post(
+            LEASE_ROUTE, json={"op": "grant", "minutes": 240})
+        assert refused.status_code == 403, refused.text
+        assert GRANT_REFUSAL in refused.text, refused.text
+        assert desktop_lease.read()["epoch"] == before["epoch"]
+        assert toasts == []
+
+    def test_the_same_trusted_peer_keeps_the_revoke_kill_switch(self, seat):
+        """#4533 clause 3: narrowing the grant must not cost the kill switch.
+
+        A tailnet device is how Alan cuts Lloyd off from the other side of the
+        house, so ``op: revoke`` from ``TAILNET`` still revokes, still bumps the
+        epoch, and still toasts — that last assert is the positive control that
+        makes the empty ``toasts`` in the refusal nodes a fact about the refusal
+        rather than about a spy that never records anything.
+        """
+        desktop_lease, toasts = seat
+        lent = desktop_lease.grant(30)
+        revoked = _client(TAILNET).post(LEASE_ROUTE, json={"op": "revoke"})
+        assert revoked.status_code == 200, revoked.text
+        body = revoked.json()
+        assert body["holder"] == "human", body
+        assert body["epoch"] == lent["epoch"] + 1, body
+        assert not desktop_lease.agent_may_act()[0]
+        assert toasts == ["Lloyd's desktop lease revoked"], toasts
+
+    def test_a_seat_grant_still_lends_the_lease(self, seat):
+        """The seat keeps working, over the stack that computes its peer.
+
+        A tab at ``https://localhost:5173`` is on this box, so Vite's ``xfwd``
+        rewrite hands the backend a ``127.0.0.1`` peer (``forwarded_allow_ips``
+        is loopback, pinned in ``test_the_composition_under_test_is_the_right_one``),
+        and the grant behind it is unchanged: the agent holds the lease and
+        ``agent_may_act`` says yes.
+        """
+        desktop_lease, toasts = seat
+        granted = _client(LOOPBACK_HOST).post(
+            LEASE_ROUTE, json={"op": "grant", "minutes": 30})
+        assert granted.status_code == 200, granted.text
+        assert granted.json()["holder"] == "agent", granted.text
+        assert desktop_lease.agent_may_act()[0]
+        assert toasts == [
+            "Lloyd may use the desktop for 30 min — move the mouse to take it back"], toasts
+
+    def test_a_seat_grant_beyond_the_cap_still_lends_and_still_clamps(self, seat):
+        """#4533 clause 2, on the arm the gate had to leave alone.
+
+        A tab asking for more than ``MAX_TTL_MINUTES`` is the interesting case
+        because three things have to be true of it at once, none of them changed
+        by #4533: the agent holds the lease, the epoch moved by exactly one (a
+        grant that silently did nothing would still answer 200), and the expiry
+        is the clamp rather than the number in the body. ``remaining_s`` is read
+        off the response, so this is the seat's own view and not a second copy of
+        the constant.
+        """
+        desktop_lease, toasts = seat
+        before = desktop_lease.read()
+        granted = _client(LOOPBACK_HOST).post(
+            LEASE_ROUTE, json={"op": "grant", "minutes": 10_000})
+        assert granted.status_code == 200, granted.text
+        view = granted.json()
+        assert view["holder"] == "agent", view
+        assert view["epoch"] == before["epoch"] + 1, view
+        assert 0 < view["remaining_s"] <= desktop_lease.MAX_TTL_MINUTES * 60, view
+        # One toast, and the grant's. Prefix-matched on purpose: the line quotes
+        # the *requested* minutes over a lease that expires at the clamp, so
+        # pinning it whole would pin a wrong number — see the item's findings.
+        assert len(toasts) == 1 and toasts[0].startswith(
+            "Lloyd may use the desktop"), toasts
+
+    def test_a_grant_body_naming_a_session_stores_no_pin(self, seat):
+        """#4533 clause 4: the pin is not the caller's to choose.
+
+        ``session_id`` in the body used to be written straight into the lease,
+        and a pinned lease covers only the session it names — so a caller this
+        route cannot identify got to decide which of Alan's sessions could drive
+        his desktop, in either direction. The route ignores the field now: the
+        stored pin is empty, and a session nobody named still holds, which is the
+        unpinned behaviour every real grant has had anyway since
+        ``web/src/api.ts`` only ever posts ``{op, minutes}``.
+        """
+        desktop_lease, _toasts = seat
+        granted = _client(LOOPBACK_HOST).post(
+            LEASE_ROUTE, json={"op": "grant", "minutes": 30,
+                               "session_id": "someone_elses_session"})
+        assert granted.status_code == 200, granted.text
+        assert desktop_lease.read()["session_id"] == "", desktop_lease.read()
+        assert desktop_lease.agent_may_act("any_other_session")[0], (
+            "an unnamed session is locked out, so the pin was honoured after all")
+
+    async def test_a_seat_browsers_grant_arrives_on_loopback_and_grants(self, seat,
+                                                                        producer_stack):
+        """Boundary three, crossed through the producer that rewrites the peer.
+
+        Exactly one thing differs between this node and the next: the address
+        ``ProxyHeadersMiddleware`` resolves out of ``X-Forwarded-For``. This is
+        the seat browser — a loopback socket and a loopback forwarded address,
+        which is what a tab at ``https://localhost:5173`` presents once Vite's
+        ``xfwd`` has had it — and it still gets the lease.
+        """
+        desktop_lease, _toasts = seat
+        async with _asgi_client(LOOPBACK_HOST, app=producer_stack) as client:
+            r = await client.post(
+                LEASE_ROUTE, json={"op": "grant", "minutes": 30},
+                headers={"X-Forwarded-For": LOOPBACK_HOST})
+            assert r.status_code == 200, r.text[:200]
+            assert r.json()["holder"] == "agent", r.text[:200]
+        assert desktop_lease.agent_may_act()[0]
+
+    async def test_a_tailnet_browsers_grant_arrives_as_its_own_address_and_is_refused(
+            self, seat, producer_stack):
+        """The other half of the pair, and the reason no frontend change is owed.
+
+        The same POST from a browser on the imac is rewritten to that browser's
+        tailnet address, which the gate trusts and this route does not: 403 with
+        the route's own detail, and no lease written. That is the contingency the
+        item had to measure before landing the line — a loopback test on the
+        grant really does refuse a tailnet tab, which is the point, because only
+        the machine itself hands over its own keyboard.
+        """
+        desktop_lease, toasts = seat
+        before = desktop_lease.read()
+        async with _asgi_client(LOOPBACK_HOST, app=producer_stack) as client:
+            r = await client.post(
+                LEASE_ROUTE, json={"op": "grant", "minutes": 240},
+                headers={"X-Forwarded-For": TAILNET})
+            assert r.status_code == 403, r.text[:200]
+            assert GRANT_REFUSAL in r.text, r.text[:200]
+            assert PEER_GATE_REFUSAL not in r.text, (
+                "the peer gate answered, so this proves nothing about the route")
+            assert desktop_lease.read()["epoch"] == before["epoch"], r.text[:200]
+        assert toasts == []
+
+    async def test_a_tailnet_peer_cannot_launder_itself_into_a_seat_grant(self, seat,
+                                                                         producer_stack):
+        """A peer the socket names as tailnet cannot claim loopback in a header.
+
+        ``forwarded_allow_ips`` is loopback only, so the header stays inert and
+        the peer remains the tailnet — the same shape as
+        ``test_a_trusted_peer_cannot_launder_itself_into_loopback`` on the frame
+        publish, now on the write that lends the keyboard instead of the one that
+        shows a picture.
+        """
+        desktop_lease, toasts = seat
+        before = desktop_lease.read()
+        async with _asgi_client(TAILNET, app=producer_stack) as client:
+            r = await client.post(
+                LEASE_ROUTE, json={"op": "grant", "minutes": 240},
+                headers={"X-Forwarded-For": LOOPBACK_HOST})
+            assert r.status_code == 403, r.text[:200]
+            assert GRANT_REFUSAL in r.text, r.text[:200]
+            assert desktop_lease.read()["epoch"] == before["epoch"], r.text[:200]
+        assert toasts == []
+
+
 # ── the prose that describes the boundary ─────────────────────────────────
 #
 # Backlog #1671. #1418 shipped its access boundary described as unfinished
@@ -533,3 +794,55 @@ def test_the_desktop_docs_state_the_peer_boundary_ruling_out_a_device_gate():
     for deferred in ("human action", "leaves to a person", "left to a person"):
         assert deferred not in lease_doc.lower(), (
             f"the lease route's own test still defers the boundary ({deferred!r})")
+
+
+DESKTOP_DOC = ROOT / "architecture" / "desktop.md"
+
+
+def _doc_section(start: str, stop: str) -> str:
+    """One section of ``architecture/desktop.md``, between two headings.
+
+    Cut by heading pair rather than read whole: the doc's HISTORY section
+    legitimately records what used to be true, and a node that priced the entire
+    file would fail on a dated entry that is allowed to say the old thing while
+    claiming the new one is false.
+    """
+    text = DESKTOP_DOC.read_text()
+    i = text.index(start)
+    return text[i:text.index(stop, i)]
+
+
+def test_the_docs_state_that_a_grant_is_seat_only_and_a_revoke_is_not():
+    """#4533 clause 5: the sentence that said the grant enforced nothing is the
+    claim this round made false, and restated prose is where a stale instruction
+    lives (#1671), so the new wording is pinned on both surfaces, not trusted.
+
+    Two facts must survive in the router's module docstring and in
+    ``architecture/desktop.md`` §3 alike: only the seat (a loopback peer) may
+    grant, and a revoke stays open to a trusted peer. Both are asserted
+    sentence-scoped, the way #1671 asserts its own citation, so wording that
+    mentions ``loopback`` somewhere and grants somewhere else stays red. §3 must
+    additionally have stopped saying the route enforces *nothing* for a peer,
+    with the section's own ``ApiPeerGate`` sentence as the positive control that
+    the section was read at all.
+    """
+    for label, flat in (
+            ("app/routers/desktop.py",
+             " ".join((desktop_router.__doc__ or "").split())),
+            ("architecture/desktop.md §3",
+             " ".join(_doc_section("## 3.", "\n## 4.").split()))):
+        grants = [s for s in flat.split(".") if "grant" in s]
+        assert grants and any("loopback" in s for s in grants), (
+            f"{label} states a grant without naming the loopback peer that may "
+            "ask for one")
+        revokes = [s for s in flat.split(".") if "revoke" in s]
+        assert revokes and any("trust" in s for s in revokes), (
+            f"{label} states a revoke without naming the trusted peer that keeps "
+            "it")
+
+    s3 = _doc_section("## 3.", "\n## 4.")
+    assert "nothing: `post_desktop_lease`" not in s3, (
+        "§3 still says what the route enforces for a peer is nothing — #4533 "
+        "closed that, and the sentence is now a false instruction")
+    assert "ApiPeerGate" in s3, (
+        "positive control: §3 read back empty, so the absence above proves nothing")
