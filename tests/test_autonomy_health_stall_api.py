@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 import datetime as dt
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -1201,3 +1203,209 @@ def test_a_shared_id_also_drops_the_second_file_out_of_idle_tasks():
     assert [t["task_id"] for t in report["tasks"]] == ["104"], report["tasks"]
     assert [i for i in report["idle_tasks"] if str(i.get("id")) == "104"] == [], (
         "the id is already in `seen`, so the second file is filtered out too")
+
+
+# ── #4544: the alarm line has to be pinned by EXECUTING the watchdog's script ─────
+#
+# `test_the_watchdog_skill_prints_the_alarm_field` above is a prose grep of the live
+# `SKILL.md`, and since #4186 moved the printing code into the folder-skill script
+# (`~/obsidian/skills/queue-health-check/fleet_health.py:165`) the literal survives in
+# that file only as a sentence. So the only thing between this box and a silently
+# missing alarm is a character budget: `SKILL_BODY_CHAR_CAP = 12_000`
+# (`scripts/automod/vault_round.py:2908`) with a growth-only refusal (`:3019`), against a
+# body the gate's own measure (`_skill_desc_and_body`) puts at 11,942 chars today — 58
+# characters of headroom — while a naive post-frontmatter `wc -c` reads the same file as
+# 12,022, already over. Either instrument says the same thing operationally: a skill at
+# its cap takes no addition worth making, so the next editor pays for anything new by
+# deleting something, and a sentence is the cheapest thing on the block to delete.
+# That is not hypothetical: vault `c73d21c99` (#4330) cut
+# the two carrying lines earlier today and took this file's node down with
+# `tests/test_autonomy_run_record.py`'s, which is red-main item #4543.
+#
+# Re-measured, and both arms of the falsifier are what this section is built to invert.
+# `sed 's/script_alarm_runs/NOT_THE_FIELD/g'` over a copy of the live `SKILL.md`, with
+# `LLOYD_OBSIDIAN_VAULT` pointed at that scratch copy, gives `1 failed, 19 passed` at this
+# round's base — the failure is the prose node, with the printing code untouched. The same
+# scratch copy against the two nodes below gives `1 failed, 21 passed`: the prose node
+# still falls, because it is a prose guard and clause 3 keeps it byte-unchanged, and
+# neither node here moves. That asymmetry IS the fix: the alarm stops depending on the
+# sentence.
+#
+# The other half is worse, because nothing catches it at all. `git grep -n fleet_health`
+# at this base returns two hits, both prose or a fixture string
+# (`tests/test_skill_sibling_reachability.py:253`, `tests/test_workers_router.py:3445`):
+# no node in this suite executes the script. So a regression in the print code is
+# invisible here, and the specific mutant is worse than printing nothing — with `sa=0`
+# substituted for the sum at `fleet_health.py:163` the script still prints
+# `script-alarm runs: 0 across 2 tasks: 60,76` for a payload carrying four alarm runs
+# across two tasks, because the id list comes from a separate expression (`san`, `:164`).
+# A line that names the right tasks while lying about how many runs alarmed reads as a
+# performed check: a false green of the shape the `#2619` header above argues against, one
+# floor down — and with SKILL.md still byte-identical to live, its sentence still true.
+# Run that mutant: `diff -q` against the vault says the prose is untouched, the prose node
+# passes, and the executed node below is the only thing on the box that goes red, on
+# `4` versus `0`.
+#
+# Executing the script fixes both directions at once, and it is the pattern this file's
+# own `#3640` header argues for ("Executed rather than grepped"). The seam already exists
+# in the suite — `tests/test_system_health_check_frontend_endpoint.py:47-49` resolves a
+# vault skill script and `:154-157` runs it with `sys.executable` — and this file already
+# resolves this skill's directory in `_skill_path()`, `LLOYD_OBSIDIAN_VAULT` honoured.
+# The cost to the vault is zero characters, which is the point: a pin that needs headroom
+# is a pin that eventually gets cut.
+#
+# UNMARKED on purpose, like every other node in this skill's section: the gate runs
+# `-m "not live_vault and not fault_injection"`, so a marked node pins nothing. The
+# fixture is written to the node's own `tmp_path` and fed on stdin, so nothing here needs
+# a live backend or a live data root — and the run passes no `--staged-pile-note`, which
+# is Step 5's mode (`fleet_health.py:129`): it GETs `/api/workers/health` itself and
+# appends to today's daily note, so a node that passed it would write a real line into
+# Alan's notes on every gate.
+
+#: The watchdog's Step 1 script, on the live board this box's jobs load from. The code
+#: half: SKILL.md's fenced block is documentation of this file, not the thing that runs.
+def _skill_script_path() -> Path:
+    """Where the watchdog's fleet script is, resolved exactly like `_skill_path()`.
+
+    Same `LLOYD_OBSIDIAN_VAULT` honour and the same reason: a node that reports what a
+    running job prints has to read the tree the job reads, and a failure that names the
+    path is the only way a later reader can tell "the skill lost its alarm" from "this
+    run was pointed at somebody's scratch vault".
+    """
+    import os
+    root = os.environ.get("LLOYD_OBSIDIAN_VAULT") or (Path.home() / "obsidian")
+    return Path(root) / "skills" / "queue-health-check" / "fleet_health.py"
+
+
+def _require_skill_script() -> Path:
+    """The script, or a FAIL naming the path — never a skip, never a pass.
+
+    `_skill_text()`'s shape, deliberately: a skipped node is how the false green above
+    survived, because a box missing the file reads as a box with nothing to check.
+    """
+    script = _skill_script_path()
+    if not script.is_file():
+        pytest.fail(f"no queue-health-check fleet script on this box at {script} — the "
+                    "job that reads this endpoint runs it from here, so there is "
+                    "nothing left pinning its alarm line")
+    return script
+
+
+def _alarm_payload(task_alarms: dict) -> dict:
+    """A `GET /api/autonomy/health` body, carrying only what Step 1's table reads.
+
+    `task_id` is a STRING because that is what `compute_health` publishes — the node
+    above this section asserts `["104"]`, not `[104]` — and `fleet_health.py:165` joins
+    those ids with `','.join(san)`, which raises on an int. A fixture with integer ids
+    would fail inside the script for a reason the production payload never has.
+
+    `days`, the ten `fleet` keys and the per-task keys are exactly the ones the stdin
+    branch names; the endpoint publishes more (`task_failures`, the `claims_*` trio), and
+    Step 1 prints none of those, so they are absent here rather than invented.
+    `window_clamped_to_hours` is None because an unclamped window is the common case and
+    prints no parentheses; clamping is `#3640`'s subject, not this one.
+    """
+    return {
+        "days": 7,
+        "fleet": {
+            "window_clamped_to_hours": None, "oldest_input": None,
+            "runs": 412, "failures": 19, "fail_rate": 0.046, "gpu_hours": 3.2,
+            "wasted_hours": 0.4, "timeout_runs": 2, "empty_runs": 1,
+            "failed_tasks": [], "paused_tasks": [],
+        },
+        "tasks": [
+            {"task_id": tid, "name": name, "runs": 40, "fail_rate": 0.025,
+             "timeouts": 1, "empty": 0, "silent_rate": 0.0, "gpu_hours": 0.4,
+             "wasted_hours": 0.1, "consecutive_failures": 0,
+             "script_alarm_runs": task_alarms[tid]}
+            for tid, name in (("60", "Nightly Reflection"),
+                              ("76", "Email and Calendar Triage"),
+                              ("31", "Knowledge Health Report"))
+        ],
+    }
+
+
+def _run_watchdog(script: Path, payload: dict, tmp_path: Path) -> str:
+    """Run the watchdog's Step 1 leg over `payload` and return its stdout.
+
+    The payload goes to the node's own `tmp_path` and arrives on stdin, which is the
+    documented invocation — SKILL.md Step 1 pipes `curl …/api/autonomy/health` into the
+    script — so no backend is started and no data root is named, and the node runs on a
+    box with neither. `cwd` is the tmp path for the same reason the flag is absent: the
+    script must have nothing to reach.
+    """
+    body = tmp_path / "health.json"
+    body.write_text(json.dumps(payload), encoding="utf-8")
+    argv = [sys.executable, str(script)]           # never "--staged-pile-note": Step 5
+    with body.open(encoding="utf-8") as handle:    # mode, which writes today's note
+        run = subprocess.run(argv, stdin=handle, capture_output=True, text=True,
+                             timeout=120, cwd=str(tmp_path))
+    assert run.returncode == 0, (
+        f"the watchdog's Step 1 leg exited {run.returncode} on a well-formed payload: "
+        f"{run.stderr[:400]}")
+    assert "FLEET 7d:" in run.stdout, (
+        "the script printed no fleet line, so it did not take the stdin leg it is "
+        f"invoked for — stdout was: {run.stdout[:400]}")
+    return run.stdout
+
+
+def test_executing_the_watchdog_script_prints_the_alarm_count_and_its_task_ids(tmp_path):
+    """The alarm reaches the human report, pinned by running the thing that prints it.
+
+    Three tasks, two of them alarming: 60 with 3 alarm runs and 76 with 1, and 31 clean
+    with 0. Four facts, each with its own message because they fail differently:
+
+      * exactly one `script-alarm runs:` line — the fleet total, summed over ALL tasks
+        rather than the 15 rows the table prints, which is what kept task 60's three
+        alarm nights visible at all (task 60 never reached the table: `fail_rate` 0.0);
+      * the COUNT is 4, the sum of 3 and 1. This is the assert that catches the `sa=0`
+        mutant no prose grep can see, because that mutant leaves the id list intact while
+        the number it prints goes false;
+      * the alarming ids are `60,76`, in payload order;
+      * the clean task's id is NOT on the line — a watchdog that listed every task as
+        alarming would otherwise read identically to this one.
+
+    The expected line is the shipped output, measured against the live script before this
+    node was written rather than inferred from it: piping this payload into
+    `~/obsidian/skills/queue-health-check/fleet_health.py` printed `script-alarm runs: 4
+    across 2 tasks: 60,76` and exited 0.
+    """
+    out = _run_watchdog(_require_skill_script(),
+                        _alarm_payload({"60": 3, "76": 1, "31": 0}), tmp_path)
+
+    hits = [ln for ln in out.splitlines() if "script-alarm runs:" in ln]
+    assert len(hits) == 1, (
+        "expected exactly one script-alarm fleet line in the watchdog's report: "
+        f"{hits!r}")
+    line = hits[0]
+    assert line == "script-alarm runs: 4 across 2 tasks: 60,76", (
+        f"the watchdog's alarm line reads {line!r}; the shipped form is 'script-alarm "
+        "runs: <summed runs> across <n tasks>: <ids>', and the count and the id list are "
+        "computed from separate expressions, so either can go false alone")
+    assert "runs: 4 " in line, f"the summed alarm count is not 4: {line!r}"
+    assert ": 60,76" in line, f"the alarming task ids are not 60,76: {line!r}"
+    assert "31" not in line, f"the clean task is named as alarming: {line!r}"
+
+
+def test_a_box_with_no_watchdog_script_fails_the_pin_by_name(tmp_path, monkeypatch):
+    """The absent-script shape, which is the other way this pin could go quietly green.
+
+    `LLOYD_OBSIDIAN_VAULT` pointed at a vault holding no skill at all: the node must
+    FAIL, naming the path it looked for. Not a skip and not a pass, because both of those
+    report a box with no alarm problem while the job that reads this endpoint has no Step
+    1 to run — the same reason `_skill_text()` fails instead of skipping, and the reason
+    this node is UNMARKED: the gate's runner excludes marked nodes, so a pin that only
+    runs when a vault is handy pins nothing.
+
+    Asserted through `_require_skill_script()` rather than by reading this file's source:
+    the failure has to come from the code that would have run.
+    """
+    missing = (tmp_path / "no-vault-here" / "skills" / "queue-health-check"
+               / "fleet_health.py")
+    monkeypatch.setenv("LLOYD_OBSIDIAN_VAULT", str(tmp_path / "no-vault-here"))
+    assert not missing.is_file(), "the fixture vault must not hold the script"
+
+    with pytest.raises(pytest.fail.Exception) as excinfo:     # pytest.fail, not a skip
+        _require_skill_script()
+    assert str(missing) in str(excinfo.value), (
+        f"the failure does not name the path it looked for: {excinfo.value}")
