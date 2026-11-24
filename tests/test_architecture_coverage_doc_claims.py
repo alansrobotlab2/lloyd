@@ -3899,7 +3899,16 @@ def test_the_re_typed_ladder_anchor_is_graded_by_the_symbol_it_names():
 #: #4045: the three `threat-model.md` anchors that were re-pointed at the definition
 #: deciding the capability their row names, each with the symbol the cell must name.
 THREAT_AUTOMOD_ANCHORS = (
-    ("scripts/automod/spec.py:748", "check_scope"),     # what classifies the diff
+    # 737 (#3646) -> 748 (#4037, then #4156) -> 766 (#4532). An entry in `ALLOWED_GLOBS`
+    # sits above this definition, so any widening of that tuple moves the number the T-24
+    # cell carries and owes this line and that cell the same re-point; the cell still names
+    # `check_scope`, which is what this tuple grades. The move is arithmetic, and the two
+    # rails that keep it honest are this file's
+    # `test_the_two_automod_threat_rows_are_anchored_on_the_definitions_that_decide_them`
+    # and `test_the_admission_changes_no_verdict_but_the_two_paths_it_grants` in
+    # tests/test_automod_spec.py, which admits a re-pointed citation only when every file
+    # it points into is in the same diff.
+    ("scripts/automod/spec.py:766", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
     ("scripts/automod/gate.py:4424", "rung_review"),    # the second reader
 )

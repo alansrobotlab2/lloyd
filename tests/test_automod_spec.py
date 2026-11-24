@@ -1516,12 +1516,20 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # paths. The count in the message below is now derived from the set rather than written
     # out: #4156 found this node's message still reading "the seven names" nine grants after
     # seven was true, in a rail whose whole job is counting named grants.
+    # #4532 added the twelfth, `agent-services/services/idle-worker/idle-worker.py`, and it
+    # is the first of the twelve whose whole diff is the entry: #4037's grant also deleted
+    # nothing, but this one additionally may not touch the file it names, because rung 0
+    # grades with the live tree's spec and the conversion it unblocks is #4531 clause 1's
+    # next round. `test_the_idle_worker_grant_admits_one_exact_path_and_nothing_else` is
+    # this round's legality check called with the entry shipped. `pre` still strips only
+    # TTS_PATCH, so the before/after diff this node computes stays exactly one path: the
+    # idle-worker entry is in both tuples.
     named_grants = {TTS_PATCH, "agent-services/livekit_worker.py",
                     QMD_TEMPLATE, VOICE_TIMELINE,
                     "agent-services/setup/install-services.sh",
                     "agent-services/scripts/qmd-watcher.sh",
                     "agent-services/setup/setup-decider.sh",
-                    "agent-services/README.md"}
+                    "agent-services/README.md", IDLE_WORKER_GRANT}
     assert allowed_after == named_grants | set(expected_allowed_model_paths()), (
         f"the named grants over tracked agent-services paths are the {len(named_grants)} "
         f"names this node pins plus whichever of the #3258 turn-1-mini grant is in the index "
@@ -4400,9 +4408,10 @@ def test_the_grant_adds_one_entry_and_edits_no_other():
     onto a neighbour, a sibling's name swapped for this one — would pass them all while
     quietly moving authority off a path #2779 or #2278 granted. This node pins the edit
     against the 30 shipped entries by name and order: the live tuple is those 30, in that
-    order, plus exactly one copy of `SETUP_DECIDER`, which contains no `*`. A future grant
-    appends beside this one and has to extend the snapshot: that is the pin working, not a
-    test in the way, and the message says so rather than leaving the next author to guess.
+    order, plus exactly one copy each of `SETUP_DECIDER`, #4156's `agent-services/README.md`
+    and #4532's `IDLE_WORKER_GRANT`, none of which contains a `*`. A future grant appends
+    beside these and has to extend the snapshot: that is the pin working, not a test in the
+    way, and the message says so rather than leaving the next author to guess.
     """
     shipped = tuple(spec.ALLOWED_GLOBS)
     assert shipped.count(SETUP_DECIDER) == 1, (
@@ -4412,33 +4421,36 @@ def test_the_grant_adds_one_entry_and_edits_no_other():
     assert not dupes, (
         f"{dupes} appear more than once in ALLOWED_GLOBS, so the tuple is no longer a "
         f"readable list of the grants the loop holds")
-    # `+ 2`, not `+ 1`. That constant names the 30 entries exactly as they stood before
-    # #4037, so it holds #4037's own grant as the 31st and #4156's README grant as the
-    # 32nd. Its docstring's "extend the constant rather than the arithmetic" and this
-    # line's `+ 1` cannot both survive a second widening - extending the constant would
-    # make its own name false - so the constant stays a snapshot of that moment and the
-    # delta counts the one-string grants that followed. Teeth undiminished: an entry
-    # beyond #4156's, a rename, a drop or a reorder fails this line, and so does a
+    # `+ 3`, not `+ 1`. That constant names the 30 entries exactly as they stood before
+    # #4037, so it holds #4037's own grant as the 31st, #4156's README grant as the 32nd and
+    # #4532's idle-worker grant as the 33rd. Its docstring's "extend the constant rather than
+    # the arithmetic" and this line's `+ 1` cannot both survive a second widening - extending
+    # the constant would make its own name false - so the constant stays a snapshot of that
+    # moment and the delta counts the one-string grants that followed. Teeth undiminished: an
+    # entry beyond #4532's, a rename, a drop or a reorder fails this line, and so does a
     # wildcard grant, which is a new string too; the membership and ordering assertions
     # below are what still grade that.
-    assert len(shipped) == len(ALLOWED_GLOBS_BEFORE_4037) + 2, (
+    assert len(shipped) == len(ALLOWED_GLOBS_BEFORE_4037) + 3, (
         f"{len(shipped)} entries against the {len(ALLOWED_GLOBS_BEFORE_4037)} shipped "
-        f"before #4037 plus this one: the grant was asked to add exactly one string")
-    # #4156 is the widening this docstring predicts ("the next widening that lands rewrites
-    # this node to name 32"), so the strip now removes TWO one-string grants: #4037's and
-    # #4156's. Comparing the remainder to the snapshot in tuple order is the whole point of
-    # this node and is strictly stronger than a set comparison — it still refuses an edit,
-    # a removal or a reorder of any of the 30, and it refuses a third entry nobody granted,
-    # because then the remainder is 31 long and cannot equal the snapshot at all.
-    only_grants = (SETUP_DECIDER, "agent-services/README.md")
+        f"before #4037 plus the three one-string grants since: the grant was asked to add "
+        f"exactly one string")
+    # #4156 was the widening this docstring predicted ("the next widening that lands rewrites
+    # this node to name 32"), and #4532 is the one after it, so the strip now removes THREE
+    # one-string grants: #4037's, #4156's and #4532's. Comparing the remainder to the
+    # snapshot in tuple order is the whole point of this node and is strictly stronger than a
+    # set comparison — it still refuses an edit, a removal or a reorder of any of the 30, and
+    # it refuses a fourth entry nobody granted, because then the remainder is 31 long and
+    # cannot equal the snapshot at all.
+    only_grants = (SETUP_DECIDER, "agent-services/README.md", IDLE_WORKER_GRANT)
     remainder = tuple(g for g in shipped if g not in only_grants)
     assert remainder == ALLOWED_GLOBS_BEFORE_4037, (
-        f"stripping the two verbatim grants does not reproduce the pre-#4037 tuple, so an "
+        f"stripping the three verbatim grants does not reproduce the pre-#4037 tuple, so an "
         f"existing entry was edited, removed or reordered — the 30-entry snapshot names "
-        f"what was expected and the live tuple, minus those two, is {remainder}")
-    assert shipped[-1] == "agent-services/README.md" and shipped[-2] == SETUP_DECIDER, (
-        "both grants are appended, in landing order; anything else is a diff that is not "
-        '"one string added"')
+        f"what was expected and the live tuple, minus those three, is {remainder}")
+    assert (shipped[-1] == IDLE_WORKER_GRANT and shipped[-2] == "agent-services/README.md"
+            and shipped[-3] == SETUP_DECIDER), (
+        "all three grants are appended, in landing order; anything else is a diff that is "
+        'not "one string added"')
     # Measured off the shipped tuple, not off `only_grants[1]`: a string this file itself
     # wrote cannot fail, and the claim is about what `spec.py` ships. `fnmatch` is the same
     # matcher `classify` uses, so a wildcard spelling of this one file would turn up here in
@@ -4879,3 +4891,215 @@ def test_the_readme_grant_comment_names_the_item_and_refuses_the_directory():
     assert "rung 0" in block or "live tree" in block, (
         "the comment must record that a widening does not bind for its own round, which is "
         "why the README's prose is a later item and not this diff")
+
+
+# #4532 (2026-11-24): the twelfth verbatim name — `idle-worker.py`, the file #4531
+# clause 1 has to convert and could not reach. #4531's round SM_20261124_034420 carried
+# the conversion and #4532 was filed from the scope refusal it drew, the same trade
+# #1449, #1883, #2278, #2779, #3162, #4037 and #4156 each paid for with one line here.
+# Grant-only, by that precedent and by the mechanism: rung 0 grades with the spec the
+# detached gate imports from the live tree, so this widening cannot bind for the round
+# that writes it, and `agent-services/services/idle-worker/idle-worker.py` must stay out
+# of this diff — the conversion is the next round, the re-offer of #4531 clause 1. What
+# this section pins is the admission, its cost, and the fact that it bought nothing else.
+#
+# One caveat for whoever reads these three nodes next: the refusal this item quotes came
+# from that round's `gate.json`, and a gate run overwrites the artifact. The file on disk
+# at `~/.local/state/lloyd-automod/rounds/SM_20261124_034420/gate.json` is for a LATER
+# head (`7443dfe0…`, six files in scope, preflight a pass), so the refused-path detail is
+# not re-derivable there. These nodes pin the state that refusal was about, not its
+# wording; #4532's own findings record the overwrite.
+
+
+IDLE_WORKER_GRANT = "agent-services/services/idle-worker/idle-worker.py"
+#: The neighbours whose verdicts the grant must not move, and what each one is: the
+#: launcher in the SAME directory, which hand-rolls the same data root and stays
+#: `unlisted` because #4532's scope note leaves it to a person; three more of the five
+#: other tracked files in that directory — `git ls-tree --name-only HEAD -- agent-services/
+#: services/idle-worker/` shows six in all, counting the granted one — which a `**` entry
+#: would have swept in, a sibling inside the granted directory being the stronger witness,
+#: because a grant that took the whole directory still leaves a conf somewhere else
+#: unlisted; and two `protected` paths, asserted with the ordering property the #1376
+#: section pins — protected is consulted before `ALLOWED_GLOBS`, so no widening here
+#: reaches them.
+IDLE_WORKER_GRANT_SIBLINGS = {
+    "agent-services/services/idle-worker/start.sh": "unlisted",
+    "agent-services/services/idle-worker/check-github-releases.py": "unlisted",
+    "agent-services/services/idle-worker/README.md": "unlisted",
+    "agent-services/supervisor/conf.d/agent-llm-primary.conf": "protected",
+    "agent-services/bin/start-secondary.sh": "protected",
+}
+
+
+def _allowed_globs_as_written(text: str) -> list[str]:
+    """The `ALLOWED_GLOBS` entries of a given `spec.py` text, in tuple order.
+
+    Read off the source, not the import, because the comparison in
+    `test_the_idle_worker_grant_adds_one_entry_and_edits_no_existing_one` is against the
+    text at the round's base, which is a different commit from the one importing this
+    file. Parsed with `ast` so a trailing comment or a line continuation cannot make an
+    entry read differently here than the interpreter sees it.
+    """
+    import ast
+
+    for node in ast.walk(ast.parse(text)):
+        if (isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
+                and node.target.id == "ALLOWED_GLOBS" and node.value is not None):
+            return [e.value for e in node.value.elts]     # type: ignore[attr-defined]
+    raise AssertionError("ALLOWED_GLOBS is no longer a literal tuple in spec.py")
+
+
+def _comment_block_above(text: str, entry: str) -> str:
+    """The contiguous comment lines directly above `entry`'s line, which is where every
+    grant in this tuple says what it is for."""
+    lines = text.splitlines()
+    at = [i for i, ln in enumerate(lines) if entry in ln]
+    assert len(at) == 1, (
+        f"{entry} appears in spec.py {len(at)} time(s); the grant is to be spelled once, "
+        "verbatim, and a second spelling is how a directory entry hides beside a real one")
+    start = at[0]
+    while start and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    return "\n".join(lines[start:at[0]])
+
+
+def test_the_idle_worker_grant_admits_one_exact_path_and_nothing_else():
+    """#4532 clause 1: the granted file is `allowed`, its siblings are not, and the entry
+    is a name rather than a pattern.
+
+    The check that had to be red before the grant is the first assertion — over the live
+    tree `spec.classify('agent-services/services/idle-worker/idle-worker.py')` printed
+    `unlisted`, which is the whole of why #4532 exists. The rest is the shape of the fix:
+    `agent-services/services/idle-worker/**` would satisfy that assertion exactly as well
+    and would also admit `start.sh`, whose own data-root guess #4532 names as a scope call
+    no round makes, so the launcher's verdict is asserted in the same breath as
+    the granted file's. `*` crosses `/` in `fnmatch`, which is why the wildcard count
+    under `agent-services/` is pinned at zero rather than at "one more than before".
+    """
+    assert spec.classify(IDLE_WORKER_GRANT) == "allowed", (
+        f"{IDLE_WORKER_GRANT} classifies {spec.classify(IDLE_WORKER_GRANT)!r}, so the "
+        "scope rung still refuses the one path #4531 clause 1 has to write, and the "
+        "conversion round dies at rung 0 the way #4531's first attempt did")
+    for path, verdict in IDLE_WORKER_GRANT_SIBLINGS.items():
+        assert spec.classify(path) == verdict, (
+            f"{path} moved to {spec.classify(path)!r} (expected {verdict!r}); the grant is "
+            "one file, and `start.sh` moving means the directory went in")
+
+    assert IDLE_WORKER_GRANT in spec.ALLOWED_GLOBS, "the entry is not in the tuple"
+    starred = [g for g in spec.ALLOWED_GLOBS
+               if "*" in g and g.startswith("agent-services")]
+    assert not starred, (
+        f"a wildcard appeared under agent-services: {starred} — #1376 refuses it because "
+        "one keystroke in that tuple is a grant over the whole tree")
+    idle = [g for g in spec.ALLOWED_GLOBS if "idle-worker" in g]
+    assert idle == [IDLE_WORKER_GRANT], (
+        f"the idle-worker tree is reached by {idle}; exactly one verbatim file may name it")
+
+    text = (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
+    block = _comment_block_above(text, IDLE_WORKER_GRANT)
+    assert "#4532" in block, "the comment must name the item that asked for the grant"
+    assert "#4531" in block, (
+        "the comment must name the item whose clause the grant unblocks, or the next "
+        "reader cannot tell what the entry is worth")
+    for phrase in ("DATA_DIR", "$HOME/lloyd-data"):
+        assert phrase in block, (
+            f"the comment has to name the defect ({phrase}) it is priced against, not "
+            "just the item number — 'grant for #4531' is the wording #1376 calls a "
+            "pattern that says nothing")
+    assert "start.sh" in block and "unlisted" in block, (
+        "the comment must record that the sibling launcher is deliberately left out, or "
+        "its silence reads as an oversight and a later round widens the entry")
+    assert "agent-services/services/idle-worker/**" in block, (
+        "the comment must spell out the glob it is refusing, the way #3646's and "
+        "#4156's entries do, so the trade can be weighed from the entry itself")
+    assert "rung 0" in block or "live tree" in block, (
+        "the comment must record that a widening does not bind for its own round, which "
+        "is why the conversion is a later diff and not this one")
+
+
+def test_the_idle_worker_grant_moves_exactly_one_classification():
+    """#4532 clause 2: over the tracked `agent-services/` corpus, exactly one verdict
+    moves, and it moves because of the name and nothing else.
+
+    `before` is the shipped tuple with the granted entry removed — the tuple the round
+    this grant authorises will start from, plus the tuple #4531's attempt was refused
+    under. The assertion is a symmetric difference, so a grant that also swallowed a
+    launcher, a conf or a weight fails here and prints the offender rather than a count
+    that quietly grew. Measured over `git ls-files -- agent-services`: 226 tracked paths,
+    138 of them `protected` whatever this tuple says, the admitted set 11 before this entry
+    and 12 after, so the `unlisted` verdicts fall from 77 to 76. Those two readings are not
+    the same number — 215 and 214 are "not admitted", and 138 of those are `protected` — and
+    the node below asserts the symmetric difference of the admitted sets, which is the one
+    claim that cannot be quietly satisfied by a `protected` path changing hands.
+    """
+    import fnmatch
+
+    corpus = set(tracked_agent_services_paths())
+    assert len(corpus) >= 200, (
+        f"the tracked agent-services corpus is {len(corpus)} paths, below the floor every "
+        "other count in this file assumes — the corpus is broken, not the grant")
+    shipped = set(spec.ALLOWED_GLOBS)
+    assert IDLE_WORKER_GRANT in shipped, (
+        "the granted entry is not in the shipped tuple, so the before/after diff below "
+        "would compare the same tuple with itself and pass on nothing")
+    before = tuple(g for g in spec.ALLOWED_GLOBS if g != IDLE_WORKER_GRANT)
+
+    def admitted(globs):
+        return {p for p in corpus
+                if any(fnmatch.fnmatch(p, g) for g in globs)}
+
+    moved = admitted(shipped) ^ admitted(before)
+    assert moved == {IDLE_WORKER_GRANT}, (
+        f"the entry moved {len(moved)} tracked verdict(s): {sorted(moved)[:6]} — a "
+        "verbatim grant moves exactly the verdict it names")
+    assert len(corpus - admitted(shipped)) + 1 == len(corpus - admitted(before)), (
+        "the unlisted count did not drop by exactly one, which is the same claim read the "
+        "other way: this grant is one line and one file")
+    assert not agent_services_paths_admitted_without_being_named(), (
+        "the #1376 verbatisation rail went red on the shipped tuple: an agent-services "
+        "path is `allowed` that no entry names verbatim")
+
+
+def test_the_idle_worker_grant_adds_one_entry_and_edits_no_existing_one():
+    """#4532 clause 2's other half, read off the diff: one entry added, none edited.
+
+    The tuple at the round's base is the same file at `main`'s commit, so this is a text
+    comparison and not an opinion about the shipped tuple. Order matters: an entry that
+    was removed and re-added elsewhere reads as two edits, and the ordering of this tuple
+    is the only record of which grant came in under which item. Anything other than one
+    insertion is the widening the #1376 comment above the tuple says a person should be
+    able to read off one line.
+    """
+    import subprocess
+    import sys
+
+    sys.path.insert(0, str(REPO_ROOT / "tests"))
+    from skip_inventory import changed_paths, round_base  # noqa: E402
+
+    diff = set(changed_paths(REPO_ROOT))
+    assert diff, "the reader resolved an empty diff, so the comparison below is vacuous"
+    assert IDLE_WORKER_GRANT not in diff, (
+        f"this round rewrote {IDLE_WORKER_GRANT} itself. The grant is the whole of #4532: "
+        "a widening never binds for its own round, so carrying the conversion here lands a "
+        "diff whose scope was decided by the diff it is inside")
+    if "scripts/automod/spec.py" not in diff:
+        return          # #4532 has landed and this is now a later round's tree
+
+    base = round_base(REPO_ROOT)
+    prior = subprocess.run(["git", "show", f"{base}:scripts/automod/spec.py"],
+                           capture_output=True, text=True, cwd=REPO_ROOT)
+    assert prior.returncode == 0, (
+        f"cannot read spec.py at base {base}, so 'exactly one entry added' is unverifiable")
+    was = _allowed_globs_as_written(prior.stdout)
+    now = _allowed_globs_as_written(
+        (REPO_ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8"))
+    added = [g for g in now if g not in was]
+    removed = [g for g in was if g not in now]
+    assert added == [IDLE_WORKER_GRANT], (
+        f"the grant added {added}; exactly one entry, spelled verbatim, may appear")
+    assert not removed, (
+        f"the grant removed {removed}; an entry deleted to make room is an edit to "
+        "someone else's grant")
+    assert [g for g in now if g != IDLE_WORKER_GRANT] == was, (
+        "the surviving entries kept their contents but not their order, which is the "
+        "record of which item admitted what")

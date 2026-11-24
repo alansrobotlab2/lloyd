@@ -151,7 +151,7 @@ appears in this table: those threats are in the next one.
 | T-21 | B17 | chain | A turn installs a package nobody reviewed | `app/harness/supply_chain.py:421` |
 | T-22 | B17 | chain | A skill's installer pulls arbitrary code through a channel the matcher does not read | `eval/supply-chain/` |
 | T-23 | B11 | T | A round lands a diff in a path the loop may never write | `scripts/automod/spec.py::check_scope` |
-| T-24 | B11 | E | A round edits its own gate to let itself through | nothing refuses the diff: `check_scope` at `scripts/automod/spec.py:748` puts `scripts/automod/**` in protected scope, which is permitted and turns on the `drill` rung, so the check is `Gate.rung_review` at `scripts/automod/gate.py:4424` and a person |
+| T-24 | B11 | E | A round edits its own gate to let itself through | nothing refuses the diff: `check_scope` at `scripts/automod/spec.py:766` puts `scripts/automod/**` in protected scope, which is permitted and turns on the `drill` rung, so the check is `Gate.rung_review` at `scripts/automod/gate.py:4424` and a person |
 | T-25 | B11 | T | An agent-authored change weakens a guard and the suite stays green | `Gate.rung_review` at `scripts/automod/gate.py:4424` (a second reader grades the diff against the item's clauses) |
 | T-26 | B11 | D | A promotion ships a crash loop into the running system | `agent-services/guardian/guardian.py:1035` |
 | T-27 | B11 | T | A promotion silently deletes data and looks like a clean landing | `agent-services/guardian/vaultwatch.py` |

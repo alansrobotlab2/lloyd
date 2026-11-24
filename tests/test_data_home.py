@@ -2605,3 +2605,62 @@ def test_restore_data_guards_the_resolved_root_and_still_restores_beside_it(tmp_
                            stamp, str(tmp_path / "dest-broken"), tree=broken)
     assert r.returncode == 1 and "refusing" in r.stderr, r.stderr
     assert not (tmp_path / "dest-broken").exists(), r.stdout
+
+
+#: The file #4532's grant admits, and the one #4531's clause 1 still has to convert.
+#: Named here rather than read off ``ITEM_4531_BLOCKED_READER`` so that moving that
+#: constant into ``ITEM_4531_READERS`` — which the round that converts the worker owes
+#: — cannot break this node, whose claim outlives that move.
+GRANTED_IDLE_WORKER = "agent-services/services/idle-worker/idle-worker.py"
+
+
+def _git(*args: str) -> str:
+    r = subprocess.run(["git", "-C", str(ROOT), *args],
+                       capture_output=True, text=True)
+    assert r.returncode == 0, f"`git {' '.join(args)}` exited {r.returncode}: {r.stderr[:200]}"
+    return r.stdout
+
+
+def test_the_grant_that_admits_the_worker_leaves_the_worker_byte_identical():
+    """#4532 clause 4: the grant is an admission and nothing else — the file it names is
+    absent from the diff, and its `100755` survives.
+
+    Two separate regressions, both real here. The first is scope: `spec.classify` says the
+    path is writable once `ALLOWED_GLOBS` names it, so from the round that lands the grant
+    onward a round CAN rewrite the file — and #4531 clause 1's conversion is deliberately
+    NOT that round, because rung 0 grades with the spec the detached gate imports from the
+    live tree and a widening never binds for its own round. The second is the mode: the
+    daemon's file is `100755`, and a whole-file write strips the executable bit. That is
+    not hypothetical — `8b2e6794`, the first attempt at the conversion, opened with
+    `old mode 100755 / new mode 100644`, and `git diff --summary` is the only thing in the
+    repo that shows it. A lost `+x` on a script a timer runs directly reads as a `203/EXEC`
+    failure the gate's canary would never see, so the mode is asserted off the index, where
+    it is a fact about the commit rather than about this checkout.
+    """
+    mode = _git("ls-tree", "HEAD", "--", GRANTED_IDLE_WORKER).split()
+    assert mode and mode[0] == "100755", (
+        f"{GRANTED_IDLE_WORKER} is {mode[0] if mode else 'absent'} in the index, not 100755; "
+        "the worker is launched by path, so a stripped bit is an EXEC failure and no test of "
+        "the daemon's logic would notice")
+
+    sys.path.insert(0, str(ROOT / "tests"))
+    from skip_inventory import changed_paths, round_base  # noqa: E402
+
+    diff = set(changed_paths(ROOT))
+    # The guard comes before any "is the reader alive" assertion, and is itself that check:
+    # a reader that resolved nothing cannot name `spec.py`, so it takes the early return,
+    # and a reader that does name it has just proved it resolves a non-empty diff. The
+    # order matters because on a clean checkout of `main` the round base IS HEAD and the
+    # diff is legitimately empty — an `assert diff` above this line reads as a false red
+    # on any tree whose round is not an admission round (review finding on the first
+    # attempt at this node).
+    if "scripts/automod/spec.py" not in diff:
+        return          # not an admission round: the grant landed long ago
+    assert GRANTED_IDLE_WORKER not in diff, (
+        f"the round that landed the grant also rewrote {GRANTED_IDLE_WORKER}. The grant is "
+        "the whole of #4532 and the conversion is #4531 clause 1's next round: a diff may "
+        "not grant itself the write it then uses")
+    summary = _git("diff", f"{round_base(ROOT)}..HEAD", "--summary", "--", GRANTED_IDLE_WORKER)
+    assert "mode change" not in summary, (
+        f"the admission moved the file's mode anyway ({summary.strip()!r}) — the same bit "
+        "8b2e6794 lost, by a different route")

@@ -383,6 +383,24 @@ ALLOWED_GLOBS: tuple[str, ...] = (
     # forced into the same diff by #4045's anchor rail. #3646's clause-4 node used to refuse
     # exactly that; its #4156 note says what an admission may now carry.
     "agent-services/README.md",
+    # #4532 (2026-11-24): the twelfth verbatim name, and the same shape as #1449's
+    # `agent-services/livekit_worker.py` entry — `agent-services/**` is unlisted as a class,
+    # so the one file is named here. What it is for: `idle-worker.py`'s `DATA_DIR` falls
+    # back to `$HOME/lloyd-data` when `$LLOYD_DATA` is unset, and the daemon WRITES under
+    # that root (its state dir, its log, its PID file), so inside a gate round, where
+    # `$HOME` is the round's symlink farm, all three land on a wrong root without crashing
+    # — #1525's non-answer. #4531 clause 1 is the conversion itself, and this entry is only
+    # what makes it landable by a round: rung 0 grades with the spec the detached gate
+    # imports from the live tree, so this grant binds on the NEXT round, not this one. It is
+    # verbatim rather than `agent-services/services/idle-worker/**` because the sibling
+    # `start.sh` hand-rolls the same root and stays unlisted until a person rules on it
+    # (#4532's scope note): a directory pattern would say nothing and would admit both.
+    # Appended here rather than beside the #1449 line it most resembles for the reason the
+    # note immediately above records: an entry mid-tuple moves every `path:NNN` citation
+    # below it, and `architecture/threat-model.md` cites `check_scope` by line number.
+    # tests/test_automod_spec.py's #4532 section pins the single moved classification, that
+    # no directory entry appeared, and this comment's own wording.
+    "agent-services/services/idle-worker/idle-worker.py",
 )
 
 PROTECTED_GLOBS: tuple[str, ...] = (
