@@ -442,6 +442,29 @@ SNAPSHOT_CHECK_SECONDS = 900.0
 # (backlog #1416).
 SNAPSHOT_MAX_AGE_SECONDS = 3 * 3600.0
 
+# ── Tailnet TLS leaf ───────────────────────────────────────────────────────
+# The leaf `web/vite.config.ts` prefers for the Mission Control frontend, named by
+# the same two parts the script and Vite use: the directory under `REPO` and the
+# host whose `.crt`/`.key` pair it selects BY EXISTENCE (`fs.existsSync`, not
+# validity), so a pair that stands there expired is served tailnet-wide.
+# `scripts/renew-tailnet-cert.sh` keeps its own `TAILNET_CERT_HOST` default — this is
+# a read-side name, and the script is the writer.
+TAILNET_CERT_DIR = "agent-services/cert"
+TAILNET_CERT_HOST = "goliath.taile37041.ts.net"
+# Alert at this many days left or fewer. Strictly BELOW the renew window, which is
+# `CERT_RENEW_WINDOW_DAYS:-14` (`scripts/renew-tailnet-cert.sh:60`), and that gap is
+# the whole point: at exactly 14 the page would fire on the first morning the window
+# opens, before the 04:18 mint has had its chance, and a healthy box would hear from
+# this every year on a day nothing is wrong. Ten days in, at least one daily run has
+# already declined to produce a replacement — which is the condition this watch
+# exists for, because nothing else reads it. #1727 made the unit's non-zero exit the
+# ONLY signal of a refused mint, and `git grep -E 'is-failed|--failed|OnFailure'`
+# over scripts/, workers/, app/ and agent-services/ answers with two prose comments
+# and no code path, while `scripts/service_health_check.py:875` `_UNITS_FAIL_RE`
+# matches `.timer` names only — so a service that exits 1 daily keeps every published
+# row green.
+TAILNET_LEAF_MIN_DAYS_LEFT = 10
+
 # ── Error-rate detection ───────────────────────────────────────────────────
 LOG_FILES = (
     f"{DATA_ROOT}/logs/server.err",

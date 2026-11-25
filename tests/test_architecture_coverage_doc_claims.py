@@ -3285,8 +3285,27 @@ def test_the_span_rule_stops_short_of_a_wrong_anchor_that_lands_on_a_definition(
     # those two hunks and nothing else, and
     # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
     # prints 1035 with 3848 below it.
-    assert heads[guardian]["main"] == 3848, (
-        f"`main` moved off :3848 ({heads[guardian]['main']}) — if it is gone "
+    # 3848 -> 4046 AND 1035 -> 1035 is #4569: FOUR hunks, 199 added and 1 removed for a
+    # net +198, and the first is `@@ -39,7 +39,7 @@` — `datetime` gaining `timezone`, the
+    # one line the leaf's notAfter is compared against — which replaces a line rather than
+    # adding one, so it moves nothing. The other three are the round's own and all sit in
+    # the window between the two anchors: `@@ -1857,6 +1857,151 @@` (+145, `check_cert_expiry`
+    # and its two helpers, seated inside the class), `@@ -3218,6 +3363,14 @@` (+8, the call in
+    # `tick` above the state early returns) and `@@ -3705,6 +3858,51 @@` (+45, the alert title,
+    # the two-causes sentence and the journal readout). That last placement is deliberate and
+    # is #3502's and #3584's lesson applied: those three constants would naturally belong
+    # beside every other alert title at :133, and putting them there is the one edit in this
+    # round that would move `evaluate_liveness` off :1035 and drag
+    # `architecture/threat-model.md`'s T-26 cell with it — a published line number a human
+    # reads, moved by a change that has nothing to do with the threat it describes. Below the
+    # class, beside `RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE`, the head holds and only
+    # `main` pays: +145 + 8 + 45 = +198, and 3848 + 198 = 4046. Re-derive rather than trust
+    # that sum — `git diff <base> <head> -- agent-services/guardian/guardian.py | grep
+    # '^@@'` answers those four hunks and nothing else, and
+    # `grep -n '^    def evaluate_liveness\|^def main' agent-services/guardian/guardian.py`
+    # prints 1035 with 4046 below it.
+    assert heads[guardian]["main"] == 4046, (
+        f"`main` moved off :4046 ({heads[guardian]['main']}) — if it is gone "
         "altogether, this boundary may no longer be the one worth pinning")
     assert heads[guardian]["evaluate_liveness"] == 1035, (
         f"`evaluate_liveness` moved off :1035 "

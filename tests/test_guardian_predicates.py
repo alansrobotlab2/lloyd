@@ -560,6 +560,9 @@ def _observing_guardian(tmp_path, monkeypatch, *, kg_db: str, store_rows: int | 
     monkeypatch.setattr(g, "check_vault", lambda: None)
     monkeypatch.setattr(g, "check_data", lambda: None)
     monkeypatch.setattr(g, "check_memory", lambda: None)
+    # #4569 seats `check_cert_expiry` above the tick's early returns; a temp repo
+    # holds no tailnet pair, so it would page about that on every tick driven below.
+    monkeypatch.setattr(g, "check_cert_expiry", lambda *a, **k: None)
     rolled: list = []
 
     def _record_rollback(*a, **k):
@@ -670,6 +673,10 @@ def _guardian(tmp_path, monkeypatch, *, current, head, lkg):
                                                "procs": {}, "probes": {}})
     monkeypatch.setattr(g, "evaluate_liveness", lambda snap: (True, "backend FATAL"))
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
+    # #4569 seats `check_cert_expiry` above the tick's early returns; a temp repo
+    # holds no tailnet pair, so its page would become `alerts[0]` for the nodes below
+    # that index the first alert. Nothing here is about certificates.
+    monkeypatch.setattr(g, "check_cert_expiry", lambda *a, **k: None)
 
     # Each stub records its own call and nothing else. Every assertion below
     # reads `rolled` / `alerts`; the bools are there only because the real methods

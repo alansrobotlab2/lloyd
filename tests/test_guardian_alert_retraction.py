@@ -326,6 +326,12 @@ def _ticking(tmp_path, monkeypatch, *, liveness):
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(g, "do_rollback", lambda *a: True)
     monkeypatch.setattr(g.notifier, "vault_root", tmp_path)
+    # Same class as the `/tmp` stub below, and for the same reason: #4569 seats
+    # `check_cert_expiry` above the tick's early returns, a temp repo holds no tailnet
+    # pair, and its page is coalesced — so it would contribute a SECOND
+    # `DAILY_STILL_OPEN` to the note every node below counts, and this file's colour
+    # would depend on a certificate that is nothing to do with it.
+    monkeypatch.setattr(g, "check_cert_expiry", lambda *a, **k: None)
 
     # The /tmp the tick measures is the one this test hands it, not the host's.
     # `check_tmp` (guardian.py:1316-1332) calls `notifier.alert(..., coalesce=True)` on

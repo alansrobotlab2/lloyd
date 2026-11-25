@@ -39,7 +39,7 @@ import stat
 import subprocess
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -1857,6 +1857,151 @@ class Guardian:
                        "line, rollback and settle included, is skipped while this lasts. "
                        "`journalctl --user -u lloyd-guardian` has each traceback line.")
 
+    # ── tailnet TLS leaf expiry ────────────────────────────────────────
+    #: The verdict this process is currently paging for, or None. Class default like
+    #: `_tick_errors` above, so a Guardian built with `__new__` reads "nothing
+    #: standing". The bound on repeats is deliberately tighter than
+    #: `policy.ALERT_REPEAT_SECONDS`: a leaf at 10 days left is a condition designed
+    #: to last ten days, and a 900-second window pages 96 times a day for it — which
+    #: is not just noise but #3551's exact failure mode, because the backlog duplicate
+    #: guard that would suppress those filings fails OPEN when the board's cold parse
+    #: cache blows its timeout. Same shape as `_tick_error_alerted`: one alarm per
+    #: distinct verdict, retracted when the reading goes healthy.
+    _cert_leaf_alarm: str | None = None
+
+    def _tailnet_leaf_pair(self, leaf_crt: str | None = None) -> tuple[str, str]:
+        """The `.crt`/`.key` paths, the argument overriding the repo-relative pair.
+
+        Injectable because the production pair is gitignored (`.gitignore:99`) and so
+        exists only in the live checkout — no fixture can be committed beside it, and
+        a check that could only read `/home/alansrobotlab/lloyd/agent-services/cert`
+        could not be tested against a leaf of a known age at all.
+        """
+        crt = str(leaf_crt or os.path.join(
+            self.repo, policy.TAILNET_CERT_DIR, f"{policy.TAILNET_CERT_HOST}.crt"))
+        return crt, os.path.splitext(crt)[0] + ".key"
+
+    def _leaf_reading(self, crt: str, key: str) -> tuple[str, float, str, str]:
+        """Read the pair once: `(verdict, days_left, raw_stamp, iso_date)`.
+
+        `verdict` is `ok`, `low`, `absent` or `unparseable`. The date comes out of
+        `openssl x509 -enddate -noout` — the exact command
+        `scripts/renew-tailnet-cert.sh:87` parses, so the guardian and the renewer
+        cannot hold two readings of one leaf — and never from a Python PEM parse.
+
+        Everything from the spawn outwards is inside one `try`, and every way out of
+        it answers `unparseable`. That is deliberate: a failure to read is itself the
+        fault this watch reports, so an unexpected shape from openssl costs a page,
+        never silence — and silence is the failure mode this whole item exists to
+        close.
+        """
+        if not (os.path.isfile(crt) and os.path.isfile(key)):
+            # Vite needs BOTH names: `haveTs` is `fs.existsSync(crt) &&
+            # fs.existsSync(key)` (web/vite.config.ts:20), so half a pair is the
+            # same fact to the thing being served as no pair at all.
+            return "absent", 0.0, "", ""
+        try:
+            proc = subprocess.run(["openssl", "x509", "-enddate", "-noout", "-in", crt],
+                                  capture_output=True, timeout=10.0, check=False)
+            raw = (proc.stdout or b"").decode("utf-8", "replace").strip()
+            if proc.returncode != 0 or not raw.startswith("notAfter="):
+                return "unparseable", 0.0, (
+                    raw or f"openssl printed no notAfter= (exit {proc.returncode})"), ""
+            stamp = raw[len("notAfter="):]
+            try:
+                # openssl prints GMT, and `%Z` on a box whose own `time.tzname` is PST
+                # leaves the result naive — so the zone is asserted, not looked up.
+                # `tests/test_renew_tailnet_cert.py:163` parses this same string the
+                # same way, which is what keeps the two readers honest with each other.
+                end = datetime.strptime(stamp, "%b %d %H:%M:%S %Y %Z").replace(
+                    tzinfo=timezone.utc)
+            except ValueError:
+                return "unparseable", 0.0, stamp, ""
+            days = (end - datetime.now(timezone.utc)).total_seconds() / 86400.0
+            iso = end.date().isoformat()
+            if days > policy.TAILNET_LEAF_MIN_DAYS_LEFT:
+                return "ok", days, stamp, iso
+            return "low", days, stamp, iso
+        except Exception as exc:  # noqa: BLE001 — an unreadable leaf IS the fault, so say it
+            log(f"tailnet leaf: notAfter could not be read: {type(exc).__name__}: {exc}")
+            return "unparseable", 0.0, f"{type(exc).__name__}: {exc}", ""
+
+    def check_cert_expiry(self, leaf_crt: str | None = None) -> None:
+        """Alarm when the tailnet TLS leaf Vite prefers is close to expiry, gone, or
+        unreadable — the alarm #1727's own design left with no owner.
+
+        That item ruled that a refused mint's non-zero exit is the only signal, on the
+        reasoning that `systemctl --user --failed` and the journal are readable. They
+        are; by nobody. So the sequence that was designed to be safe is silent: from
+        the day the 14-day window opens, every daily run of
+        `scripts/renew-tailnet-cert.sh` may exit 1 for a month, and the first evidence
+        is a tailnet-wide TLS failure — with `web/vite.config.ts` selecting the leaf by
+        `fs.existsSync` rather than by validity, so the dead pair is served right up
+        until then. #1416 fixed the same class of hole (a periodic job that fails
+        quietly) with a guardian poller and a named threshold rather than a new timer,
+        and this is that shape applied here.
+
+        Placed with `check_vault`/`check_data`, above the `infra_down`, `broken` and
+        `paused` early returns in `tick()`, for the reason their comment already
+        gives: a check seated below those returns does not run in the states where
+        things are going wrong — and a certificate's clock runs during a pause, which
+        no other watch here has to say about itself.
+
+        Never raises into the tick: an unreadable cert directory, a missing openssl,
+        or a leaf that will not parse all cost an alarm, never the tick after it.
+        """
+        try:
+            crt, key = self._tailnet_leaf_pair(leaf_crt)
+            verdict, days, stamp, iso = self._leaf_reading(crt, key)
+        except Exception as exc:  # noqa: BLE001 — same rule as the watches around it
+            log(f"tailnet leaf check failed (continuing): {type(exc).__name__}: {exc}")
+            return
+
+        if verdict == "ok":
+            if self._cert_leaf_alarm is not None:
+                self._cert_leaf_alarm = None
+                self._notify("resolve", CERT_LEAF_ALERT_TITLE,
+                             f"the tailnet leaf reads notAfter={stamp} ({iso}) again, "
+                             f"{days:.1f} days out — past the "
+                             f"{policy.TAILNET_LEAF_MIN_DAYS_LEFT}-day floor")
+            return
+
+        if self._cert_leaf_alarm == verdict:
+            # Same reading as the one already paging. A change of verdict is new
+            # information and speaks again; a repeat of it is not.
+            return
+        self._cert_leaf_alarm = verdict
+
+        if verdict == "low":
+            body = (
+                f"The tailnet leaf `{crt}` reads\n"
+                f"  notAfter={stamp}  ({iso}, {days:.1f} days left)\n"
+                f"which is at or inside the {policy.TAILNET_LEAF_MIN_DAYS_LEFT}-day "
+                "floor, `TAILNET_LEAF_MIN_DAYS_LEFT` in "
+                "`agent-services/guardian/policy.py`.\n\n"
+                "The renewer should have replaced it before now: its window opens at "
+                "14 days (`CERT_RENEW_WINDOW_DAYS` in "
+                "`scripts/renew-tailnet-cert.sh`), so at least one daily run has had "
+                "its chance and this leaf is still standing — which means that run "
+                "did not succeed. " + CERT_LEAF_RENEW_READOUT
+            )
+        else:
+            which = (f"Neither `{crt}` nor `{key}` is there to read" if verdict == "absent"
+                     else f"`openssl x509` cannot read a leaf from `{crt}` — it said: {stamp}")
+            body = (
+                f"The tailnet leaf that `web/vite.config.ts` prefers cannot be read: "
+                f"{which}.\n\n" + CERT_LEAF_ABSENT_CAUSES + "\n\n" + CERT_LEAF_RENEW_READOUT
+            )
+            if verdict == "unparseable":
+                # Say so rather than let the two causes above read as a guess: a file
+                # is present, so the pair was neither never-minted nor quarantined.
+                body += ("\n\nA file IS present at that path, so neither cause fits it "
+                         "exactly and the likeliest is a mint that wrote the pair "
+                         "partially. The script publishes a pair only by renaming a "
+                         "staged one that parses and has a later notAfter, so a "
+                         "half-written name here means that publish was interrupted.")
+        self.alert("error", CERT_LEAF_ALERT_TITLE, body)
+
     # ── worker-pool silence ────────────────────────────────────────────
     def check_pool(self, snap: dict) -> None:
         """Alarm when the worker pool is not running while the backend answers
@@ -3218,6 +3363,14 @@ class Guardian:
         # with nothing under observation — every state the returns below mean.
         self.check_vault()
         self.check_data()
+        # Same rule again, and this one has a deadline the others do not: a leaf's
+        # notAfter advances against the wall clock whether or not this process is
+        # listening, and the state in which it is most likely to go unread — a paused
+        # guardian, because a vault tripwire pauses the world and a paused guardian
+        # skips the checks below — is exactly a state in which the calendar keeps
+        # moving. A check seated under the returns would be a check that stops
+        # counting down during the outage that outlasts the cert.
+        self.check_cert_expiry()
         # Also above the returns, and for the item's own reason: the state this
         # watch exists for is a supported configuration that reports nothing, and
         # `paused` in particular is a state the pool-silence reading must survive —
@@ -3704,6 +3857,51 @@ TICK_ERROR_ALERT_TITLE = "Guardian ticks are failing"
 #: `current.json` verdict for a promotion judged bad whose revert would not apply.
 BAD_UNREVERTED = "bad_unreverted"
 RUNTIME_DATA_QUARANTINE_LEDGER_ALERT_TITLE = "A quarantined stray has no ledger row"
+
+#: The one title this watch raises, for all three of its readings (a leaf inside the
+#: floor, a pair that is not there, a file that will not parse). One title, because
+#: `Guardian.alert`'s same-title suppression and the daily note's fold both key on it,
+#: and three titles for one fault is how an alarm gets skimmed.
+CERT_LEAF_ALERT_TITLE = "The tailnet TLS leaf is expired, missing or unreadable"
+
+#: Why the pair may be gone, in the words the alert publishes. Both causes have to be
+#: named together or the alert misreads #2209's own fallback as a fresh fault:
+#: `scripts/renew-tailnet-cert.sh` step 5 MOVES a pair it failed to renew out of the
+#: cert dir into `.expired-$HOST/` within 24 h of its notAfter and restarts the
+#: frontend, precisely so Vite's `fs.existsSync` selection falls back to the
+#: still-valid `lloyd.crt`. That is a designed degraded state, and an absent pair is
+#: now as often that as a box the leaf was never minted on.
+CERT_LEAF_ABSENT_CAUSES = (
+    "Two causes produce a missing pair, and they need different fixes: the leaf was "
+    "NEVER MINTED on this box (`tailscale cert <host>` has not been run here), or "
+    "`scripts/renew-tailnet-cert.sh` QUARANTINED it (#2209) — a run that could not "
+    "mint a replacement moved the pair out of the cert dir into `.expired-<host>/` "
+    "beside it, so Vite would stop serving a dead leaf tailnet-wide and fall back to "
+    "the private `lloyd.crt`. The second means a mint was REFUSED, and only the "
+    "unit's own journal says why."
+)
+
+#: Where to go read, in every body this watch publishes. #1727's ruling made the
+#: unit's non-zero exit the ONLY signal of a refused mint, and `git grep -E
+#: 'is-failed|--failed|OnFailure'` across scripts/, workers/, app/ and
+#: agent-services/ answers with two prose comments and no code path — no
+#: `ConditionPathExists`, no `OnFailure=`, no reader of `systemctl --user --failed`.
+#: The one check that does look at units cannot see it either:
+#: `scripts/service_health_check.py:875` `_UNITS_FAIL_RE` matches `.timer` names, and
+#: `scripts/maintenance/check-unit-enabledness.sh` asserts enabledness and arming, so
+#: a `lloyd-cert-renew.service` that exits 1 daily keeps every row green.
+CERT_LEAF_RENEW_READOUT = (
+    "What the run said is in its journal — a refused mint writes no byte and leaves "
+    "the pair exactly as it was, which is why the non-zero exit is the only signal, "
+    "and nothing in the stack reads it:\n"
+    "  journalctl --user -u lloyd-cert-renew.service -n 40 --no-pager\n"
+    "`scripts/maintenance/check-unit-enabledness.sh` asserts only that the TIMER is "
+    "enabled and armed, and `scripts/service_health_check.py`'s `_UNITS_FAIL_RE` "
+    "matches `.timer` names, so a service that exits 1 every day keeps every "
+    "published row green while Vite serves whatever pair the cert directory holds. "
+    "The owner is safe to run by hand: "
+    f"{policy.REPO}/scripts/renew-tailnet-cert.sh"
+)
 
 
 # ── tripwire clear conditions (#3106; module level and shared under #3502) ────────

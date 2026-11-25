@@ -382,6 +382,10 @@ def _guardian(tmp_path, monkeypatch, *, current, down):
     monkeypatch.setattr(g, "alert", lambda *a, **k: alerts.append(a))
     monkeypatch.setattr(g, "evaluate_errors", errors)
     monkeypatch.setattr(g, "evaluate_data_damage", damage)
+    # #4569 seats `check_cert_expiry` above the tick's early returns, and a temp repo
+    # holds no tailnet pair — so the watch would page about exactly that, ahead of the
+    # alert each node below indexes into. Not what this file is about.
+    monkeypatch.setattr(g, "check_cert_expiry", lambda *a, **k: None)
     return g, rolled, alerts, judged
 
 

@@ -336,6 +336,11 @@ def guardian(tmp_path, monkeypatch):
     monkeypatch.setattr(g, "alert", lambda *a, **k: alerts.append(a))
     monkeypatch.setattr(g, "check_vault", lambda: None)
     monkeypatch.setattr(g, "check_data", lambda: None)
+    # #4569 seats `check_cert_expiry` above the tick's early returns, and a temp repo
+    # holds no tailnet pair: it would page about that on every tick this fixture
+    # drives, including the one below that counts the alerts an outage is allowed to
+    # produce. Its own file is tests/test_guardian_cert_expiry.py.
+    monkeypatch.setattr(g, "check_cert_expiry", lambda *a, **k: None)
     monkeypatch.setattr(g, "ensure_chronic", lambda: None)
     monkeypatch.setattr(g, "heartbeat", lambda *a, **k: None)
     monkeypatch.setattr(g, "maybe_settle", lambda current: None)

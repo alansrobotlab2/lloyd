@@ -630,6 +630,11 @@ def test_the_vault_snapshot_check_runs_from_the_tick_even_while_paused(guardian,
     monkeypatch.setattr(g.state, "is_broken", lambda: False)
     monkeypatch.setattr(g.state, "current", lambda: None)
     monkeypatch.setattr(g, "evaluate_liveness", lambda s: (False, "ok"))
+    # #4569 seats `check_cert_expiry` above the tick's early returns too, and the
+    # `stubbed` runner below answers every non-git command with empty stdout — which
+    # for a leaf read is precisely an unreadable cert, so the watch would page for it
+    # and this node asserts the tick's alert list exactly. Not what it is about.
+    monkeypatch.setattr(g, "check_cert_expiry", lambda *a, **k: None)
     real_run = subprocess.run
 
     def stubbed(cmd, *a, **k):
