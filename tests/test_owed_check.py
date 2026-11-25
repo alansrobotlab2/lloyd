@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -2737,6 +2738,173 @@ def test_a_refused_carrier_close_is_cleared_by_filing_the_carrier_item_it_names(
     assert child_path is not None and fm_of(child_path)["status"] == "draft", \
         "the step is now carried by an open item, which is the point"
 
+
+# ── #4380: the shipped scope note carries the #4242 RULING, not the question ─
+#
+# The note above `CARRIER_GUARD_PREFIX` used to end "widening this one the same way is
+# the ruling #4242 owes after landing". #4242 ruled on 2026-11-19 and then CLOSED, so
+# the note was forwarding a decided question to a closed item that can no longer answer
+# it — the standing class rule "a closed item is not an owner", firing on the loop's own
+# comment. These nodes fail if a rewrite drops the ruling, its numbers, its reopen
+# trigger or its enumeration, and they re-point every `backlog.py:NNNN` the note cites by
+# that line's TEXT, so a citation that rots is named rather than believed.
+
+#: (marker the note must carry, token the line it cites must carry). A route per entry:
+#: the code at the cited line has to say this for the note's claim about it to hold.
+CITED_ROUTE_TOKENS = {
+    "the landing sweep's `_close_settled_items`": "_O.hand_run_pending(fm)",
+    "the member-fold in that same sweep": "_O.hand_run_pending(mfm)",
+    "`out[iid] =": 'out[iid] = ("draft"',
+    "RETIRING": "if close and verdict in RETIRING:",
+    "`_ledger_rows_merged`": "def _ledger_rows_merged(ledger: Path)",
+}
+
+
+def _carrier_scope_note_raw() -> str:
+    """The shipped note, sliced from its banner to the constant it introduces."""
+    src = (ROOT / "scripts" / "automod" / "owed.py").read_text(encoding="utf-8")
+    start = src.index("# ── The carrier guard (#4242)")
+    return src[start:src.index("CARRIER_GUARD_PREFIX =")]
+
+
+def _carrier_scope_note() -> str:
+    """That note with its comment marks and line wraps folded away.
+
+    Collapsed rather than matched line by line: the prose is a paragraph a human wraps
+    for reading, and a node that pinned a sentence to a line break would fail on a
+    re-wrap that changed nothing.
+    """
+    return " ".join(line.lstrip("#* ").strip()
+                    for line in _carrier_scope_note_raw().splitlines())
+
+
+def test_the_carrier_guard_note_states_the_widening_as_refused_not_owed():
+    """Clause 1. The note decides; it no longer forwards. Both grep exits the item's
+    own acceptance check names are run, because that pair is the contract."""
+    flat, low = _carrier_scope_note(), _carrier_scope_note().lower()
+    assert "widening refused" in low, (
+        "the note no longer states the ruling, so a reader re-opens the question")
+    assert "#4242" in flat and "2026-11-19" in flat, (
+        "the ruling has to name the item that made it and the day it was made, or a "
+        "later reader cannot check it against anything")
+    assert "by decision" in low and "scope slip" in low, (
+        "the unguarded routes must read as decided, not as an omission")
+    assert "owed-check's route" in low, (
+        "the note must name the ONE route that does read the guard")
+    assert "owes after landing" not in low, (
+        "the note is forwarding the question to a closed item again")
+    for pattern, want in (("widening refused", 0),
+                          ("the ruling #4242 owes after landing", 1)):
+        probe = subprocess.run(   # the item states its check as a git grep; run that
+            ["git", "grep", "-n", pattern, "--", "scripts/automod/owed.py"],
+            cwd=str(ROOT), capture_output=True, text=True, check=False)
+        assert probe.returncode == want, (
+            f"`git grep -n {pattern!r} -- scripts/automod/owed.py` exited "
+            f"{probe.returncode}, wanted {want}: {probe.stdout.strip()}")
+
+
+def test_the_carrier_guard_note_carries_the_gain_and_the_cost():
+    """Clause 2. Both measurements, or the next reader re-litigates with a guess."""
+    flat = _carrier_scope_note()
+    assert "0 of the 4,157" in flat, (
+        "the gain that kept the guard narrow is zero UNDISCHARGED owed_outside orphans "
+        "over 4,157 done items; without the zero the cost reads as cowardice")
+    assert "498" in flat and "448" in flat and "296" in flat, (
+        f"the cost side has to carry 448 of 498 and the 296 held closes: {flat}")
+    assert "(50 came through owed-check)" in flat, (
+        "the split of the 498 is what makes 448 the unguarded figure")
+    assert "in one month" in flat, "296 is a rate over a named window, not a total"
+
+
+def test_the_carrier_guard_note_says_a_held_close_goes_back_to_the_dispatcher():
+    """Clause 3. The cost is in code, not in tone: the hold writes the implement-pool
+    status, so a held met-landing is handed back rather than left to rest."""
+    flat, low = _carrier_scope_note(), _carrier_scope_note().lower()
+    assert 'out[iid] = ("draft"' in flat, "the note must quote the hold's write"
+    assert "desired_statuses" in flat, "and name the function that writes it"
+    assert "dispatcher" in low, (
+        "a held close is only 'a capability removed' because the hold returns the item "
+        "to the pool the dispatcher serves")
+    assert "capability removed" in low, (
+        "the ruling's own words for what widening costs")
+
+
+def test_the_carrier_guard_note_names_the_evidence_that_would_reopen_it():
+    """Clause 4. The trigger is rows, not opinion — and the rotation trap is inside
+    it, because counting the live ledger alone under-counts a real refusal."""
+    flat, low = _carrier_scope_note(), _carrier_scope_note().lower()
+    assert "promotions.jsonl" in flat, "the trigger is measured on the owed ledger"
+    assert "_ledger_rows_merged" in flat and "under-counts" in low, (
+        "a trigger counted over the live file alone reads a refusal as an absence once "
+        "the monthly rotation moves the row")
+    assert "non-empty `result.carrier_guard`" in flat, "the first arm, named exactly"
+    assert "written EMPTY" in flat, (
+        "the key is present on every ordinary pass, so the trigger has to say the "
+        "refusal is a NON-EMPTY list and never a missing key")
+    assert "also reachable by a met landing" in low, "the second arm"
+    assert "undischarged" in low, "the third arm: a measured non-owed orphan"
+    assert "owed-check job owns that measurement" in low, (
+        "a future round must not simulate the measurement to satisfy the trigger")
+
+
+def test_the_carrier_guard_note_stops_at_four_and_names_the_retiring_road():
+    """Clause 5. The unguarded set is not 'three': the met-landing enumeration is
+    three roads, and `record_verdict`'s RETIRING branch is a fourth that no landing and
+    no sha ever reaches. #4284 is the precedent for filing that one on its own."""
+    flat, low = _carrier_scope_note(), _carrier_scope_note().lower()
+    assert "three other routes" not in low, (
+        "the note is presenting the met-landing set as the whole set again — the #3461 "
+        "mistake it says this file has already made twice")
+    assert "record_verdict" in flat and "RETIRING" in flat, (
+        "the fourth road has to be named, not implied")
+    assert "#4284" in flat and "per closer" in low and "never a bulk" in low, (
+        "the precedent is what stops the next reader widening all four at once")
+    assert "#3461" in flat, "the note says which mistake the enumeration avoids"
+    lines = (ROOT / "scripts" / "automod" / "backlog.py").read_text(
+        encoding="utf-8").splitlines()
+    raw = _carrier_scope_note_raw().splitlines()
+    for marker, token in CITED_ROUTE_TOKENS.items():
+        at = next((i for i, line in enumerate(raw) if marker in line), None)
+        assert at is not None, f"the note no longer names {marker!r}"
+        # A citation may sit on a wrapped continuation of the same bullet, so the
+        # search is the marker's line plus the two that follow it.
+        cited = re.findall(r":(\d{3,5})\b", "\n".join(raw[at:at + 3]))
+        assert cited, f"the note's {marker!r} bullet lost its backlog.py citation"
+        n = int(cited[0])
+        assert 0 < n <= len(lines), f"the note cites backlog.py:{n}, past the file's end"
+        assert token in lines[n - 1], (
+            f"the note cites backlog.py:{n} for {marker!r}, but that line reads "
+            f"{lines[n - 1]!r} — the code moved and the citation did not")
+
+
+def test_the_retiring_close_reaches_done_on_the_carrier_the_guard_refuses(isolated):
+    """The asymmetry the ruling records, as behaviour rather than as a claim.
+
+    The note says the four other roads read no carrier guard BY DECISION. Same item,
+    the same single-open-carrier state #3812 reached, closed two ways: owed-check's
+    route refuses it, `record_verdict`'s retiring route reaches `done`. Nothing here
+    changes behaviour; it is the evidence the word "decision" rests on, so a reader who
+    wonders whether the unguarded set is an oversight can watch it happen.
+    """
+    p = _carrier_step_item(isolated, 1044)
+    refusal: dict = {}
+    assert O.close_item(p, "every owed entry is settled", refusal=refusal) is False, (
+        "owed-check's route is the guarded one; if it now closes, the asymmetry this "
+        "node pins has gone and the note's ruling needs re-measuring")
+    assert refusal.get("carrier_guard"), (
+        f"the refusal was not the carrier guard: {refusal}")
+    assert fm_of(p)["status"] != "done", "the guard's own refusal has to still hold"
+
+    B.record_verdict(B.item_by_id(1044), "stale", "superseded", close=True)
+    assert fm_of(p)["status"] == "done", (
+        "the retiring close is supposed to reach `done` with no carrier guard; if it "
+        "now refuses, the note's enumeration is stale and must change")
+    carriers = [i for i in B.open_items() if O.human_steps_of(i.frontmatter)]
+    assert carriers == [], (
+        "the step is still carried, so this is no longer the #3812 shape and the node "
+        "proves nothing")
+    assert O.human_steps_of(fm_of(p)), (
+        "the human step has to survive its carrier for the orphan to be real")
 
 # ── #4343: a ruling that names a re-arm measurement schedules it, and a
 #            stand-in name in brackets is not a follow-up ────────────────────

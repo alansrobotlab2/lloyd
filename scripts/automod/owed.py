@@ -919,12 +919,52 @@ hold_note = _hold_note
 # existing refusals (unparsed front matter, already `done`, a pending hand-run
 # #3017, #3931's lost discharge) all read THIS item's file; none could see that one.
 #
-# Scope, stated rather than slipped: this is owed-check's route to `done`. Three
-# other routes reach `done` — the landing sweep's close branch, the member-fold and
-# `desired_statuses`' met-landing branch (`backlog.py:4894-4901`, enumerated in
-# `hand_run_pending`'s docstring) — and they read no carrier guard. #3017 made its
-# predicate a shared four-closer check with a cross-surface test; widening this one
-# the same way is the ruling #4242 owes after landing, not a decision to sneak in.
+# Scope, stated because it is RULED, not owed. This is owed-check's route to `done`,
+# and the question this note used to forward — whether to widen the guard to the other
+# routes to `done` — was answered on #4242, 2026-11-19: widening refused. The other
+# routes reach `done` with no carrier guard BY DECISION, not by a scope slip waiting
+# for a reader to notice it. The routes, named by symbol because the line numbers under
+# them move (`backlog.py`, this commit):
+#
+#   * the landing sweep's `_close_settled_items` `if close:` hold — :4904;
+#   * the member-fold in that same sweep — :4967;
+#   * `desired_statuses`' met-landing branch — :5788;
+#   * `record_verdict`'s RETIRING branch, which reaches `done` on a `stale`/
+#     `already_done` triage with no landing and no sha behind it at all — :7591.
+#
+# The first three are the met-landing routes `hand_run_pending`'s docstring enumerates
+# beside this one; the retiring branch is a fourth road, and the only thing it asks of
+# a human run is the hand-run predicate plus #4066's written waiver, which #4284 put
+# there route by route. Reading the first three as the whole set is the #3461 mistake
+# this file has now made twice — a reader who believes there are three stops at three.
+#
+# Both sides of the ruling were measured over the November board, and the gain is zero.
+# The hole this guard exists for — an UNDISCHARGED `owed_outside` row orphaned by a
+# non-owed closer — is 0 of the 4,157 done items scanned. The cost is not zero: of 498
+# Nov-done items carrying at least one human-only step, 448 closed on the three
+# unguarded met-landing routes (50 came through owed-check), and 296 of those 448 named
+# a step no OPEN item names today, so a widened guard would have held 296 met-landing
+# closes in one month. And a held met-landing does not rest; it goes back to work:
+# `desired_statuses` answers it `out[iid] = ("draft", …)` at :5790, reached from the
+# `hand_run_pending` call at :5788, which returns the item to the pool the dispatcher
+# serves. That is what made it a capability removed, not a caution added — and it is
+# also why #3017 is not the precedent to copy: that widening followed a death measured
+# on the sweep's OWN route (#2998), while #3812 and #4008/#4009 are owed-check's route
+# alone.
+#
+# Three pieces of evidence would re-open it, and all three are rows rather than
+# opinion: one `owed_check` row with a non-empty `result.carrier_guard` counted over
+# `promotions.jsonl` AND its monthly rotations (`_ledger_rows_merged`, :2599, is the
+# reader that sees rolled-off rows — the live file alone under-counts, and the key is
+# written EMPTY on an ordinary pass, so a non-empty list is a refusal and never an
+# absence); or a rotation surfaced by `ledger_rows_merged` whose refused step is also
+# reachable by a met landing, which is one refusal hiding from that count; or any
+# measured close on one of the four routes above orphaning an undischarged
+# `owed_outside` row — the #3812 shape arriving somewhere other than here. The
+# owed-check job owns that measurement, not a round. And any future widening is filed
+# PER CLOSER as a bounded item, the way #4284 was filed for the retiring route's
+# missing hand-run reader: whether the CARRIER guard belongs on that retiring branch
+# too is its own question on its own merits, never a bulk change to all four at once.
 
 CARRIER_GUARD_PREFIX = "owed-check close refused: carrier guard"
 
