@@ -14,8 +14,10 @@ import importlib
 import json
 import re
 import subprocess
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 
 import workers.sources as sources
@@ -62,6 +64,7 @@ def _section(heading: str) -> str:
     return rest if end < 0 else rest[:end]
 
 
+SEC1 = "## 1. The roster"
 SEC2 = "## 2. What actually ran"
 SEC3 = "## 3. Dispatch — one door onto the autonomy fleet"
 SEC5 = "## 5. Intake — the outside world in"
@@ -5136,3 +5139,364 @@ def test_the_cap_fallback_is_one_number_across_both_docs_and_the_code():
         f"modules still default `max_duration_seconds` to a literal: {second_readers}. "
         "architecture/autonomy.md says `deep_research.py` is the only one — either the "
         "doc or the tree is now wrong (#4103)")
+
+
+# ── #4552: §1's **on** column and `workers.sources.<name>.enabled` are one claim ──────
+#
+# §1's roster carries a machine-readable enablement claim — the **on** column, one cell
+# per registered source — and §4 restates the same fact for `fitness` as a keyed prose
+# claim: "**Enabled 2026-11-23** (`workers.sources.fitness.enabled`; shipped false
+# until …)". Between `229337f6` (2026-11-23, "The nightly fitness benches run", which
+# flipped that key to true) and the 2026-11-25 review that filed #4552, the doc asserted
+# one source was switched off while `config.yaml` said otherwise, and disagreed with its
+# own §4 for the whole of that day. §1's COUNT of sources has been railed since the file
+# said twelve with thirteen registered; the STATE of each one was railed for exactly one
+# of the seventeen — `failure-ledger`, by the #2309 node above, whose own assertions this
+# does not repeat — and the keyed prose form for none. These nodes are the recurrence
+# fence. The drift itself was corrected in the doc by the review that filed the item, so
+# every node here passes on the tree it lands on, and each is demonstrated against a
+# seeded flip rather than trusted because it is green.
+
+#: §4 here is the module's existing `SEC4` (#1689's block, :314) and §1 is the header's
+#: `SEC1`, added beside `SEC2`–`SEC7`. A section heading gets ONE module constant: a
+#: second binding of the same name wins for every reader at import, so re-pointing it for
+#: this rail would silently re-slice the other node's section — and a shorter heading
+#: makes the heading's own tail body text for whoever reads it next.
+REVIEW_LOG = "## Review log"
+
+
+def _section1_on_cells() -> dict[str, str]:
+    """Every §1 roster row's **on** cell verbatim, keyed by source name.
+
+    Parsed INSIDE §1 rather than by first match in the file: §2's window table opens its
+    rows with the same `| `name` |` shape and has seven cells and no **on** column, so a
+    whole-file scan would read a run count as an enablement verdict the day a section
+    moves. Cell 8 is the column `_roster_row` documents and the #2309 node asserts.
+    """
+    cells: dict[str, str] = {}
+    for ln in _section(SEC1).splitlines():
+        m = _ROW.match(ln)
+        if not m:
+            continue
+        parts = [c.strip() for c in ln.strip().strip("|").split("|")]
+        assert len(parts) == 9, (
+            f"a §1 line opens like a roster row (`| `{m.group(1)}` |`) and has "
+            f"{len(parts)} cells, not 9: {ln[:90]!r}. Cell 8 is the **on** column of the "
+            "roster only, so a second name-first table in §1 must be told apart from it "
+            "before that index means anything (#4552)")
+        cells[m.group(1)] = parts[8]
+    return cells
+
+
+#: A prose claim about ONE source's enablement leaf: the dotted path in backticks,
+#: either as the bare key — how §4 spells it — or carrying its value inside the same
+#: span, which is how §5 spells a sub-switch claim. The name segment is required and
+#: `.enabled` must follow it immediately, and that is what keeps the three decoys in
+#: this file out: `workers.enabled` (§3's master switch) has no name segment,
+#: `workers.sources.youtube-digest.papers.enabled` has a segment BETWEEN the name and
+#: the leaf, and `workers.sources.*.enabled` — how the 2026-11-25 changelog writes the
+#: family — has a `*` where a name must be.
+_ENABLED_LEAF = re.compile(
+    r"`workers\.sources\.([a-z][a-z0-9-]*)\.enabled(?::\s*(true|false))?`")
+
+#: A bare `enabled: true|false` literal, backticked or not. The lookbehind is the other
+#: half of the decoy defence: without it `workers.enabled: false` would read as a
+#: literal sitting loose on a line, which is exactly §3's sentence.
+_ENABLED_LITERAL = re.compile(r"(?<![\w.])enabled:\s*(true|false)")
+
+
+def _enabled_claim_findings(cfg: dict, rows: dict[str, str], scope: str) -> list[str]:
+    """Every disagreement between the doc's enablement claims and `workers.sources`.
+
+    `rows` and `cfg` are arguments, not reads, so the three seeded nodes below can flip
+    one value and re-run THIS predicate instead of a copy of it — which is the only way
+    a green fence here is evidence of anything.
+
+    The config side reads exactly one leaf per source, `cfg[name]["enabled"]`, and reads
+    an absent key as off because that is what the pool does: `WorkerPool._scheduler_pass`
+    in `workers/pool.py` steps past a source whose block does not say enabled. Never
+    `workers.enabled` — the master switch sits one level above this mapping — and never a
+    sub-switch nested inside a block, such as `youtube-digest`'s `papers`.
+
+    The prose side grades a line only if it names the leaf in backticks. A literal with
+    no key on its line is not a claim about a source: §1's own "(`enabled: false` until
+    its noise floors were measured by hand)" is a true sentence about the past and a rail
+    keyed on the bare literal would fail it, which is the caveat #4552 carries. A loose
+    literal IS attributed to a key when the line names exactly one, because §4's fitness
+    entry is written that way; a line naming two keys is left alone, since choosing
+    between them would be a guess.
+    """
+    out: list[str] = []
+    seen: set[tuple] = set()
+
+    def bad(key: tuple, message: str) -> None:
+        if key not in seen:
+            seen.add(key)
+            out.append(message)
+
+    for name in sorted(rows):
+        cell = rows[name]
+        says_on = cell.strip("*").strip().lower() == "yes"
+        block = cfg.get(name) or {}
+        cfg_on = bool(block.get("enabled", False))
+        if says_on != cfg_on:
+            bad(("row", name, cfg_on),
+                f"§1's roster says `{name}` is {'ON' if says_on else 'OFF'} (its **on** "
+                f"cell reads {cell!r}) while `workers.sources.{name}.enabled` is "
+                f"{block.get('enabled', 'ABSENT (no key in the block)')}. The **on** "
+                "column is the sentence an operator reads to decide what the fleet will "
+                "do, and this is the pair that stood contradicted for a day (#4552)")
+
+    for at, line in enumerate(scope.splitlines(), 1):
+        mentions = list(_ENABLED_LEAF.finditer(line))
+        if not mentions:
+            continue
+        claims: list[tuple[str, str]] = [
+            (m.group(1), m.group(2)) for m in mentions if m.group(2)]
+        if len(mentions) == 1:
+            only = mentions[0]
+            for lit in _ENABLED_LITERAL.finditer(line):
+                if only.start() <= lit.start() and lit.end() <= only.end():
+                    continue          # that literal IS the key's own inline value
+                claims.append((only.group(1), lit.group(1)))
+        for name, stated in claims:
+            block = cfg.get(name) or {}
+            cfg_on = bool(block.get("enabled", False))
+            if (stated == "true") != cfg_on:
+                bad(("prose", at, name, stated),
+                    f"line {at} of the checked scope claims "
+                    f"`workers.sources.{name}.enabled: {stated}` while config says "
+                    f"{block.get('enabled', 'ABSENT — no block, so the pool skips it')}: "
+                    f"{line.strip()[:110]!r} (#4552)")
+    return out
+
+
+def test_section1_on_column_and_enabled_prose_match_config():
+    """#4552 clauses 1, 3, 4 and 5: every source's enablement state, railed both ways.
+
+    One node, two surfaces, both directions. For every source §1 lists: a `yes` in the
+    **on** column asserts `workers.sources.<name>.enabled` is true, and any other cell
+    asserts it is not — so a `yes` beside a false block and a `no` beside a true block
+    each fail here. The cells are compared with `*` stripped because `autoresearch`'s
+    cell is `**yes**`, and a bare `cell == "yes"` compare would have reported that
+    source as OFF beside a config that enables it: the rail would have opened red on a
+    correct doc. The roster half covers the whole registry, not one row, and the prose
+    half runs over §1 and §4 together.
+
+    Coverage is asserted rather than assumed, and the registry is the key: the §1 count
+    sentence has been railed against `SOURCE_REGISTRY` since the doc said twelve with
+    thirteen registered, and this is the same fact for the column beside it.
+    """
+    cfg = _src_cfg()
+    rows = _section1_on_cells()
+    assert rows, "§1 parsed to zero roster rows, so every comparison below is vacuous"
+    assert set(rows) == _registry(), (
+        "the rail has silently stopped covering the fleet — the roster, "
+        "`SOURCE_REGISTRY` and the `workers.sources` blocks are three sets and this "
+        "node can only compare the pairs it can see. "
+        f"registered-but-not-in-§1={sorted(_registry() - set(rows))} "
+        f"in-§1-but-not-registered={sorted(set(rows) - _registry())} "
+        f"in-§1-but-no-block={sorted(set(rows) - set(cfg))}")
+    assert any("*" in cell for cell in rows.values()), (
+        "no **on** cell is bolded any more, so the `*`-stripping this rail depends on "
+        "is unexercised — `autoresearch`'s cell read `**yes**` when #4552 was filed and "
+        "that is the shape a naive compare gets wrong")
+
+    findings = _enabled_claim_findings(cfg, rows, _section(SEC1) + "\n" + _section(SEC4))
+    assert not findings, "\n".join(findings)
+
+
+def test_the_on_column_rail_fails_on_a_seeded_enabled_flip(monkeypatch):
+    """#4552 clause 2: the rail bites, in both directions, on a source nothing pinned.
+
+    `fitness` is one of the sixteen sources no node compared before #4552 — the #2309
+    node owns `failure-ledger` alone — and it is the source at the centre of the drift:
+    `229337f6` set its key true on 2026-11-23 while §1's cell stayed `**no**` until the
+    2026-11-25 review. Seed one value at a time and call the rail node itself, so what
+    fails is the shipped check and not a paraphrase of it.
+    """
+    mod = sys.modules[__name__]
+
+    # Direction 1: the block says false, the row still says yes.
+    seeded = {name: dict(block) for name, block in _src_cfg().items()}
+    assert seeded["fitness"]["enabled"] is True, "the seed needs the fleet as it stands"
+    seeded["fitness"]["enabled"] = False
+    monkeypatch.setattr(mod, "_src_cfg", lambda: seeded)
+    with pytest.raises(AssertionError) as flip:
+        test_section1_on_column_and_enabled_prose_match_config()
+    assert "fitness" in str(flip.value), (
+        f"the seeded flip did not fail the rail, or failed it for a source nobody "
+        f"touched: {str(flip.value)[:200]!r}")
+
+    monkeypatch.undo()
+
+    # Direction 2: the row says `**no**` and config says true — the exact shape of the
+    # day this item files, cell included.
+    real_rows = _section1_on_cells()
+    assert real_rows["fitness"] == "yes", real_rows["fitness"]
+    monkeypatch.setattr(mod, "_section1_on_cells",
+                        lambda: dict(real_rows, fitness="**no**"))
+    with pytest.raises(AssertionError) as stale:
+        test_section1_on_column_and_enabled_prose_match_config()
+    assert "fitness" in str(stale.value), (
+        f"a **no** cell beside an enabling block sailed past the rail: "
+        f"{str(stale.value)[:200]!r}")
+
+
+def test_the_enabled_rail_reads_the_leaf_and_no_other_switch():
+    """#4552 clause 3: three `enabled` shapes are in this file and one is a verdict.
+
+    `workers.enabled: false` (§3, the master switch) and
+    `workers.sources.youtube-digest.papers.enabled: false` (§5, an indent-8 sub-switch
+    inside a source block) both read as `enabled` to a grep and neither says anything
+    about whether a registered source runs. Both are seeded here — the master switch one
+    level above the mapping this rail reads, the sub-switch nested inside the very block
+    whose leaf is being judged — and neither may move a finding.
+    """
+    cfg = _src_cfg()
+    rows = _section1_on_cells()
+    scope = _section(SEC1) + "\n" + _section(SEC4)
+    assert _enabled_claim_findings(cfg, rows, scope) == []
+
+    block = cfg["youtube-digest"]
+    assert block["enabled"] is True and block["papers"]["enabled"] is True, (
+        "the seed assumes today's tree: the source on, its `papers` sub-switch on")
+    seeded = dict(cfg)
+    seeded["enabled"] = False                                     # `workers.enabled`
+    seeded["youtube-digest"] = dict(block, papers=dict(block["papers"], enabled=False))
+    assert seeded["youtube-digest"]["enabled"] is True, (
+        "the seed moved the leaf instead of the sub-switch, which would test nothing")
+    assert _enabled_claim_findings(seeded, rows, scope) == [], (
+        "the master switch or a nested sub-switch fed a roster verdict, so the rail is "
+        "reading an `enabled` that is not `workers.sources.<name>.enabled`")
+
+    # And the two decoy sentences themselves are named here, in the file, not paraphrased
+    # from the item. Each must be invisible to BOTH grammars: the leaf pattern has no
+    # name segment to match in `workers.enabled` and a segment too many in
+    # `...papers.enabled`, and the literal's lookbehind refuses an `enabled:` glued to a
+    # dotted key. A line that starts matching either is the day a decoy joins the fleet's
+    # verdict.
+    doc = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    master = [ln for ln in doc.splitlines() if "workers.enabled: false" in ln]
+    sub = [ln for ln in doc.splitlines() if "papers.enabled" in ln]
+    assert master, (
+        "§3's `workers.enabled: false` sentence is gone, so the master-switch half of "
+        "this node is guarding a line that no longer exists")
+    assert sub, (
+        "the `workers.sources.youtube-digest.papers.enabled` sentence is gone, so the "
+        "sub-switch half of this node is guarding a line that no longer exists")
+    for ln in master + sub:
+        assert not _ENABLED_LEAF.search(ln) and not _ENABLED_LITERAL.search(ln), (
+            f"a decoy `enabled` line now reads to one of the two grammars as a claim "
+            f"about a source's own leaf: {ln[:110]!r}")
+    assert [m.group(1) for m in _ENABLED_LITERAL.finditer("`workers.enabled: false`")] == [], (
+        "the lookbehind stopped excluding `workers.enabled:`, which is how the master "
+        "switch would join the fleet's verdicts")
+
+
+def test_the_enabled_rail_is_keyed_on_the_registry_not_the_runs_table(monkeypatch):
+    """#4552 clause 4: `queue-maintenance` writes run rows and is not a work source.
+
+    `workers/maintenance.py` stamps `SOURCE = "queue-maintenance"` on the rows it hands
+    to `WorkQueue.record_run`, so it shows up in the same table the fleet's runs do — and
+    it has no `workers.sources` block and no §1 row deliberately, which
+    `test_config_configures_only_registered_sources` is the guard for. A rail that
+    enumerated the `source` values in `runs`, or every `SOURCE` string under `workers/`,
+    would demand a roster row for it and then read the missing row as an off source.
+
+    The keying is load-bearing and is shown so: add the name to the registry and this
+    same node asks §1 for a row it does not have.
+    """
+    assert "queue-maintenance" not in _registry()
+    assert "queue-maintenance" not in _src_cfg(), (
+        "a block appeared for a non-source, which the registry guard refuses")
+    assert "queue-maintenance" not in _section1_on_cells()
+
+    body = (ROOT / "workers" / "maintenance.py").read_text(encoding="utf-8")
+    assert 'SOURCE = "queue-maintenance"' in body
+    assert "record_run(" in body and "source=SOURCE" in body, (
+        "maintenance.py no longer writes run rows under its own name, so the reason it "
+        "could be mistaken for a source is gone and this node's caveat needs re-wording")
+
+    registered = _registry()
+    assert len(registered) > 1, "a one-source registry would make the keying unfalsifiable"
+    monkeypatch.setattr(sys.modules[__name__], "_registry",
+                        lambda: registered | {"queue-maintenance"})
+    with pytest.raises(AssertionError) as demanded:
+        test_section1_on_column_and_enabled_prose_match_config()
+    assert "queue-maintenance" in str(demanded.value), (
+        f"the rail did not name the invented source, so coverage is not the registry's "
+        f"after all: {str(demanded.value)[:220]!r}")
+
+
+def test_a_stale_enabled_claim_in_the_roster_sections_fails_the_rail():
+    """#4552 clause 5: a keyed `enabled:` claim in §1 or §4 is a claim, and is graded.
+
+    Seeded lines only — nothing here edits the doc. The stale wording is the one the doc
+    actually carried before the 2026-11-25 review corrected it. §6 and the Review log are
+    out of the checked scope: the 2026-11-25 changelog entry (the item calls it §6's; it
+    sits after `## Review log`, and this node reads the section the prose is in) says the
+    retired claim existed, in the past tense, beside the key spelled
+    `workers.sources.*.enabled` — a family, not a name. Grading either would mean failing
+    a true sentence about what used to be false.
+    """
+    cfg = _src_cfg()
+    rows = _section1_on_cells()
+    sec1, sec4, log = _section(SEC1), _section(SEC4), _section(REVIEW_LOG)
+    scope = sec1 + "\n" + sec4
+    assert cfg["fitness"]["enabled"] is True, "every seed below assumes fitness is on"
+
+    # Live coverage, through the SAME grammar the rail uses rather than a substring: §4's
+    # fitness entry (:851) is the one keyed mention in the whole doc today, so if it ever
+    # loses its backticks the prose half silently grades nothing and this fires. A green
+    # result below then means the finder saw a real claim and found it true.
+    keyed = [(m.group(1), m.group(2)) for m in _ENABLED_LEAF.finditer(sec4)]
+    assert keyed == [("fitness", None)], (
+        f"§4 no longer names exactly one source leaf in the backticked form this rail "
+        f"grades, so the prose half has stopped grading any real claim and needs its "
+        f"expectation re-measured against the doc: {keyed}")
+    assert _enabled_claim_findings(cfg, rows, sec4) == []
+
+    stale = ("All seventeen have a block under `workers.sources`, and one is "
+             "registered-but-off by design: `fitness` ships "
+             "`workers.sources.fitness.enabled: false` until its noise floors are "
+             "measured by hand (§4).")
+    fresh = stale.replace("enabled: false`", "enabled: true`")
+    assert stale != fresh
+
+    for label, text in (("§1", stale + "\n" + scope), ("§4", scope + "\n" + stale)):
+        hits = _enabled_claim_findings(cfg, rows, text)
+        assert len(hits) == 1 and "fitness" in hits[0], (
+            f"a stale keyed claim inserted into {label} was not reported exactly once: "
+            f"{hits}")
+
+    assert _enabled_claim_findings(cfg, rows, fresh + "\n" + scope) == [], (
+        "the claim corrected to the value config holds is still reported, which makes "
+        "the prose half a ban on the wording rather than a check of the value")
+
+    # The other spelling: the key in its own span, the literal loose on the same line —
+    # how §4's fitness entry is actually built. Without this arm the loose-literal path
+    # would be unreachable code wearing a test.
+    loose = ("**Disabled again 2026-11-25** (`workers.sources.fitness.enabled`; it "
+             "ships `enabled: false` until the floors are measured)")
+    hits = _enabled_claim_findings(cfg, rows, loose)
+    assert len(hits) == 1 and "fitness" in hits[0], (
+        f"a loose literal on the same line as its key is not graded: {hits}")
+
+    # The one limit, pinned so it stays a decision and not an accident: two keys on one
+    # line and a loose literal between them is left alone.
+    both = ("`workers.sources.fitness.enabled` and `workers.sources.bench-mine.enabled` "
+            "differ, since one ships `enabled: false`.")
+    assert _enabled_claim_findings(cfg, rows, both) == [], (
+        "a loose literal got attributed to one of two keys named on its line — a guess "
+        "about which, and a false alarm waiting in a true sentence")
+
+    # And the history: the changelog is out of scope by construction, and would not trip
+    # the grammar either, so excluding it is not what keeps this node green.
+    assert log not in scope
+    assert "registered-but-off" in log and "workers.sources.*.enabled" in log, (
+        "the 2026-11-25 changelog entry moved out of `## Review log`, so the sentence "
+        "this node keeps out of scope is somewhere else now and needs re-finding")
+    assert _enabled_claim_findings(cfg, rows, log) == [], (
+        "the changelog's own `enabled: false` recounting the retired claim now reads as "
+        "a live claim, so no section-scoping can save it either")
