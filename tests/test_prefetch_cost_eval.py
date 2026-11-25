@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -889,3 +890,272 @@ def test_config_yaml_still_prints_this_runners_plural_arms():
     assert "--arm" not in flags, (
         "this runner now declares both `--arm` and `--arms`, so the config line's flag is "
         "no longer unambiguous and the pin above means nothing")
+
+
+# ------------------------------------------------------------------------ #
+# The desc_frontload NON-RUN note (#4375's run, published by #4460)
+# ------------------------------------------------------------------------ #
+#
+# The note is a null with a bound on it: the 78 x 4 measured run was RULED NOT SPENT, so
+# there is no result to pin and everything checkable is either a property of the prose (it
+# says a non-run, it dates and instruments each figure, its arithmetic closes) or a number
+# that a live render can still contradict. The rotating counts — the described set, the
+# 209/210 line totals, the 11,970-char block — are deliberately NOT asserted equal to
+# today's values: `app/prompt_builder.py` grants descriptions in rank order against the
+# 12,000-char budget, so they move with the daily chat telemetry and an equality pin goes
+# red on the first rotation. What is pinned instead is the shape of the claim and the
+# direction that matters: the published render delta is a CEILING, so a live delta that
+# grows past it reddens this file and one that shrinks does not.
+
+NON_RUN_NOTE = REPO / "eval" / "measurements" / "desc-frontload-4375-2026-11-21.md"
+
+#: The runtime probe the note cites as script-mode proof. Untracked, outside the repo:
+#: naming the path is the #3989 ruling shape, so this is a string, never a read. It is
+#: the path's tail because the note may name it absolute or with `~`, and the claim
+#: pinned below is that it names it at all — not which notation it chose.
+PROBE_ARTIFACT = "eval/baselines/frontload-probe-4375-20261121-014037.json"
+
+
+def _note_text() -> str:
+    assert NON_RUN_NOTE.exists(), (
+        f"{NON_RUN_NOTE.relative_to(REPO)} is the published standing of #4375's "
+        "ruled-not-spent run; without it a later pass re-proposes the hours")
+    return NON_RUN_NOTE.read_text(encoding="utf-8")
+
+
+def _note_register() -> dict[str, str]:
+    """The note's `key: value` register, so a figure is read and not re-parsed."""
+    for block in re.findall(r"```\n(.*?)\n```", _note_text(), re.S):
+        if "render_delta_ceiling:" in block:
+            return {k.strip(): v.strip()
+                    for k, _, v in (line.partition(":")
+                                    for line in block.splitlines() if ":" in line)}
+    raise AssertionError("the note lost its machine-readable register block")
+
+
+def _live_render_pair(ev) -> tuple[int, int, int]:
+    """(differing index lines, desc_push chars, desc_frontload chars), as the arms run.
+
+    Forces the switch on rather than inheriting it: a sibling node exercises the
+    disabled render and restores it in a `finally`, and the ceiling compares the two
+    ENABLED renders.
+    """
+    import difflib
+
+    was = ev.FRONTLOAD_ENABLED
+    ev.FRONTLOAD_ENABLED = True
+    try:
+        ev._INDEX_BLOCK_CACHE.clear()
+        push = ev.advertised_index_block("desc_push")
+        front = ev.advertised_index_block("desc_frontload")
+    finally:
+        ev.FRONTLOAD_ENABLED = was
+        ev._INDEX_BLOCK_CACHE.clear()
+    pl, fl = push.splitlines(), front.splitlines()
+    changed = sum(max(i2 - i1, j2 - j1)
+                  for tag, i1, i2, j1, j2
+                  in difflib.SequenceMatcher(None, pl, fl).get_opcodes()
+                  if tag != "equal")
+    return changed, len(push), len(front)
+
+
+def test_the_desc_frontload_note_opens_with_a_ruled_not_spent_non_run():
+    """#4460 clause 1: the note exists, is tracked, and says NON-RUN in its opening.
+
+    The half that can rot silently is the second one: a note that quietly grew a
+    per-arm table would read like a measured run, and nothing else in the repo could
+    tell. So this node refuses any table and the two outcome figures a non-run cannot
+    have — `right_skill_reached_rate` and `judge_score_avg` — while the tail-n rows the
+    note DOES carry are statements about construction, quoted by name below.
+    """
+    import subprocess
+
+    tracked = subprocess.run(
+        ["git", "-C", str(REPO), "ls-files", "--error-unmatch",
+         str(NON_RUN_NOTE.relative_to(REPO))],
+        capture_output=True, text=True, check=False)
+    assert tracked.returncode == 0, (
+        f"{NON_RUN_NOTE.relative_to(REPO)} is on disk but not tracked, so it has no "
+        f"history and the null it publishes can be swept: {tracked.stderr.strip()}")
+
+    text = _note_text()
+    head = "\n".join(text.splitlines()[:16])
+    for needle in ("NON-RUN", "RULED NOT SPENT", "78 queries", "4 arms", "primary",
+                   "#4375", "never been executed"):
+        assert needle in head, (
+            f"the opening of the note must state {needle!r} — a reader who stops at "
+            f"the first screen has to learn it is a non-run there, not on page two; "
+            f"opening was: {head[:320]!r}")
+
+    tables = [ln for ln in text.splitlines() if ln.lstrip().startswith("|")]
+    assert not tables, (
+        f"the note carries {len(tables)} table row(s); a per-arm table is exactly what "
+        "a run that never happened cannot have, and its presence would read as a "
+        f"measured result. First row: {tables[:1]}")
+    for forbidden in ("right_skill_reached_rate", "judge_score_avg"):
+        assert forbidden not in text, (
+            f"{forbidden} is an outcome figure and this run was not spent; the note "
+            "may cite it only as 'none exists', which is how it cites the tail rows")
+
+
+def test_every_figure_in_the_note_is_dated_and_names_its_instrument():
+    """#4460 clause 2: each published count is dated and instrumented.
+
+    The failure this guards is a carried-forward number read as a measurement — the
+    note's own clause 6 says no count may arrive without the day it was measured and
+    the tool that printed it, so the Provenance section must carry one bullet per
+    figure naming both.
+    """
+    text = _note_text()
+    assert "re-measured on 2026-11-25" in text, (
+        "the note must state the day its counts were taken, distinct from the "
+        "2026-11-21 date in its own filename (the ruling's date)")
+
+    marker = "## Provenance of every figure in this note"
+    assert marker in text, "the note lost the section that dates its figures"
+    prov = text.split(marker, 1)[1].split("\n## ", 1)[0]
+    bullets = [b for b in prov.split("\n- ") if b.strip()]
+    instruments = ("#4373", ".venvs/lloyd/bin/python", "advertised_index_block",
+                   "difflib", "frontload-probe-4375-20261121-014037.json",
+                   "wc -l -c", "SM_20261125_222702")
+    for figure in ("clipped 68", "trigger-leading 37", "11,970", "11,989",
+                   "199.5", "42.5", "concurrency 4", "195 10521"):
+        holder = [b for b in bullets if figure in b]
+        assert holder, (
+            f"no Provenance bullet covers the figure {figure!r}, so a reader cannot "
+            "tell what printed it or when — clause 6 forbids carrying it")
+        assert any("2026-11-" in b for b in holder), (
+            f"the bullet covering {figure!r} names no date")
+        assert any(any(tok in b for tok in instruments) for b in holder), (
+            f"the bullet covering {figure!r} names no instrument")
+
+
+def test_the_published_cost_bound_is_self_consistent_and_caveats_one_sample():
+    """#4460 clause 3: 78 x 4 = 312 arm-runs at 199.5 s / concurrency 4 closes to 4.3 h.
+
+    ±0.2 h, parsed from the note rather than restated here. The second half is the
+    caveat the figure needs: 199.5 s is ONE turn of the slower arm that hit
+    --max-turns 8 and did not complete, so the note must also publish the faster
+    arm's own sample (42.5 s) and the ~0.9 h it implies, or a later pass re-derives
+    0.9 h and files this note as wrong.
+    """
+    reg = _note_register()
+    queries, arms = int(reg["cost_queries"]), int(reg["cost_arms"])
+    runs = int(reg["cost_arm_runs"])
+    seconds = float(reg["cost_seconds_per_arm_run"])
+    concurrency = int(reg["cost_concurrency"])
+    hours = float(reg["cost_hours_upper"])
+    faster = float(reg["cost_seconds_faster_sample"])
+    lower = float(reg["cost_hours_lower"])
+
+    assert queries == 78 and arms == 4
+    assert queries * arms == runs == 312
+    assert abs(runs * seconds / concurrency / 3600.0 - hours) <= 0.2, (
+        f"{runs} arm-runs x {seconds} s / {concurrency} = "
+        f"{runs * seconds / concurrency / 3600.0:.2f} h, not the published {hours} h")
+    assert abs(runs * faster / concurrency / 3600.0 - lower) <= 0.2, (
+        f"the faster arm's sample works out to "
+        f"{runs * faster / concurrency / 3600.0:.2f} h, not the published {lower} h")
+
+    bound = [b for b in _note_text().split("\n- ") if "199.5" in b]
+    assert bound and any("one sample" in b and "slower" in b and "injected" in b
+                         and "max_turns" in b for b in bound), (
+        "the bullet publishing 199.5 s must say it is a single sample of the slower "
+        "`injected` arm run to --max-turns 8; without that it reads as a measured mean")
+    text = _note_text()
+    assert "upper bound" in text and "42.5" in text, (
+        "the note must call the bound an upper bound and name the other sample")
+
+
+def test_the_published_render_delta_ceiling_holds_against_a_live_rerender():
+    """#4460 clause 4: the live delta stays <= the published ceiling, char-neutral.
+
+    Re-renders both blocks exactly as the two arms do and diffs them with difflib. The
+    published ceiling is the largest delta reachable on a tree that cannot see
+    production's usage rank (a round worktree: `app.paths` anchors the data root inside
+    itself, so `_skill_rank_counts()` is empty and the granted set is the fallback
+    order), which is every tree a test run opens — production's own reading today is 1
+    line of 209. So growth past the ceiling means the granted set moved and the note
+    needs a dated re-publication; shrink is free.
+    """
+    reg = _note_register()
+    ceiling = int(reg["render_delta_ceiling"])
+    changed, push_chars, front_chars = _live_render_pair(_load_eval())
+
+    assert int(reg["push_block_chars"]) == int(reg["frontload_block_chars"]), (
+        "the note publishes two unequal block totals, which would mean the arm "
+        "changes the index's length — it does not: the rewrite is length-exact")
+    assert push_chars == front_chars, (
+        f"the live renders differ in length ({push_chars} vs {front_chars}); the arm's "
+        "rewrite is length-exact, so this is a real regression, not a rotation")
+    assert changed <= ceiling, (
+        f"live <available_skills> delta is {changed} lines but the note publishes a "
+        f"ceiling of {ceiling}: the granted set has moved. Re-publish the number with "
+        "a new date (owed on #4460) — this node is the alarm, not the bug")
+    assert 1 <= int(reg["render_delta_live"]) <= ceiling
+    assert ceiling <= int(reg["render_delta_structural_cap"]), (
+        "the ceiling cannot exceed the tally's rewritten count: no line differs whose "
+        "description the arm does not rewrite")
+    text = _note_text()
+    assert "advertised_index_block" in text and "difflib" in text, (
+        "clause 4 requires the note to say WHICH two renders were compared")
+
+
+def test_the_note_names_the_line_the_arm_renders_worse_and_what_cannot_be_answered():
+    """#4460 clause 5: the worse line, the by-construction zero, the attribution.
+
+    Four separate claims, each pinned: the named skill whose front-load is a caution
+    rather than a trigger (re-derived live from the arm's own rewriter, so the note
+    cannot outlive the behaviour it describes); `right_skill_reached_tail_n` 0 by
+    construction with only `described_skill_count` bearing on who gets a description;
+    trigger-leading 24 -> 36 credited to #4373's landed vault rewrite; and the probe
+    artifact cited as script-mode proof while the `--frontload off` byte-identity is
+    attributed to the in-process render comparison, because that artifact ran ENABLED
+    (`frontload_prompt_equals_production: false`) and so proves nothing about it.
+    """
+    text = _note_text()
+    sections = text.split("\n## ")
+    worse = [s for s in sections if "fact-improvement" in s]
+    assert worse and any("worse" in s and "caution" in s and "not a trigger" in s
+                         for s in worse), (
+        "the note must name the skill whose line the arm changes and say the arm's "
+        "version is worse because the front-loaded clause is a caution, not a trigger")
+
+    tail = [s for s in sections if "right_skill_reached_tail_n" in s]
+    assert tail and any("by construction" in s and "described_skill_count" in s
+                        for s in tail), (
+        "the tail population is empty for an arm that advertises every skill, so the "
+        "note has to say the zero is by construction and that only "
+        "described_skill_count bears on who gets a description")
+
+    assert "24 → 36" in text and "#4373" in text and "20e4764a8" in text, (
+        "trigger-leading 24 → 36 must be attributed to #4373's landed vault rewrite "
+        "(vault commit 20e4764a8), which is what collapsed this arm's population")
+
+    assert PROBE_ARTIFACT in text, (
+        f"the note must cite {PROBE_ARTIFACT} as the script-mode proof")
+    off = [b for b in text.split("\n- ") if "--frontload off" in b]
+    assert off and any(("in-process" in b or "FRONTLOAD_ENABLED = False" in b)
+                       and "frontload_prompt_equals_production: false" in b
+                       for b in off), (
+        "the byte-identical disabled render belongs to the in-process comparison, not "
+        "to the probe: the probe ran with the rewrite enabled")
+
+    # The 'worse' claim, re-derived rather than trusted: the arm's own new leading
+    # clause for fact-improvement must fail #4373's trigger-leading test.
+    from agent_mcp.skills import iter_active_skills
+    from app.prompt_builder import _skill_walk_roots, skill_index_description
+
+    described = {a.name: skill_index_description(a.frontmatter)
+                 for a in iter_active_skills(overlay=None, roots=_skill_walk_roots())}
+    assert "fact-improvement" in described, (
+        "fact-improvement is not in the live skill set, so the note's named line and "
+        "this node's check have both gone stale")
+    out = _load_eval().frontload_description(described["fact-improvement"])
+    assert out != described["fact-improvement"], (
+        "the arm no longer rewrites fact-improvement, so the note's named worse line "
+        "is stale and needs a dated re-publication")
+    assert len(out) == len(described["fact-improvement"])
+    assert not re.match(r"^\s*Use (when|to|for)\b", out, re.I), (
+        "the clause the arm now front-loads onto fact-improvement is trigger-leading, "
+        "so 'the arm's version is worse' is no longer the right claim")
