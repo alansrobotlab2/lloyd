@@ -5714,3 +5714,140 @@ def test_only_the_two_refusals_and_the_vault_skip_quote_the_empty_contract():
     assert len(vault_skip) == 1, vault_skip
     n, body = int(vault_skip[0].split(":")[1]), vault_skip[0].split(":", 2)[2]
     assert "skipped" in body, (n, body)
+
+
+# ── #4562: the review rung reports a held grader as the wait it is ────────────
+
+def _held_grader(monkeypatch, tmp_path):
+    """The rung against a grader that refused itself because a person holds the pool.
+
+    `rung_review` does not consult the hold: `RV.run_grader` does, before it mints a
+    session, and hands back a refusal carrying `operator_hold`. So the stub returns
+    exactly that shape and the node grades what the rung does with it — which side of
+    the ledger the wait lands on, and whether the round is charged for it.
+    """
+    from scripts.automod import review as RV
+    events: list[dict] = []
+    calls: list[dict] = []
+
+    def grade(**kw):
+        calls.append(kw)
+        return {"ok": False, "error": f"{RV.OPERATOR_HOLD_ERROR} (holder mission-control)",
+                "operator_hold": "mission-control", "structured": None,
+                "structured_error": "", "text": "", "stop_reason": None,
+                "session_id": "", "duration_s": 0.0, "retries": 0, "waited_s": 0.0}
+
+    monkeypatch.setattr(G.S, "append_event", lambda e, **k: events.append(e))
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: [])
+    monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b", "clauses": ["clause one holds"], "path": ""})
+    monkeypatch.setattr(RV, "grade", grade)
+    monkeypatch.setattr(RV, "honesty_prechecks", lambda *a, **k: [])
+    return events, calls
+
+
+def test_the_review_rung_calls_an_operator_hold_a_wait_and_spends_nothing(tmp_path, monkeypatch):
+    """A paused machine is external, retryable, and names whom it is waiting on.
+
+    The round that was in flight when mission control took the pool for 27 h 21 m is
+    the case: its grade did not run through no fault of its diff, so it must land on
+    the same side of the ledger as an unreachable engine — the rung fails
+    non-blocking, no review attempt is charged, `retry_after_s` says when to try
+    again — while the recorded reason says a person has the machine rather than
+    repeating "grader unreachable", which would send the next reader to a model server.
+    """
+    events, calls = _held_grader(monkeypatch, tmp_path)
+
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is False
+    assert data["external_blocker"] is True, "the hold is not the diff's fault"
+    assert data["external_reason"] == "operator hold", data
+    assert data["retry_after_s"], "a wait has to say when to retry, not just that it waited"
+    assert "operator pool hold is armed" in detail, detail
+    ev = events[-1]
+    assert ev["event"] == "review" and ev["ok"] is False and ev["blocking"] is False, ev
+
+    # Not spent: re-gating after a hold asks the grader again instead of reporting
+    # the round out of attempts.
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: list(events))
+    ok2, detail2, data2 = _ReviewGate(tmp_path).rung_review()
+    assert ok2 is False and data2["external_blocker"] is True
+    assert "abort and report" not in detail2, detail2
+    assert len(calls) == 2, "a held grade is re-offered, not written off"
+
+
+def test_an_unreachable_grader_is_still_named_as_one(tmp_path, monkeypatch):
+    """No new refusal fires on today's failure: the hold branch is not a relabelling.
+
+    The same branch of `rung_review` serves both waits, so the regression this guards
+    is subtle — a `external_reason` that started reporting "operator hold" for every
+    unavailable grader would send every real outage to mission control. An ordinary
+    failure report carries no `operator_hold`, and the reason must stay as it was.
+    """
+    from scripts.automod import review as RV
+    events: list[dict] = []
+
+    def grade(**kw):
+        return {"ok": False, "error": "engine unreachable: Connection refused",
+                "structured": None, "structured_error": "", "text": "",
+                "stop_reason": None, "session_id": "", "duration_s": 0.0}
+
+    monkeypatch.setattr(G.S, "append_event", lambda e, **k: events.append(e))
+    monkeypatch.setattr(G.S, "read_events", lambda limit=100: [])
+    monkeypatch.setattr(G.W, "round_dir", lambda rid: tmp_path / "round")
+    monkeypatch.setattr(RV, "item_contract", lambda iid, ledger=None: {
+        "id": iid, "title": "t", "body": "b", "clauses": ["clause one holds"], "path": ""})
+    monkeypatch.setattr(RV, "grade", grade)
+    monkeypatch.setattr(RV, "honesty_prechecks", lambda *a, **k: [])
+
+    ok, detail, data = _ReviewGate(tmp_path).rung_review()
+
+    assert ok is False
+    assert data["external_blocker"] is True
+    assert data["external_reason"] == "grader unreachable", data
+
+
+@pytest.mark.parametrize("state", [
+    pytest.param("absent", id="no-watermark"),
+    pytest.param("released", id="watermark-is-0"),
+])
+def test_grading_runs_unchanged_when_nobody_holds_the_machine(tmp_path, monkeypatch, state):
+    """Clause 3 at the dispatch: with the hold absent or released, nothing new refuses.
+
+    Driven through the real `RV.run_grader` with only the transport stubbed, because
+    the claim is about the shipped path: a session is minted, one turn is posted, and
+    the answer comes back ok. `released` is the state mission control leaves behind
+    (`pause_journal` id 76 wrote value 0 and kept the key), so a hold that reads 0 as
+    armed would freeze every gate on the box long after the machine was given back.
+    """
+    from scripts.automod import review as RV
+    from workers.queue import WorkQueue
+
+    db = tmp_path / "workers.db"
+    store = WorkQueue(db)
+    monkeypatch.setattr(RV, "_queue_store_path", lambda: db)
+    if state == "released":
+        from workers.pool import PAUSE_WM_KEY, PAUSE_WM_SOURCE
+        store.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY, "0")
+
+    posted: list = []
+
+    def fake(url, payload, timeout):
+        posted.append((url, payload))
+        yield ("done", {"response": "graded", "stop_reason": "final",
+                        "structured": {"premise": "sound", "clauses": [], "test_honesty": [],
+                                       "seams_unverified": []},
+                        "structured_error": ""})
+
+    monkeypatch.setattr(RV, "_post_stream", fake)
+    sessions = tmp_path / "sessions"
+
+    res = RV.run_grader(prompt="grade this", item_id=7, round_id="SM_UNREAD",
+                        backend="http://127.0.0.1:9", sessions_dir=sessions)
+
+    assert res["ok"] is True, res
+    assert "operator_hold" not in res, res
+    assert len(posted) == 1, "exactly the turn today's code posts"
+    assert list(sessions.glob("*.json")), "the grader session is still minted"

@@ -4507,7 +4507,12 @@ class Gate:
                 return False, (f"review could not run: {res.get('error')} — the grader, not the "
                                f"diff; neither the item's attempt nor a review attempt is spent"), {
                                    "external_blocker": True, "external_failures": [],
-                                   "external_reason": "grader unreachable",
+                                   # One outcome for both waits — nobody's diff failed, so no
+                                   # attempt is spent — but they are different waits, and #4562 is
+                                   # the cost of a record that could not tell them apart: a reader
+                                   # of this row is waiting on a person, not on a model server.
+                                   "external_reason": ("operator hold" if res.get("operator_hold")
+                                                       else "grader unreachable"),
                                    "retry_after_s": 120,
                                    "review_session": res.get("session_id"), **concurrency}
             parsed = RV.parse_review(res["structured"], worktree=grade_root,

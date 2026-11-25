@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import re
 import secrets
 import shlex
@@ -64,11 +65,16 @@ import tokenize
 import urllib.error
 import urllib.request
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 
 from scripts.automod import testpaths as TP
+
+# #4562: the two places a review's own bookkeeping can fail — no dispatch store,
+# or a row it could not write — say so here instead of dropping the run silently,
+# which is how 46 grader sessions went uncountable.
+logger = logging.getLogger(__name__)
 
 LIVE_ROOT = Path(__file__).resolve().parent.parent.parent
 
@@ -1612,6 +1618,166 @@ def write_run_tests(scratch: Path, *, worktree: Path, python: Path, env: dict) -
     return script
 
 
+# ── #4562: the operator hold, and the review's own dispatch record ──────────
+#
+# The pool pause a person takes from mission control is a queue watermark
+# (`workers/pool.py`: `PAUSE_WM_SOURCE`/`PAUSE_WM_KEY`), and a watermark gates
+# *claims from the pool*. The reviewer never claims from the pool: it posts a
+# `/api/chat/stream` turn of its own. So on 2026-11-22 an operator paused the
+# machine for 27 h 21 m and `runs` recorded 0 dispatches while 46 grader sessions
+# appeared under the paused pool — 45 of them the offline calibration backfill, 1
+# an in-flight round (#4562). The hold is therefore read here, at the one place
+# every grading route dispatches, and each review books a row in the same store
+# the pool writes, so a fleet this size can never run unlogged again.
+
+REVIEW_RUN_SOURCE = "automod-review"
+# The refusal's wording. It names the hold rather than "engine unreachable"
+# because the two have opposite fixes: one waits for a person, the other for a
+# model server, and `gate.py` publishes this text as the rung's external reason.
+OPERATOR_HOLD_ERROR = "review dispatch refused: the operator pool hold is armed"
+
+
+def _queue_store_path() -> Path:
+    """The dispatch store every queue caller shares (`workers.db_path`).
+
+    Resolved through `workers.queue.configured_db_path`, the same accessor the
+    aggregator uses, because the gate is a different process from the backend and
+    only the backend initialises the queue singleton. A module-level indirection
+    rather than a direct call so a test can point the review's record at a temp
+    store without inventing a config.
+    """
+    from workers.queue import configured_db_path  # noqa: PLC0415 — see the header note
+    return configured_db_path()
+
+
+def _dispatch_store():
+    """An open handle on the dispatch store, or None when it cannot be opened.
+
+    None means no verdict is possible about the hold, and the caller treats it as
+    no hold: an unreadable store must not stop a grade that runs today. Same
+    fail-open rule `write_session` applies to its cwd stamp for the import alone.
+    """
+    try:
+        from workers.queue import WorkQueue  # noqa: PLC0415 — see the header note
+        return WorkQueue(_queue_store_path())
+    except Exception:  # noqa: BLE001 — no store is not a hold
+        return None
+
+
+# The three watermark parts of the operator hold, mirrored from `workers/pool.py`
+# (`PAUSE_WM_SOURCE`, `PAUSE_WM_KEY`, `PAUSE_WM_HOLDER_KEY`) rather than imported.
+# `workers.pool` imports `app.cost_outlier`, `app.engine_pressure`,
+# `app.harness.policy` and `app.sessions_io` at module scope, and this module's
+# header is that the reviewer must not import the application it is judging: the
+# gate is a separate process from the backend and would pull the pool in only to
+# read three strings. The mirror is pinned, not trusted —
+# `test_the_hold_watermark_literals_are_the_pools_own` fails if either side moves.
+PAUSE_WM_SOURCE = "_pool"
+PAUSE_WM_KEY = "operator_paused"
+PAUSE_WM_HOLDER_KEY = "operator_pause_holder"
+
+
+def operator_hold_armed() -> str:
+    """Who holds the pool pause, or "" when nobody does.
+
+    Reads the same watermark `WorkerPool` honours before claiming a queue item
+    (`workers/pool.py`, `queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) == "1"`) — an
+    operator hold is one fact with two readers, not a second flag to fall out of
+    step. The holder comes back rather than a bare bool so a refusal can name who
+    was waited for; a hold with no holder key answers `unattributed`, the same word
+    `pause_journal` uses for an unclaimed release.
+    """
+    store = _dispatch_store()
+    if store is None:
+        return ""
+    try:
+        if store.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_KEY) != "1":
+            return ""
+        return store.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY) or "unattributed"
+    except Exception:  # noqa: BLE001 — a store that answers is readable after all
+        return ""
+
+
+def review_route(round_id: str) -> str:
+    """Which route a grading dispatch came from, named as its `runs` `kind`.
+
+    Three, because three reach `run_grader`: a live round's review rung (its real
+    round id), the vault grade (`round_id="vault"`, the value `grade_vault`
+    passes), and the offline calibration backfill, whose id is built as
+    `backfill:cal_<case>` at `review_tools.py:150`. Anything else is a round: an
+    unknown id is a round with an unusual label, not a fourth route, and misnaming
+    the kind is what this field exists to prevent.
+    """
+    rid = str(round_id or "")
+    if rid == "vault":
+        return "vault"
+    if rid.startswith("backfill:"):
+        return "calibration"
+    return "round"
+
+
+def review_run_status(res: dict) -> str:
+    """The `runs.status` for one grading outcome, in the store's own vocabulary.
+
+    `success`, `timeout` and `cancelled` are values `runs` already carries; a
+    refusal by the operator hold is `cancelled` because nobody's work failed —
+    the machine was asked to be free — and `failed` is the rest, which is what
+    `status` says for a transport error or an unusable object today.
+    """
+    if res.get("ok"):
+        return "success"
+    err = str(res.get("error") or "")
+    if res.get("operator_hold") or OPERATOR_HOLD_ERROR in err:
+        return "cancelled"
+    if "timed out" in err:
+        return "timeout"
+    return "failed"
+
+
+def record_review_run(*, kind: str, status: str, started: datetime,
+                      round_id: str = "", item_id: int | None = None,
+                      session_id: str = "", error: str = "") -> None:
+    """Book one review in the dispatch store, refused or completed alike.
+
+    `WorkQueue.record_run` takes `queue_id=None` by contract — "Left None by a
+    caller that has no queue item to read one from" — so a review needs no queue
+    item and no schema change to be countable: `select source,kind,count(*) from
+    runs group by 1,2` shows `automod-review` with one kind per route. Both
+    outcomes are booked because the measurable claim is "a review ran or was
+    held", and a store that only records successes is how 46 sessions went
+    unlogged: an operator reading the pause's row count saw a free machine.
+
+    `runs` has no error column — `response_json` is where a failure's text lives,
+    which is why the reason goes there and not into a kwarg that does not exist.
+    A record that cannot be written never costs a round its grade, so every
+    failure here is swallowed and logged, the same way `write_session` swallows
+    a failed cwd stamp rather than refusing to mint.
+    """
+    store = _dispatch_store()
+    if store is None:
+        logger.warning("review: no dispatch store at %s; this run is unlogged",
+                       _queue_store_path())
+        return
+    from workers.queue import new_run_id  # noqa: PLC0415 — see the header note
+    completed = datetime.now(timezone.utc)
+    try:
+        store.record_run(
+            run_id=new_run_id(REVIEW_RUN_SOURCE), queue_id=None,
+            source=REVIEW_RUN_SOURCE, status=status,
+            started_at=started.isoformat(), completed_at=completed.isoformat(),
+            duration_seconds=max(0.0, (completed - started).total_seconds()),
+            kind=kind,
+            summary=f"review of item {item_id} ({round_id or 'no round'}): {status}",
+            response_json=json.dumps({"error": str(error or "")}, default=str),
+            meta_json=json.dumps({"round_id": str(round_id or ""),
+                                  "item_id": item_id,
+                                  "session_id": str(session_id or "")},
+                                 default=str))
+    except Exception as exc:  # noqa: BLE001 — the record is never worth the grade
+        logger.warning("review: dispatch record for %s (%s) not written: %s",
+                       kind, status, exc)
+
+
 def write_session(sessions_dir: Path, *, item_id: int, round_id: str, model: str) -> str:
     """Mint a grading session, and give it a start cwd OUTSIDE the live checkout.
 
@@ -2675,7 +2841,29 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
 
     The session id is reused across attempts so the retries read as one
     grading of one commit rather than as three.
+
+    **Refuses while a person holds the machine** (#4562). A mission-control pause
+    is a watermark on pool claims, and this function does not claim from the pool:
+    it posts its own turn. Checked here, before the session is minted, because this
+    is the one dispatch every route reaches — a round's grade, `grade_vault`, and
+    the offline calibration backfill all come through — so one call site covers 46
+    sessions' worth of fleet, and a refused dispatch mints nothing. The refusal is
+    a return value, never a raise: `run_grader` has no exception path today and a
+    grader that throws would take the rung with it. Both outcomes are booked in the
+    dispatch store (`record_review_run`).
     """
+    started = datetime.now(timezone.utc)
+    kind = review_route(round_id)
+    holder = operator_hold_armed()
+    if holder:
+        refused = {"ok": False, "structured": None, "structured_error": "",
+                   "text": "", "stop_reason": None, "session_id": "",
+                   "duration_s": 0.0, "retries": 0, "waited_s": 0.0,
+                   "operator_hold": holder,
+                   "error": f"{OPERATOR_HOLD_ERROR} (holder {holder})"}
+        record_review_run(kind=kind, status=review_run_status(refused), started=started,
+                          round_id=round_id, item_id=item_id, error=refused["error"])
+        return refused
     backend = (backend or backend_url()).rstrip("/")
     # The live backend grades, so the session goes in the live data root, whatever
     # tree or LLOYD_DATA this process runs under.
@@ -2715,6 +2903,13 @@ def run_grader(*, prompt: str, item_id: int, round_id: str, backend: str | None 
         attempt += 1
         report["error"] = ""
     report["duration_s"] = round(time.time() - overall_started, 1)
+    # The other half of #4562: a review that ran is as countable as one that was
+    # held. Status is read off the same report the caller sees, so the row cannot
+    # disagree with the outcome — a `timed out` error books `timeout`, a transport
+    # error books `failed`, and only an `ok` answer books `success`.
+    record_review_run(kind=kind, status=review_run_status(report), started=started,
+                      round_id=round_id, item_id=item_id, session_id=session_id,
+                      error=str(report.get("error") or ""))
     return report
 
 
