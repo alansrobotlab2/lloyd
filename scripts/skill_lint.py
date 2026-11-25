@@ -1185,6 +1185,106 @@ def check_dead_units(content: str,
     return sorted(out, key=lambda d: (d["line_no"], d["unit"]))
 
 
+# ── command shape: an interpolation that re-opens its own string (#4419) ──────
+#
+# The defect #4270 filed was not a wrong filter, it was a broken literal. A jq
+# program written inside single quotes sits inside a shell string, and jq's own
+# interpolation `\(...)` is evaluated inside the jq string it is typed into. So
+# `"\(.a // "n/a")"` is not "default this field to n/a" — the `"` before `n/a`
+# closes the jq string the interpolation is standing in, and the program does not
+# parse. What the reader of that skill saw was `queue-health-check` failing, a
+# phantom defect filed against the endpoint it queries (#4261), and a fix
+# (bind the default once: `("n/a") as $na | … "\(.a // $na)"`) that nothing here
+# kept. #4270's rewrite is on the vault's main; this bucket is the half that makes
+# a hand-retyped filter read as a broken skill no more.
+#
+# Why the rule is per-interpolation and not per-line. The obvious check — a `"`
+# anywhere after a `\(` — is wrong on the very file this was filed against:
+# every jq format line in `skills/queue-health-check/` is a quoted string that
+# CONTAINS interpolations, so the quotes are the string the interpolations live
+# in, and 4 lines per file (8 across its two files, measured 2026-11-25) would
+# fire on a skill that is correct. Widening the other way is just as bad: the
+# `// "` spelling the item's hand `awk` matched is one surface form of the defect,
+# so it false-negatives on `// 'x'` and on `// ("a")`, which are the same broken
+# literal. So this parses the interpolation: take each `\(`, walk forward to its
+# matching `)` with a paren balance, and ask only whether THAT body re-opens a
+# string. Balance is what keeps the fixed form clean (`\(.a // $na)` has no quote
+# inside it) and what catches every default expression, quoted or parenthesised.
+#
+# An unbalanced `\(` is not a finding: a BRE capture group in
+# `grep '\(…\)'` legitimately opens one, and a jq filter carried across lines
+# closes it on a later line this line-by-line walker cannot see. Silence on those
+# is the precision price, not a claim that they are correct.
+#
+# `tests/test_skill_lint_command_shape.py` pins the four directions: the #4270
+# line fires, the bound-var fix does not, `queue-health-check`'s own format lines
+# do not, and the live corpus is measured at zero rather than assumed.
+
+#: The category name as the report table and `CATEGORY_TRUST` print it.
+BAD_INTERPOLATION_CATEGORY = "BAD_INTERPOLATION"
+
+#: What opens an interpolation: a backslash followed by an open paren, as jq,
+#: PowerShell's `-f` operator and awk's `printf`-style extensions all spell it.
+#: Matched as literal text, not a regex, so a `\\(` (an escaped backslash before
+#: a BRE group) opens nothing here.
+_INTERP_OPEN = "\\("
+
+
+def _interp_span(text: str, paren_at: int) -> tuple[str, int] | None:
+    """The body of the interpolation whose `(` sits at `paren_at`, and its `)`.
+
+    Returns `(body, index_of_closing_paren)`, or None when nothing balances it
+    inside `text`. The scan is paren-balanced rather than "up to the next `)`"
+    because a default expression nests: `\\((.a + .b) // "x")` must be read as ONE
+    interpolation whose body carries the quote, and stopping at the first `)`
+    would return `.a` and read that defect as clean.
+    """
+    depth = 0
+    for i in range(paren_at, len(text)):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return text[paren_at + 1:i], i
+    return None
+
+
+def check_bad_interpolations(content: str) -> list[dict]:
+    """Interpolations in this skill's commands that open a string inside themselves.
+
+    One dict per (line, interpolation text): `{interpolation, line_no, line}` —
+    the interpolation itself and the line to repair, because the fix is one token
+    (`("x") as $v` above the filter, `$v` inside) and a count of broken quotes
+    tells nobody which step to open.
+
+    Two shapes are checked and nothing else: the span has to be inside a command
+    context (`command_contexts` — a fenced block or an inline backtick span, so
+    prose that merely describes the shape stays clean), and its own balanced body
+    has to contain a `"` (so the enclosing jq string's own quotes, which are
+    OUTSIDE the span, are never the trigger). Duplicated identically inside one
+    line is one finding, since the repair is one edit.
+    """
+    out: list[dict] = []
+    seen: set[tuple[int, str]] = set()
+    for line_no, ctx in command_contexts(content):
+        at = ctx.find(_INTERP_OPEN)
+        while at != -1:
+            span = _interp_span(ctx, at + 1)
+            if span is None:
+                at = ctx.find(_INTERP_OPEN, at + len(_INTERP_OPEN))
+                continue
+            body, close_at = span
+            interp = _INTERP_OPEN + body + ")"
+            if '"' in body and (line_no, interp) not in seen:
+                seen.add((line_no, interp))
+                out.append({"interpolation": interp, "line_no": line_no,
+                            "line": ctx.strip()})
+            at = ctx.find(_INTERP_OPEN, close_at + 1)
+    return sorted(out, key=lambda d: (d["line_no"], d["interpolation"]))
+
+
 # ── size (#624) ─────────────────────────────────────────────────────────────
 #
 # "Your skill is really a folder": the SKILL.md body is an index and the detail
@@ -1543,6 +1643,7 @@ def lint(skill_records: Optional[Sequence] = None,
     phantom: list[dict] = []
     missing_script: list[dict] = []
     dead_unit: list[dict] = []
+    bad_interp: list[dict] = []
     injection: list[dict] = []
     description: list[dict] = []
     index_clip = _skills_index_settings()["max_description_chars"]
@@ -1710,6 +1811,17 @@ def lint(skill_records: Optional[Sequence] = None,
                 "units": bad_units,
             })
 
+        # The folder again: #4270's broken filter lived in SKILL.md, and its
+        # spilled twin in `step3b-wait-history.md` is the same command retyped, so
+        # a check that read only the index file would pin half the library.
+        bad_interps = check_bad_interpolations(folder)
+        if bad_interps:
+            bad_interp.append({
+                "name": entry.name,
+                "path": str(skill_file),
+                "interpolations": bad_interps,
+            })
+
         is_stale, age = check_stale(skill_file, fm)
         if is_stale:
             stale.append({
@@ -1774,6 +1886,9 @@ def lint(skill_records: Optional[Sequence] = None,
         "missing_script": missing_script,
         # #1580. A skill whose commands name a unit that is in neither unit root.
         "dead_unit": dead_unit,
+        # #4419. A skill whose command re-opens a string inside its own `\(...)`,
+        # the shape #4270 fixed in one file and nothing here kept.
+        "bad_interpolation": bad_interp,
         "injection": injection,
         # P5. `missing` renders name-only in a descriptions-on index and is a
         # finding; `clipped` is cut at `index_clip` characters, reported so the
@@ -1909,6 +2024,24 @@ CATEGORY_TRUST: dict[str, tuple[str, str]] = {
                                "systemctl is a claim — a skill naming a retired unit "
                                "in prose or in backticks stays clean, which is what "
                                "lets this be ON"),
+    # #4419. The mechanism is a parse, not a word list, and the trust claim is that
+    # the enclosing string's own quotes cannot fire it — which is the property that
+    # keeps the four interpolated format lines in `queue-health-check` clean while
+    # the shape #4270 fixed still fires. No corpus count belongs in this cell: the
+    # number of interpolations the library carries moves with the library, and
+    # #2451 already showed what a remembered measurement does to this column.
+    BAD_INTERPOLATION_CATEGORY: (
+        "yes",
+        "every backslash-open-paren in a command context is read forward to its "
+        "own balanced close paren and only a double quote inside that body is a "
+        "finding, so the quotes of the string the interpolation sits in are outside "
+        "the span and cannot fire it — which is why an interpolated format string is "
+        "clean and a re-opened literal is not. The scope price is named, not hidden: "
+        "the read is per command line, so a filter whose interpolation closes on a "
+        "later line is not seen, and neither is an opening with no balancing paren "
+        "on its own line, which is a regex capture group rather than this claim. So "
+        "0 means 'no command line re-opens a string inside its own interpolation', "
+        "never 'every command in these skills parses'"),
 }
 
 TRUST_MARK = {"yes": "✅ yes", "mostly": "⚠️ mostly", "no": "❌ no"}
@@ -2318,6 +2451,7 @@ def render_report(result: dict) -> str:
     n_phantom = len(result.get("phantom", []))
     n_scripts = len(result.get("missing_script", []))
     n_dead_unit = len(result.get("dead_unit", []))
+    n_bad_interp = len(result.get("bad_interpolation", []))
     injection = result.get("injection", [])
     n_inj = len(injection)
     desc_rows = result.get("description", [])
@@ -2369,6 +2503,14 @@ def render_report(result: dict) -> str:
          n_inj, "rewrite to name a local/pinned step, or list in INJECTION_ALLOWLIST with a reason"),
         (DEAD_UNIT_CATEGORY, "runs systemctl against a unit in neither unit root",
          n_dead_unit, "restart the real supervisor (supervisorctl) or install the unit"),
+        # #4419. Its own row rather than a clause of MISSING_SCRIPT: that bucket's
+        # claim is a path that is not on disk, this one's is a command whose literal
+        # does not close, and the two repairs are different files.
+        (BAD_INTERPOLATION_CATEGORY,
+         "re-opens a string literal inside its own \\(...) interpolation",
+         n_bad_interp,
+         "bind the default above the filter as a jq variable and name that variable "
+         "inside the interpolation"),
     ]
     lines.append("| category | count | action | is this count trustworthy? |")
     lines.append("|---|---|---|---|")
@@ -2718,8 +2860,34 @@ def render_report(result: dict) -> str:
                              f"| `{cmd}` |")
         lines.append("")
 
+    # BAD_INTERPOLATION — #4419. The line, not the count, because the defect is one
+    # token in one step: #4270's reader could not tell a broken literal from a wrong
+    # endpoint and filed the endpoint as the bug (#4261). The command cell escapes
+    # pipes for the same reason the section above does — every jq filter in this
+    # corpus is a chain of them.
+    if n_bad_interp:
+        lines.append(f"## {BAD_INTERPOLATION_CATEGORY} — {n_bad_interp} skill(s) with a "
+                     "command that re-opens its own string")
+        lines.append("")
+        lines.append("A `\\(...)` inside a quoted command is evaluated inside that")
+        lines.append("string, so a `\"` in its own body closes the string early and the")
+        lines.append("program never parses. What the reader of such a skill sees is the")
+        lines.append("command failing, not the quote: #4270's `jq` filter read as a dead")
+        lines.append("endpoint and got a defect filed against the endpoint. Bind the")
+        lines.append("default once above the filter (`(\"n/a\") as $na`) and name the")
+        lines.append("variable inside the interpolation.")
+        lines.append("")
+        lines.append("| skill | interpolation | line | command |")
+        lines.append("|---|---|---|---|")
+        for item in result["bad_interpolation"]:
+            for hit in item["interpolations"]:
+                cmd = hit["line"].replace("|", "\\|")
+                lines.append(f"| `{item['name']}` | `{hit['interpolation']}` "
+                             f"| {hit['line_no']} | `{cmd}` |")
+        lines.append("")
+
     if not (n_dead or n_missing or n_drift or n_dup or n_stale or n_phantom
-            or n_scripts or n_inj or n_dead_unit or desc_missing):
+            or n_scripts or n_inj or n_dead_unit or n_bad_interp or desc_missing):
         blind = untrustworthy_categories()
         if blind:
             # Every count is 0 and some of them could not have been anything
@@ -2827,6 +2995,7 @@ def main() -> int:
           f"phantom={len(result.get('phantom', []))}, "
           f"missing_script={n_scripts}, "
           f"dead_unit={len(result.get('dead_unit', []))}, "
+          f"bad_interpolation={len(result.get('bad_interpolation', []))}, "
           f"injection={len(result.get('injection', []))}, "
           f"description={len(result.get('description', []))}, "
           f"machine_written={(result.get('authorship') or {}).get('machine_written', 0)}, "

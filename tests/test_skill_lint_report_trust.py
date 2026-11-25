@@ -63,6 +63,28 @@ def test_every_category_row_carries_a_trust_cell_from_the_table():
         assert verdict in sl.TRUST_VERDICTS and cause.strip()
 
 
+def test_the_command_shape_category_carries_its_own_qualified_row():
+    """#4419: the interpolation bucket ships with a trust row, or it does not ship.
+
+    The set assertion above already refuses a new row with no entry and a new entry
+    with no row. This node names the category specifically because its zero is the
+    one a reader most easily over-reads as "every command in the library parses":
+    the scan reads one command line at a time, so the cell has to state the scope it
+    gives up, in the column whose whole job is saying what a 0 is worth.
+    """
+    rows = _table_rows(sl.render_report(_result()))
+    category = sl.BAD_INTERPOLATION_CATEGORY
+    assert category in rows, sorted(rows)
+    cells = rows[category]
+    assert cells[1] == "**0**", cells
+    assert cells[3] == sl.trust_cell(category), cells
+    verdict, cause = sl.CATEGORY_TRUST[category]
+    assert verdict == "yes", verdict
+    assert "balanced" in cause and "later line" in cause, cause
+    # Joining the table must not move which zeros the verdict calls unqualified.
+    assert sl.untrustworthy_categories() == ["DRIFT", "STALE"]
+
+
 def test_drift_and_stale_say_untrustworthy_and_name_their_cause():
     rows = _table_rows(sl.render_report(_result()))
     drift, stale = rows["DRIFT"][3], rows["STALE"][3]
