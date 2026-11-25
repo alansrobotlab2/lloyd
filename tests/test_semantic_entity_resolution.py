@@ -2481,3 +2481,240 @@ def test_the_backup_is_the_only_difference_a_refresh_makes(tmp_path, monkeypatch
         "the reviewer's path stopped naming the cumulative record")
     assert {r["canonical"] for r in sweep.load_semantic_proposals(tmp_path)} == {
         "Jason", "Qwen3-TTS", "Isaac Lab"}, "the queue a human reads changed"
+
+
+# ---------------------------------------------------------------------------
+# #4567 — the record holds a pair pointing BOTH ways, and no marker sees it
+#
+# `mark_multi_canonical` asks how many canonicals ONE variant has, so a two-cycle — where
+# each of its two variants maps to exactly one canonical — can never satisfy it. Measured
+# 2026-11-25 over the 205-row `semantic-proposals-cumulative.jsonl`: 9 pairs (18 rows),
+# `multi_canonical` truthy on 8 rows and on 0 of those 18. A reviewer approving
+# `Isaac Lab <- IsaacLab` sees no signal that `IsaacLab <- Isaac Lab` is live beside it,
+# and 4 of the 9 accrued in the three weeks since task #67 last counted them. The names
+# below are those live rows, at their live confidences; the destructive one — `action:
+# merge` on BOTH sides — is `Joseph E. Gonzalez` / `Joseph Gonzalez`, conf 0.95 each.
+# Whether the sweep should REFUSE such a row is the ruling #3536 deferred to a reviewer
+# and is out of scope here: this labels.
+# ---------------------------------------------------------------------------
+
+
+def _cycle_fixture():
+    """The clause-1 fixture, built fresh each call: `emit_proposals` mutates rows."""
+    rows = [_proposal("Isaac Lab", "IsaacLab", 0.95),
+            _proposal("IsaacLab", "Isaac Lab", 0.95),
+            _proposal("Qwen3-TTS", "qwen 3 tts", 0.9)]
+    # main() writes review_flag on every proposal and `_proposal` omits the key, so it is
+    # set here: the parity clause compares that column and must see a real flag value on
+    # one row and None on the others, not three absences.
+    rows[0]["review_flag"] = "version_suffix_mismatch"
+    rows[1]["review_flag"] = None
+    rows[2]["review_flag"] = None
+    return rows
+
+
+def _key(row):
+    return (row["canonical"], row["variant"])
+
+
+def test_a_reversed_pair_is_marked_on_both_rows_in_both_written_files(tmp_path):
+    """Clause 1: the label is on the row, in the dated file and in the record.
+
+    The marker's VALUE spells the reversed row rather than a bare boolean, because whoever
+    decides one row has to see which row contradicts it. The third row is what keeps the
+    contract honest: its reversed pair is absent, so it must read `False` with the key
+    PRESENT — a missing key in a record written before #4567 would otherwise read as a row
+    that was checked and found clean, which is the same argument #3536 makes for
+    `multi_canonical` at :1204.
+    """
+    dated, cumulative, latest = _paths(tmp_path)
+
+    ser.emit_proposals(_cycle_fixture(), run_log=dated, cumulative=cumulative,
+                       latest=latest)
+
+    expected = {("Isaac Lab", "IsaacLab"): "IsaacLab <- Isaac Lab",
+                ("IsaacLab", "Isaac Lab"): "Isaac Lab <- IsaacLab"}
+    for path, label in ((dated, "the dated file"), (cumulative, "the record")):
+        written = [json.loads(l) for l in path.read_text().splitlines() if l.strip()]
+        assert len(written) == 3, (label, written)
+        for r in written:
+            assert "mutual_proposal" in r, (
+                f"{label} omitted the key on {_key(r)}, so a reader cannot tell a "
+                f"checked-and-clean row from a pre-#4567 one: {r}")
+            if _key(r) in expected:
+                assert r["mutual_proposal"] == expected[_key(r)], (label, r)
+            else:
+                assert r["mutual_proposal"] is False, (
+                    f"{label} labelled a row whose reversed pair is not live: {r}")
+
+
+def test_a_cycle_formed_across_two_runs_is_marked_when_the_next_run_writes(tmp_path):
+    """Clause 2: the scope is the union of the prior record and this run's rows.
+
+    All 9 cycles on the live record were formed this way — measured 2026-11-25, not one of
+    the nine has both directions first seen on the same day (`Isaac Lab <- IsaacLab` on
+    2026-09-30, its reverse on 2026-10-07) — so a marker computed over one invocation's
+    rows would label none of them. Read back through the sweep's real loader, which is the
+    path the reviewer takes, and the earlier row keeps its provenance: the label is added
+    to the row that already existed and `first_seen_at` stays the run that surfaced it
+    (#1410's rule), not the run that noticed the pair points both ways.
+    """
+    run1, cumulative, latest = _paths(tmp_path)
+    run2 = tmp_path / "p-2.jsonl"
+
+    first_counts = ser.emit_proposals(
+        [_proposal("Isaac Lab", "IsaacLab", 0.95)],
+        run_log=run1, cumulative=cumulative, latest=latest)
+    first = _record_rows(cumulative)
+    assert first_counts["mutual_proposal_rows"] == 0, first_counts
+    assert len(first) == 1 and first[0]["mutual_proposal"] is False, (
+        "a lone row was labelled before its reverse existed: "
+        f"{first[0].get('mutual_proposal')}")
+
+    back = _proposal("IsaacLab", "Isaac Lab", 0.95)
+    back["proposed_at"] = "2026-10-07T00:00:00+00:00"
+    counts = ser.emit_proposals([back], run_log=run2, cumulative=cumulative,
+                               latest=latest)
+
+    assert counts["mutual_proposal_rows"] == 2, (
+        f"the run that closed the cycle counted only its own row: {counts}")
+    seen = sweep.load_semantic_proposals(tmp_path)
+    assert len(seen) == 2, f"a row was withheld: {seen}"
+    labelled = {_key(r): r["mutual_proposal"] for r in seen}
+    assert labelled == {("Isaac Lab", "IsaacLab"): "IsaacLab <- Isaac Lab",
+                        ("IsaacLab", "Isaac Lab"): "Isaac Lab <- IsaacLab"}, (
+        "both directions of the cycle were not labelled: "
+        f"{sorted((r['mutual_proposal'], r['variant'], r['canonical']) for r in seen)}")
+
+    # The dated file of the run that closed the cycle carries the label on the row it just
+    # wrote, not only the merged record: that dated line is what a run log points at.
+    dated_rows = _record_rows(run2)
+    assert len(dated_rows) == 1, dated_rows
+    assert dated_rows[0]["mutual_proposal"] == "Isaac Lab <- IsaacLab", dated_rows
+
+    by_pair = {_key(r): r for r in seen}
+    assert by_pair[("Isaac Lab", "IsaacLab")]["first_seen_at"] == (
+        "2026-09-12T00:00:00+00:00"), (
+        "the earlier run's provenance was rewritten by the run that labelled it: "
+        f"{by_pair[('Isaac Lab', 'IsaacLab')]['first_seen_at']}")
+    assert by_pair[("IsaacLab", "Isaac Lab")]["first_seen_at"] == (
+        "2026-10-07T00:00:00+00:00"), by_pair[("IsaacLab", "Isaac Lab")]
+
+
+def test_the_reversed_pair_label_moves_no_field_and_drops_no_row(tmp_path,
+                                                                monkeypatch):
+    """Clause 3: the same fixture run with the marker and without it writes one record.
+
+    "Without" is the real alternative implementation rather than a claim in a comment:
+    `mark_mutual_proposals` is patched out, so the second run writes the record this script
+    wrote before #4567 and each of the seven fields is compared against it. Withholding is
+    the failure this clause exists to forbid — whether the sweep should ever REFUSE a
+    two-cycle row is the ruling #3536 gave a reviewer, not a round.
+    """
+    fields = ("action", "guard_reason", "review_flag", "confidence", "verdict",
+              "first_seen_at", "last_seen_at")
+
+    with_dir = tmp_path / "with"
+    with_dir.mkdir()
+    dated, cumulative, latest = _paths(with_dir)
+    marked_counts = ser.emit_proposals(_cycle_fixture(), run_log=dated,
+                                       cumulative=cumulative, latest=latest)
+    marked = _record_rows(cumulative)
+
+    monkeypatch.setattr(ser, "mark_mutual_proposals", lambda rows, pairs: 0)
+    plain_dir = tmp_path / "without"
+    plain_dir.mkdir()
+    dated2, cumulative2, latest2 = _paths(plain_dir)
+    plain_counts = ser.emit_proposals(_cycle_fixture(), run_log=dated2,
+                                      cumulative=cumulative2, latest=latest2)
+    plain = _record_rows(cumulative2)
+
+    assert any(r["mutual_proposal"] for r in marked), (
+        "the marked run labelled nothing, so every comparison below is vacuous")
+    assert all("mutual_proposal" not in r for r in plain), (
+        "the unmarked run still wrote the field, so these are not the two records this "
+        "clause compares")
+    assert len(marked) == len(plain) == 3, (
+        f"a row appeared or vanished with the marker: {len(marked)} vs {len(plain)}")
+    by_marked, by_plain = {_key(r): r for r in marked}, {_key(r): r for r in plain}
+    assert set(by_marked) == set(by_plain), (
+        f"the set of pairs under review changed: {set(by_marked) ^ set(by_plain)}")
+    for k in by_marked:
+        assert {f: by_marked[k][f] for f in fields} == {
+            f: by_plain[k][f] for f in fields}, (
+            f"the label moved a field on {k}: marked="
+            f"{ {f: by_marked[k][f] for f in fields} } "
+            f"unmarked={ {f: by_plain[k][f] for f in fields} }")
+    assert marked_counts["run"] == plain_counts["run"] == 3, (
+        marked_counts, plain_counts)
+    assert marked_counts["cumulative"] == plain_counts["cumulative"] == 3, (
+        marked_counts, plain_counts)
+
+
+def test_the_marked_row_count_counts_rows_of_the_merged_record(tmp_path):
+    """Clause 4, first half: the count is ROWS of the RECORD, not pairs and not this run.
+
+    The cycle is SEEDED rather than emitted, so the number is one this run did not create
+    and cannot see in its own rows: it emits one unrelated proposal and must report the 2
+    rows of the pair already in the record. Rows, not variants, is the unit the clause
+    names and the unit the reviewer works in — 9 pairs is 18 rows to notice — where
+    `multi_canonical_variants` beside it stays a count of variants, and the two counts must
+    not blur: a two-cycle is not a variant collision.
+    """
+    dated, cumulative, latest = _paths(tmp_path)
+    _seed_record(cumulative, [
+        dict(_stored_row("Best-of", "Best-of-N", "2026-10-21T00:00:00+00:00"),
+             action="alias_only"),
+        dict(_stored_row("Best-of-N", "Best-of", "2026-10-28T00:00:00+00:00"),
+             action="alias_only")])
+
+    counts = ser.emit_proposals(
+        [_proposal("Qwen3-TTS", "qwen 3 tts", 0.9, action="alias_only")],
+        run_log=dated, cumulative=cumulative, latest=latest)
+
+    assert counts["run"] == 1, counts
+    assert counts["cumulative"] == 3, counts
+    assert counts["mutual_proposal_rows"] == 2, (
+        "the count is not of the merged record's rows: "
+        f"{counts['mutual_proposal_rows']} for 2 seeded cycle rows and 1 unmarked row")
+    assert counts["multi_canonical_variants"] == 0, (
+        f"a two-cycle was also booked as a variant collision: {counts}")
+    rows = _record_rows(cumulative)
+    others = [r for r in rows if _key(r) == ("Qwen3-TTS", "qwen 3 tts")]
+    assert len(others) == 1 and others[0]["mutual_proposal"] is False, (
+        f"the run's own row, whose reverse is not live, is not reading False: {others}")
+
+
+def test_the_run_report_prints_the_marked_row_count_and_is_silent_at_zero(
+        tmp_path, monkeypatch, capsys):
+    """Clause 4, across the process seam: main()'s own stdout, both ways.
+
+    Driven through `_drive_main`, so the assertion is on the text an operator reading the
+    #67 run log sees and not on a counts dict, and the block is the same two-space label
+    over a four-space padded entry as the `multi_canonical` block beside it. The cycle is
+    seeded in the accumulated record because that is the shape of all 9 live pairs — a
+    contradiction the run did not itself create — and the quiet case is pinned with it: a
+    line printed on every run is decor and gets skipped, which is why the guard-downgrade,
+    review-flag and `multi_canonical` blocks above it print only when non-empty.
+    """
+    quiet = tmp_path / "quiet"
+    quiet.mkdir()
+    _drive_main(quiet, monkeypatch, ["--limit", "1"])
+    out = capsys.readouterr().out
+    assert "mutual_proposal" not in out, (
+        "a run whose record holds no reversed pair printed a count, so the line stops "
+        f"meaning anything: {out[-700:]}")
+
+    cyc = tmp_path / "cycle"
+    cyc.mkdir()
+    _seed_record(cyc / "semantic-proposals-cumulative.jsonl", [
+        dict(_stored_row("Voice Agent", "Voice Agents", "2026-11-04T00:00:00+00:00"),
+             action="alias_only"),
+        dict(_stored_row("Voice Agents", "Voice Agent", "2026-10-07T00:00:00+00:00"),
+             action="alias_only")])
+    _drive_main(cyc, monkeypatch, ["--limit", "1"])
+    out = capsys.readouterr().out
+    assert "rows whose reversed pair is also live" in out, out[-900:]
+    block = out.split("rows whose reversed pair is also live")[1]
+    assert re.search(r"mutual_proposal\s+2\b", block), (
+        f"the count printed is not the 2 rows of the seeded pair: {block[:300]}")

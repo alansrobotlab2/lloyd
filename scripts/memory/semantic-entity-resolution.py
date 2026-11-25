@@ -1223,6 +1223,73 @@ def mark_multi_canonical(rows: list[dict],
     return len(colliding)
 
 
+# Field naming the row whose REVERSED pair is also live. Its value is that reversed
+# pair, spelled in the same `canonical <- variant` notation the item and the section
+# headings use, so the reviewer sees WHICH row contradicts this one and not only that
+# something does.
+MUTUAL_PROPOSAL_FIELD = "mutual_proposal"
+
+
+def proposal_pairs(rows: list[dict]) -> set[tuple[str, str]]:
+    """Every live `(variant, canonical)` pair in `rows`, each in the direction it proposes.
+
+    The scope is the same union `canonicals_by_variant` needs — the accumulated record
+    plus this run's rows — for the same reason. A two-cycle whose two directions were
+    emitted in separate runs is as live as one written together: measured 2026-11-25, the
+    205-row `semantic-proposals-cumulative.jsonl` holds 9 such pairs (18 rows), and all
+    nine were formed by rows first seen on different days.
+    """
+    pairs: set[tuple[str, str]] = set()
+    for row in rows:
+        variant = str(row.get("variant") or "")
+        canon = str(row.get("canonical") or "")
+        if variant and canon:
+            pairs.add((variant, canon))
+    return pairs
+
+
+def mark_mutual_proposals(rows: list[dict],
+                          pairs: set[tuple[str, str]]) -> int:
+    """Label each row whose reversed pair is also live; return how many rows are marked.
+
+    A row reads `canonical <- variant`; its reversed pair is the live row reading
+    `variant <- canonical`. When both are in the record the reviewer is being asked twice
+    about one pair, in opposite directions, and nothing on either row says so. `Isaac Lab
+    <- IsaacLab` beside `IsaacLab <- Isaac Lab` is one of the nine on the live record.
+
+    Why this is not already covered by `multi_canonical`. That marker asks how many
+    canonicals ONE variant is proposed under, so a two-cycle — where each of the two
+    variants maps to exactly one canonical — cannot satisfy it. Measured 2026-11-25: 0 of
+    the 18 cycle rows carry `multi_canonical`. The two questions are independent (a
+    variant can in principle be both), so neither marker substitutes for the other and
+    this function neither reads nor writes that field.
+
+    Labelling only, in `mark_multi_canonical`'s shape: the field is the reversed pair's
+    notation on a marked row and `False` on every other, so its ABSENCE in a record
+    written before #4567 cannot be read as "checked and clean". No `action`,
+    `guard_reason`, `review_flag` or `confidence` moves, no row is withheld, no pair is
+    re-judged. Whether the sweep should ever REFUSE a two-cycle row instead of labelling
+    it is the reviewer decision #3536 deferred, and this does not make it: the destructive
+    case in today's record is one pair — `Joseph E. Gonzalez` / `Joseph Gonzalez`, `action:
+    merge` on both sides at conf 0.95 each — and approving both as offered would write
+    `A->B` and `B->A` into the alias table.
+    """
+    marked = 0
+    for row in rows:
+        variant = str(row.get("variant") or "")
+        canon = str(row.get("canonical") or "")
+        # `canon != variant` stops a row being its own reverse: a pair whose two sides
+        # carry the same name reverses onto itself, and "the other direction is also
+        # live" would then be a claim about the only row that exists.
+        if canon and variant and canon != variant and (canon, variant) in pairs:
+            # Spelled the other way round on purpose: the value IS the reversed row, so
+            # the reader of `Isaac Lab <- IsaacLab` is handed the string to search for.
+            row[MUTUAL_PROPOSAL_FIELD] = f"{variant} <- {canon}"
+            marked += 1
+        else:
+            row[MUTUAL_PROPOSAL_FIELD] = False
+    return marked
+
 # Field naming the guard that fires TODAY on a row whose stored `action` predates it.
 # Separate from `guard_reason`, which stays the answer of the day the pair was judged.
 STALE_GUARD_FIELD = "stale_guard_reason"
@@ -1364,6 +1431,11 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
     # count returned below are all one pass over one set (#3536).
     by_variant = canonicals_by_variant(merged)
     marked_variants = mark_multi_canonical(merged, by_variant)
+    # The reversed pairs are read off the same union, immediately after the variant
+    # collision is marked, so both markers describe the one set that is about to be
+    # written and neither can be computed against a stale record (#4567).
+    pairs = proposal_pairs(merged)
+    mutual_rows = mark_mutual_proposals(merged, pairs)
     # The accumulated rows were guarded on the day each was emitted and the store has
     # grown since (#3758), so the guard is re-asked over `merged` — the same set the
     # marker walks, read before anything is written, so the dated file, the record, the
@@ -1383,6 +1455,7 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
     # of rows already in the record; labelling them from the same map is what makes
     # "every row in the dated file carries the marker" true rather than accidental.
     mark_multi_canonical(proposals, by_variant)
+    mark_mutual_proposals(proposals, pairs)
     with run_log.open("a") as f:
         for rec in proposals:
             f.write(json.dumps(rec) + "\n")
@@ -1410,6 +1483,11 @@ def emit_proposals(proposals: list[dict], *, run_log: Path, cumulative: Path,
             # the SET, not of rows: two rows of one collision is one thing to fix, and
             # counting rows would make a three-canonical variant look like two problems.
             "multi_canonical_variants": marked_variants,
+            # Rows of the merged RECORD that carry the reversed-pair label. A count of
+            # ROWS, not of pairs, because the reviewer opens a row: nine pairs is eighteen
+            # rows to notice, and a pair count would halve what the section is asking of
+            # them. Rows, where `multi_canonical_variants` above is variants.
+            "mutual_proposal_rows": mutual_rows,
             # Merge rows the store has outgrown, counted over the merged RECORD rather
             # than this run's rows, because the rows that matter are the ones this run
             # never re-judged (#3758). The Counter is the reason a human acts on: two
@@ -1695,6 +1773,17 @@ def main() -> int:
         print("  variants proposed under >1 canonical (labelling only, both rows "
               "kept):")
         print(f"    {'multi_canonical':<30} {marked_variants}")
+    mutual = counts.get("mutual_proposal_rows", 0)
+    if mutual:
+        # Two rows about one pair, pointing opposite ways — the reviewer-visible
+        # contradiction no per-pair guard can see (#4567). Same two-space label over
+        # four-space padded entries as the `multi_canonical` block above, and silent at 0
+        # for the same reason: a line printed on every run is decor. It reads the count
+        # from `counts` rather than rescanning the file, because the number describes the
+        # merged RECORD and only `emit_proposals` has that set in hand.
+        print("  rows whose reversed pair is also live (labelling only, both rows "
+              "kept):")
+        print(f"    {MUTUAL_PROPOSAL_FIELD:<30} {mutual}")
     outgrown = counts.get("outgrown_merge_rows", 0)
     if outgrown:
         # The same two-space label over four-space padded entries as the guard-downgrade,
