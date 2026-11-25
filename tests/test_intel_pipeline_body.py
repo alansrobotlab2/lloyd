@@ -1173,16 +1173,20 @@ def test_a_set_off_signup_line_is_dropped_and_every_other_line_survives_byte_for
     # A CTA line with no blank above it is inside someone's paragraph, and every rule that
     # existed before #2143 declined to edit one — which is why these bytes used to come back
     # unchanged. #2143 moved that boundary: no blank means no NEW block, so the CTA and the
-    # sentence above it are ONE block, that block carries a URL, and the acceptance says it
-    # goes "whole, labelled or not". This is the item's own measured cost for the 39 stored
-    # rows whose URL is glued into prose (`CPU: Ryzen 9800X3D https://amzn.to/40Nor9v`): the
-    # sentence goes with the link, and the entry falls through to `why` — clause 5, pinned
-    # through the writer by `test_a_body_that_is_only_a_url_block_publishes_the_scored_why`.
+    # sentence above it are ONE block, and the block carrying a URL still goes — the CTA
+    # line itself, everything below it in the run, and the block's blanks. What #2143 also
+    # took, and #4558 gave back, is the block's OPENING sentence: its clause 1 is that
+    # "the cleaner stops deleting the description's prose while keeping its footer", so
+    # `CTA_HEADING` survives the cut and the entry is published as prose instead of falling
+    # through to `why`. A body that is ONLY a link block still falls through to `why`,
+    # unchanged, pinned through the writer by
+    # `test_a_body_that_is_only_a_url_block_publishes_the_scored_why`.
     # What is unchanged is the signup rule's own no-blank-above floor, which now only ever
     # runs on text with no link in it, and is pinned as byte-for-byte on that shape:
     welded = CTA_HEADING + "\n" + MANUS_CTA
-    assert body_mod.strip_link_footer(welded) == "", \
-        "a block carrying a URL survived when its first line had no blank above it"
+    assert body_mod.strip_link_footer(welded) == CTA_HEADING, \
+        ("the CTA line survived, or the prose above it went with it (#4558 clause 1): "
+         f"{body_mod.strip_link_footer(welded)!r}")
     welded_no_url = CTA_HEADING + "\n👉 Join the free GPT-6 Astra Crash Course here, link below"
     assert body_mod.strip_link_footer(welded_no_url) == welded_no_url, \
         "a CTA line with no blank above it was dropped out of a paragraph"
@@ -4676,29 +4680,43 @@ PROMO_HEADING_SHAPE = "promo-heading"
 
 
 def test_the_recorded_row_strips_to_footer_residue_and_no_sentence():
-    """The mechanism, measured rather than recited. The channel's opening
-    sentence is a trailer lead-in — a sentence ending in a colon directly above a
-    link block — so `_drop_url_blocks` takes the run *including* that line, the
-    same rule the #2509 fixture `TRAILER_WITH_LABEL` already pins. What is left of
-    the 1,856-char description is footer and nothing else: the two promo labels,
-    two separator rules and a hashtag run.
+    """The mechanism, measured rather than recited, on the two artifacts this row
+    actually produced — the 1,856-char `gate_description` and the 34-char `summary`
+    the scanner stored for it.
 
-    The strip cannot remove that itself — it will not empty a body (#1900) —
-    which is exactly why a whole-body predicate has to sit beside the shape. And
-    the row AS STORED is narrower than the strip's output: its `summary` is the
-    34-char label pair, a fixed point of the strip. That is what the writer
-    receives, and why its `stripped == summary` path saw nothing to act on.
+    The STORED row is the one the title names: its `summary` is the label pair, a
+    fixed point of the strip (`strip_link_footer` returns it byte-identical, because
+    the strip will not empty a body — #1900), and the closed list calls that body
+    footer and nothing else. It is what the writer receives, why its
+    `stripped == summary` path saw nothing to act on, and why a whole-body predicate
+    has to sit beside the shape.
+
+    The DESCRIPTION half of this node said the opposite before #4558, and said it as
+    a rule: the channel's opening sentence sits welded above a link line, so
+    `_drop_url_blocks` took the block *including* that line and left "footer and
+    nothing else". Clause 1 of #4558 rules that outcome wrong — "the cleaner stops
+    deleting the description's prose while keeping its footer" — so the claim is now
+    the other way round and stronger: the sentence survives, and every residue line
+    the strip could name goes with the footer. That is the same claim #4558's own
+    node makes over the 2026-11-25 row, the same channel's next published entry.
     """
     assert len(AZISK_DESCRIPTION) == 1856, "the fixture stopped being the recorded row"
     stripped_desc = body_mod.strip_link_footer(AZISK_DESCRIPTION)
     assert "http" not in stripped_desc, "a link block survived the strip"
-    assert body_mod.footer_only(stripped_desc) is True, (
-        f"the recorded description still strips to something the closed list "
-        f"calls content: {stripped_desc!r}")
+    assert stripped_desc == AZISK_DESCRIPTION.splitlines()[0], (
+        f"#4558 clause 1: the strip must keep the channel's sentence and lose the "
+        f"footer, and it returned {stripped_desc!r}")
+    assert body_mod.footer_residue_lines(stripped_desc) == [], (
+        f"a residue line survived under a body that had a sentence: "
+        f"{body_mod.footer_residue_lines(stripped_desc)}")
+    assert body_mod.footer_only(stripped_desc) is False, (
+        "a body holding the channel's own sentence is not footer-only")
     assert body_mod.footer_only(AZISK_DESCRIPTION) is False, (
         "the description as published carries a sentence, so naming the shape "
         "must not read the whole recorded row as footer — only its remainder")
     assert len(AZISK_STORED_SUMMARY) == 34, "the stored summary is not the body"
+    assert body_mod.footer_only(AZISK_STORED_SUMMARY) is True, (
+        "the recorded row's stored body stopped reading as footer and no sentence")
     assert body_mod.strip_link_footer(AZISK_STORED_SUMMARY) == AZISK_STORED_SUMMARY
 
 
@@ -4774,8 +4792,16 @@ def test_a_body_that_has_prose_keeps_it_and_loses_the_labels():
     # act on, and it will not because emptying a body is never the answer (#1900).
     assert body_mod.strip_link_footer(PROMO_LABEL_PAIR) == PROMO_LABEL_PAIR
     assert body_mod.strip_link_footer(RELATED_LABEL_ONLY) == RELATED_LABEL_ONLY
-    # The real row therefore has no body: refused, rather than published emptied.
-    assert vw_mod.lacks_body(_yt(summary=body_mod.strip_link_footer(AZISK_DESCRIPTION)))
+    # And the recorded row IS a body that has prose: since #4558 clause 1 the strip
+    # returns its channel sentence and drops every label with the footer, so this
+    # clause's own rule — never trade a sentence for tidiness — now applies to the
+    # description too, and the row is published rather than refused. Before #4558 this
+    # assert read the other way, because the strip had deleted the sentence.
+    azisk_body = body_mod.strip_link_footer(AZISK_DESCRIPTION)
+    assert azisk_body == AZISK_DESCRIPTION.splitlines()[0], (
+        f"the recorded row lost its sentence again: {azisk_body!r}")
+    assert vw_mod.lacks_body(_yt(summary=azisk_body)) is False, (
+        "a body holding the channel's sentence is not a body the writer refuses")
 
 
 def test_real_channel_copy_is_still_published_verbatim(tmp_path, intel_state):
@@ -5645,3 +5671,270 @@ def test_the_furniture_arm_hid_nothing_but_rules_across_the_published_digests():
         "`## 2026-11-20` day section of knowledge/ai-llms/youtube-digest.md is the "
         "line this arm exists for; if it is not here the arm did not land and the two "
         "shipped-digest nodes are green for some other reason")
+
+
+# ── #4558 — the shipped 2026-11-25 row: the prose deleted, the footer kept ───────
+#
+# Two shipped-digest nodes went red on 2026-11-25 over a body holding nothing but a
+# footer — `🎥 Related Videos 🎥`, two `— — — — — — — — —` rules, `⏱️ Chapters`
+# and six timestamped rows — published into `knowledge/ai-llms/youtube-digest.md`
+# under `## 2026-11-25`. `PUBLISHED_RESIDUE_BODY_2026_11_25` is that body byte for
+# byte: the `summary` the scanner stored for video dkITChVXii0, and what
+# `clip_body(strip_link_footer(DESC_2026_11_25))` returned for its description.
+#
+# It is a fixed point of the strip — the strip will not empty a body (#1900) — so
+# keeping it out of the digest needs the whole-body predicate beside the shape
+# (#3121 clause 3), which is half of what these nodes pin. The description is the
+# half #4558 clause 1 rules on: its line 1 is a real sentence and the cleaner
+# deleted it while keeping every label, rule and chapter row below it.
+#
+# Both constants are the shipped bytes inlined and length-pinned the way
+# `AZISK_DESCRIPTION` is, because their source row lives in
+# `_pipeline/vault-derived/memory/feeds/raw/2026-11-25.jsonl` under id
+# `youtube:UCajiMK_CY9icRhLepS8_3ug:dkITChVXii0`, and a test may not read the live
+# pipeline state. Anyone re-deriving them can diff this against that row.
+
+DESC_2026_11_25 = (
+    'I gave four 128GB desktops the same 133,000-token prompt to see what an extra $4,000 actually buys you when you run AI locally.' + "\n"
+    '🔹 Programming monitors from BenQ (RD Series):  https://benqurl.biz/4eOgTtL' + "\n"
+    '' + "\n"
+    '🛒 Gear Links 🛒' + "\n"
+    '⌨️🏢 Cluster rack: ' + "\n"
+    '          tall version- https://amzn.to/4cvsfk3' + "\n"
+    '          short version - https://amzn.to/4j6Nuv4' + "\n"
+    '🪛🪛Highly rated precision driver kit: https://amzn.to/4fkMVfg' + "\n"
+    '💻☕ Favorite 15" display with magnet: https://amzn.to/3zD1DhQ' + "\n"
+    '🎧⚡ Great 40Gbps T4 enclosure: https://amzn.to/3JNwBGW' + "\n"
+    '🛠️🚀 My nvme ssd: https://amzn.to/3YLEySo' + "\n"
+    '📦🎮 My gear: https://www.amazon.com/shop/alexziskind' + "\n"
+    '' + "\n"
+    '🎥 Related Videos 🎥' + "\n"
+    '' + "\n"
+    '🖥️⚡ Beelink SER10 Max vs M4 Pro - https://youtu.be/sxMSKyrnZH4' + "\n"
+    '🔴🧠 AMD Ryzen AI Halo review - https://youtu.be/DDxnLzO356U' + "\n"
+    '🟢🔥 Dell Pro Max GB10 and DGX Spark stress test - https://youtu.be/QbtScohcdwI' + "\n"
+    '🍎🧠 Local AI on the M5 Max MacBook Pro - https://youtu.be/XGe7ldwFLSE' + "\n"
+    '🧳🧰 Mini PC portable setup - https://youtu.be/4RYmsrarOSw' + "\n"
+    '🍎💻 Dev setup on Mac - https://youtu.be/KiKUN4i1SeU' + "\n"
+    '💸🧠 Cheap mini runs a 70B LLM 🤯 - https://youtu.be/xyKEQjUzfAk' + "\n"
+    '🧪🔥 RAM torture test on Mac - https://youtu.be/l3zIwPgan7M' + "\n"
+    '🍏⚡ FREE Local LLMs on Apple Silicon | FAST! - https://youtu.be/bp2eev21Qfo' + "\n"
+    '🧠📉 REALITY vs Apple’s Memory Claims | vs RTX4090m - https://youtu.be/fdvzQAWXU7A' + "\n"
+    '🧬🐍 Set up Conda - https://youtu.be/2Acht_5_HTo' + "\n"
+    '⚡💥 Thunderbolt 5 BREAKS Apple’s Upcharge - https://youtu.be/nHqrvxcRc7o' + "\n"
+    '🧠🚀 INSANE Machine Learning on Neural Engine - https://youtu.be/Y2FOUg_jo7k' + "\n"
+    '🧱🖥️ Mac Mini Cluster - https://youtu.be/GBR6pHZ68Ho' + "\n"
+    '' + "\n"
+    '* 🛠️ Developer productivity Playlist - https://www.youtube.com/playlist?list=PLPwbI_iIX3aQCRdFGM7j4TY_7STfv2aXX' + "\n"
+    '🔗 AI for Coding Playlist: 📚 - https://www.youtube.com/playlist?list=PLPwbI_iIX3aSlUmRtYPfbQHt4n0YaX0qw' + "\n"
+    '' + "\n"
+    '' + "\n"
+    '— — — — — — — — — ' + "\n"
+    '' + "\n"
+    '❤️ SUBSCRIBE TO MY YOUTUBE CHANNEL 📺' + "\n"
+    'Click here to subscribe: https://www.youtube.com/@AZisk?sub_confirmation=1' + "\n"
+    '' + "\n"
+    '— — — — — — — — —' + "\n"
+    '' + "\n"
+    'Join this channel to get access to perks:' + "\n"
+    'https://www.youtube.com/channel/UCajiMK_CY9icRhLepS8_3ug/join' + "\n"
+    '' + "\n"
+    '— — — — — — — — —' + "\n"
+    '📱 ALEX on X: https://x.com/digitalix' + "\n"
+    '' + "\n"
+    '' + "\n"
+    '⏱️ Chapters' + "\n"
+    '00:00 Local AI Test' + "\n"
+    '02:29 Hardware and Models' + "\n"
+    '04:55 Baseline Benchmarks' + "\n"
+    '12:32 Optimized Inference' + "\n"
+    '17:19 Coding Agent Benchmarks' + "\n"
+    '19:25 Power and Thermals' + "\n"
+    '' + "\n"
+    '#macstudio     #dgxspark    #m5ultra'
+
+)
+
+PUBLISHED_RESIDUE_BODY_2026_11_25 = (
+    '🎥 Related Videos 🎥' + "\n"
+    '' + "\n"
+    '— — — — — — — — — ' + "\n"
+    '' + "\n"
+    '— — — — — — — — —' + "\n"
+    '' + "\n"
+    '⏱️ Chapters' + "\n"
+    '00:00 Local AI Test' + "\n"
+    '02:29 Hardware and Models' + "\n"
+    '04:55 Baseline Benchmarks' + "\n"
+    '12:32 Optimized Inference' + "\n"
+    '17:19 Coding Agent Benchmarks' + "\n"
+    '19:25 Power and Thermals'
+
+)
+
+
+def test_the_shipped_2026_11_25_description_keeps_its_prose_and_loses_its_footer():
+    """#4558 clause 1, over the shipped row: the cleaner stops deleting the
+    description's prose while keeping its footer.
+
+    Before this round the clip was `PUBLISHED_RESIDUE_BODY_2026_11_25` exactly — zero
+    sentences, one promo heading, two rules, one chapter heading and six chapter rows
+    — because `_drop_url_blocks` took the block containing the opening sentence whole,
+    that sentence being welded to `🔹 Programming monitors from BenQ (RD Series):
+    https://benq…` with no blank between them. #3121's own node on this file read that
+    deletion as a rule; clause 1 rules it wrong, and the fix is in `_drop_url_blocks`:
+    the cut now starts at the first line that CARRIES a link, so prose above a block's
+    link run stays and the run itself, the labels under it and its blanks still go.
+
+    What is additionally true, and was not, is that everything left is clean:
+    `_drop_footer_residue` now steps a chapter trailer wherever the tail walk meets
+    one, so the promo heading that used to be stranded under two rules goes too.
+    """
+    assert len(DESC_2026_11_25) == 2259, "the fixture stopped being the shipped row"
+    opening = DESC_2026_11_25.splitlines()[0]
+    assert opening == ("I gave four 128GB desktops the same 133,000-token prompt to see "
+                       "what an extra $4,000 actually buys you when you run AI locally."), (
+        "clause 1 names this sentence; the fixture's line 1 stopped being it")
+    clip = body_mod.clip_body(body_mod.strip_link_footer(DESC_2026_11_25))
+    assert opening in clip, (
+        f"clause 1: the description's prose was deleted while its footer was kept: "
+        f"{clip!r}")
+    assert body_mod.ends_a_sentence(clip) is True, (
+        "the writer's own emptiness test (`ends_a_sentence`, #1561) must pass on what "
+        "survives, or the row falls through to `why` and publishes no prose anyway")
+    assert body_mod.footer_residue_lines(clip) == [], (
+        f"residue the writer could have dropped stayed in the body: "
+        f"{body_mod.footer_residue_lines(clip)}")
+    assert clip != PUBLISHED_RESIDUE_BODY_2026_11_25, (
+        "the clip still returns the shipped footer-only body, so the row that reddened "
+        "both shipped-digest nodes would be published again")
+
+
+def test_the_writer_publishes_the_shipped_row_as_prose_and_not_as_a_footer(intel_state):
+    """#4558 clause 1 and clause 2 met at the surface that matters: the note.
+
+    The row as the scanner hands it over — `summary` the clip of the description,
+    `gate_description` the pre-strip text #2241 keeps — through the real
+    `write_item_to_vault` into the digest `_publish` returns. Before this round that
+    call published an entry whose body was `PUBLISHED_RESIDUE_BODY_2026_11_25`: a
+    footer, and no sentence anywhere. Now the sentence is the body, and neither shape
+    that made the two shipped-digest nodes red reaches the file.
+    """
+    clip = body_mod.clip_body(body_mod.strip_link_footer(DESC_2026_11_25))
+    item = _yt(summary=clip, title="128GB AI Desktops, REAL Benchmarks! HUGE Price "
+                                   "difference (ACTUALLY Tested)",
+               gate_description=DESC_2026_11_25)
+    assert vw_mod.lacks_body(item) is False, (
+        "a row holding the channel's own sentence is not one the writer should refuse")
+    rendered = vw_mod._entry_body(item)
+    assert "I gave four 128GB desktops" in rendered, (
+        f"the body the writer renders is not the prose clip kept: {rendered!r}")
+    assert "🎥 Related Videos 🎥" not in rendered and "⏱️ Chapters" not in rendered, (
+        f"residue rode into the rendered body with the sentence: {rendered!r}")
+    text = _publish(intel_state, item)
+    assert "I gave four 128GB desktops" in text, (
+        "the entry reached the note without the sentence clause 1 exists to keep:\n"
+        + text[-600:])
+    assert "🎥 Related Videos 🎥" not in text, (
+        "the promo heading that made the shipped digest's ## 2026-11-25 entry a red "
+        "line reached the note again")
+    assert "⏱️ Chapters" not in text, (
+        "the chapter heading that made the shipped digest's ## 2026-11-25 entry a red "
+        "line reached the note again")
+
+
+def test_the_shipped_residue_body_is_reported_footer_end_to_end():
+    """#4558 clause 2: a body of exactly the shipped residue shape is `footer_only`.
+
+    The shape is the hard case for the predicate, and the reason it escaped is worth
+    naming precisely: `⏱️ Chapters` is a `footer-label`, `🎥 Related Videos 🎥` is a
+    `promo-heading`, both rules are `rule` — and the six `00:00 Local AI Test` …
+    `19:25 Power and Thermals` rows are NONE of those, because #1561 ruled that
+    timestamps with no promo above them are a video's table of contents. `all(shapes)`
+    therefore failed on the rows and the writer saw content where there was only a
+    footer's own index. `footer_only` now asks the same step-over `_drop_footer_residue`
+    asks, so the two cannot disagree about where a trailer ends.
+
+    #1561's ruling is not reversed: the rows keep reporting None, and a body that is
+    ONLY a chapter list — no promo, no rules — is still content, because stepping over
+    that trailer leaves nothing to name and the empty case answers False.
+    """
+    assert len(PUBLISHED_RESIDUE_BODY_2026_11_25) == 223, (
+        "the fixture stopped being the body that shipped on 2026-11-25")
+    assert body_mod.strip_link_footer(PUBLISHED_RESIDUE_BODY_2026_11_25) == \
+        PUBLISHED_RESIDUE_BODY_2026_11_25, (
+        "the strip is supposed to refuse to empty a body (#1900); if it now rewrites "
+        "this one the whole-body predicate below is pinning the wrong mechanism")
+    assert body_mod.footer_only(PUBLISHED_RESIDUE_BODY_2026_11_25) is True, (
+        "the shipped residue shape is being read as content again — this is the exact "
+        "body the two shipped-digest nodes were red over")
+    assert body_mod.footer_residue_shape("19:25 Power and Thermals") is None, (
+        "#1561's ruling is that a chapter row is not residue; the fix reached into "
+        "`footer_only`'s handling of a trailing trailer, not into the classifier")
+    assert body_mod.footer_only("⏱️ Chapters\n00:00 Local AI Test\n"
+                               "02:29 Hardware and Models") is False, (
+        "a body that is only a chapter list has no footer above it to name, and #1561 "
+        "says that is a video's table of contents — content")
+
+
+def test_the_writer_publishes_no_entry_for_the_shipped_residue_body(intel_state):
+    """#4558 clause 2, through the writer: an item whose cleaned body is that shape
+    publishes nothing.
+
+    The same bytes that produced the `## 2026-11-25` entry in
+    `knowledge/ai-llms/youtube-digest.md`, handed to `write_item_to_vault` as the
+    scanner hands them over. Two gates stand between them and the note, and this node
+    pins both, because clause 2 names the publish and the file names the mechanism:
+    `lacks_body` catches it first on #1561's no-sentence rule, and `footer_only` inside
+    `_entry_body` is the one that catches a body which WOULD have carried a sentence
+    shape — a promo heading and a chapter list is not a sentence, and the strip will
+    not empty the body that holds it (#1900), so the skip is the only repair available.
+    That skip is the third hand-cleaning of this file in 13 days' worth of publishes
+    that clause 2 exists to make unnecessary.
+    """
+    item = _yt(summary=PUBLISHED_RESIDUE_BODY_2026_11_25,
+               title="128GB AI Desktops, REAL Benchmarks! HUGE Price difference "
+                     "(ACTUALLY Tested)")
+    assert vw_mod.lacks_body(item) is True, (
+        "the youtube sentence gate (`ends_a_sentence`, #1561) stopped catching this "
+        "body, which would leave the `footer_only` skip as the only thing between a "
+        "footer and the digest")
+    assert vw_mod._entry_body(item) is None, (
+        "`_entry_body` returns None exactly when `footer_only` skips, and it handed "
+        f"back a body: {vw_mod._entry_body(item)!r}")
+    text = _publish(intel_state, item)
+    assert "128GB AI Desktops" not in text, (
+        "the shipped residue body was published again:\n" + text[-600:])
+    assert "🎥 Related Videos 🎥" not in text, (
+        "the promo heading reached the note; that line inside the shipped digest's "
+        "## 2026-11-25 entry is what reddens the shipped-digest node")
+    assert "⏱️ Chapters" not in text, (
+        "the chapter heading reached the note; that line inside the shipped digest's "
+        "## 2026-11-25 entry is what reddens the shipped-digest node")
+
+
+def test_neither_shipped_shape_is_excused_read_side():
+    """#4558 clause 3, the forbidden direction: the instrument still flags both lines.
+
+    The green that the two shipped-digest nodes want can be bought cheaply by teaching
+    `digest_structural_line` to call these two lines structural furniture, which is
+    what #4402 did for a lone separator rule — and doing it here would be a false
+    green, because unlike that rule these two shapes ARE in the closed residue list
+    and both write paths are permitted to remove them. So the read side is unchanged
+    by this round, and this node is the tripwire: it fails the moment either shape is
+    excused, and it also fails if #4402's earned narrowing is widened away, since a
+    mid-body rule must stay excused for the `## 2026-11-20` divider that
+    `test_the_furniture_arm_skips_only_the_weak_shape_of_every_shape_the_writer_knows`
+    exists for.
+    """
+    for line, shape in (("🎥 Related Videos 🎥", "promo-heading"),
+                        ("⏱️ Chapters", "footer-label")):
+        assert body_mod.footer_residue_shape(line) == shape, (
+            f"{line!r} stopped reporting the shape the shipped-digest nodes flagged it "
+            f"under; the classifier moved, and this round was not allowed to move it")
+        assert body_mod.digest_structural_line(line) is False, (
+            f"{line!r} is now excused read-side: the nodes were made green by "
+            f"widening `digest_structural_line`, which #4558 forbids")
+    assert body_mod.digest_structural_line("_" * 46) is True, (
+        "#4402's narrowing of `digest_structural_line` to the weak set was earned and "
+        "must survive this round too: a rule is furniture")

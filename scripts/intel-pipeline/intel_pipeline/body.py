@@ -461,10 +461,20 @@ def footer_only(text: str) -> bool:
     line that could not be prose — a heading, a label, a handle, a hashtag run —
     before it counts as footer-only.
 
+    A trailing chapter trailer is not content either (#4558), and this asks
+    `_step_over_chapter_trailer` — the SAME function `_drop_footer_residue` steps with,
+    so the two cannot disagree about where a footer's table of contents ends. Without it
+    the shipped `🎥 Related Videos 🎥` body read as content: six `00:00 …` rows report
+    `footer_residue_shape -> None` under #1561's ruling, `all(shapes)` failed on them,
+    and the writer published a body that held no sentence. #1561's ruling is not
+    reversed here: a body that IS only a chapter list keeps it, because stepping over
+    the trailer leaves nothing to name and the empty case below answers False.
+
     Empty text is not footer-only, because there is no residue to name; callers
     that treat "no body" uniformly already have their own empty check.
     """
-    lines = [ln for ln in (text or "").splitlines() if ln.strip()]
+    raw = (text or "").splitlines()
+    lines = [ln for ln in raw[:_step_over_chapter_trailer(raw, len(raw))] if ln.strip()]
     if not lines:
         return False
     shapes = [footer_residue_shape(ln) for ln in lines]
@@ -494,6 +504,42 @@ def _residue_welded_above(lines: list, idx: int) -> bool:
     rule still opens nothing and `####Heading` over `______` keeps its underline.
     """
     return idx > 0 and footer_residue_shape(lines[idx - 1]) is not None
+
+
+def _step_over_chapter_trailer(lines: list, i: int) -> int:
+    """Index above the timestamped chapter trailer ending at `i`, or `i` (#3982, #4558).
+
+    The rows go first, and the one heading that rules them goes only when rows followed
+    it — so a chapter heading over prose stays prose's own heading. Blanks between rows
+    are stepped over; a text whose tail is not a chapter row is returned at `i`
+    untouched, trailing blanks included, because the caller's own walk skips those.
+
+    #3982 shipped this as a prologue to `_drop_footer_residue` and nowhere else, which
+    is the half-ruling #4558 found published: the walk consumed the trailing
+    `#macstudio #dgxspark #m5ultra` run, met `19:25 Power and Thermals` one line later,
+    and stopped — because a chapter row is not residue (`footer_residue_shape` answers
+    None: #1561's ruling is that timestamps with no promo above them are content). The
+    classifier named `🎥 Related Videos 🎥`, both `— — — — — — — — —` rules and
+    `⏱️ Chapters` the whole time; only the walk's reach was wrong, and
+    `footer_only` had the same blind spot from the other side, since a body of nothing
+    but a footer and its chapter list is a body with no content in it.
+
+    So both readers ask this one function, and it moves no ruling: it consumes
+    indices, it deletes nothing, and a caller that finds no strong shape around it
+    still hands back the same list object.
+    """
+    j = i
+    while j > 0 and not lines[j - 1].strip():
+        j -= 1
+    if not (j > 0 and _CHAPTER_LINE_RE.match(lines[j - 1].strip())):
+        return i
+    while j > 0 and _CHAPTER_LINE_RE.match(lines[j - 1].strip()):
+        j -= 1
+        while j > 0 and not lines[j - 1].strip():
+            j -= 1
+    if j > 0 and _CHAPTERS_HEADING_RE.match(lines[j - 1].strip()):
+        j -= 1
+    return j
 
 
 def _drop_footer_residue(lines: list) -> list:
@@ -532,20 +578,21 @@ def _drop_footer_residue(lines: list) -> list:
     # followed it, so a chapter heading over prose stays prose's own heading.
     # (`_CHAPTER_LINE_RE` and `_CHAPTERS_HEADING_RE` are bound below this function and
     # read here at call time.)
-    i = len(lines)
-    while i > 0 and not lines[i - 1].strip():
-        i -= 1
-    while i > 0 and _CHAPTER_LINE_RE.match(lines[i - 1].strip()):
-        i -= 1
-        while i > 0 and not lines[i - 1].strip():
-            i -= 1
-    if i > 0 and _CHAPTERS_HEADING_RE.match(lines[i - 1].strip()):
-        i -= 1
+    #
+    # #4558: the step-over is asked AGAIN inside the walk, not only here. A prologue
+    # can only reach a trailer that IS the tail, and the row this costs had a hashtag
+    # run below its own table of contents — the run went, the walk met a timestamp row
+    # one line later, and stopped over four residue lines it could name.
+    i = _step_over_chapter_trailer(lines, len(lines))
     strong = False
     while i > 0:
         line = lines[i - 1]
         if not line.strip():
             i -= 1
+            continue
+        stepped = _step_over_chapter_trailer(lines, i)
+        if stepped != i:
+            i = stepped
             continue
         shape = footer_residue_shape(line)
         if shape is None or shape in _FOOTER_RESIDUE_WEAK and not strong:
@@ -1026,6 +1073,29 @@ def _ruleless_footer_start(lines: list) -> Optional[int]:
     return None
 
 
+def _is_leading_prose_line(line: str) -> bool:
+    """Would `line`, a block's own opening line, be lost content if the block went (#4558)?
+
+    Two shipped predicates, no new pattern: the closed residue list must call the line
+    clean, and the line must end a sentence. Together they say "this is the
+    description's own prose", and nothing else in a link block can say it —
+    `⌨️🏢 Cluster rack: ` and `Join this channel to get access to perks:` are clean to
+    the residue list and open a link block too, but neither closes a sentence, and
+    `❤️ SUBSCRIBE TO MY YOUTUBE CHANNEL 📺` is named residue.
+
+    It is asked only of the lines ABOVE a block's first link-bearing line, which is the
+    shape #4558 found published: `I gave four 128GB desktops the same 133,000-token
+    prompt … locally.` welded to `🔹 Programming monitors from BenQ (RD Series):
+    https://…` one block in, and the block went whole. The digest published no sentence
+    at all — the whole entry was the channel's chapter list — and this is the only place
+    in the strip where that sentence was ever removed. A glued URL still takes its own
+    line and everything below it in the block, which is #2143's documented cost; what
+    stopped being a cost is the prose sitting ABOVE it.
+    """
+    return (footer_residue_shape(line) is None
+            and bool(_SENTENCE_FINAL_RE.search(line)))
+
+
 def _drop_url_blocks(lines: list) -> list:
     """The lines with every set-off block that carries a link taken out (#2143, widened by
     #2224), or `lines` itself when none does.
@@ -1109,15 +1179,28 @@ def _drop_url_blocks(lines: list) -> list:
             continue
         j = i
         has_link = False
+        first_link = None
         while j < n and lines[j].strip():
             # A line counts as carrying a link if the URL is glued to a label
             # (`tall version- https://amzn.to/4cvsfk3`) or sits alone; `_LINK_PRESENT_RE` is
             # not anchored, so both answers come from the same test, and since #2224 so do
             # `Portals: tinyurl.com/…` and a bare `name@channel.co`.
-            has_link = has_link or bool(_LINK_PRESENT_RE.search(lines[j]))
+            if _LINK_PRESENT_RE.search(lines[j]):
+                has_link = True
+                if first_link is None:
+                    first_link = j
             j += 1
         if has_link:
             cut = True
+            # #4558: the block's opening prose survives its own trailer. The cut starts at
+            # the first line that CARRIES a link, or at the first line the predicate will
+            # not vouch for — so `🛒 Gear Links 🛒` over its affiliate run still goes whole
+            # (that heading is named residue), while a channel's sentence welded to the
+            # sponsor line under it keeps its sentence.
+            keep = i
+            while keep < first_link and _is_leading_prose_line(lines[keep]):
+                out.append(lines[keep])
+                keep += 1
             while out and not out[-1].strip():
                 out.pop()
         else:

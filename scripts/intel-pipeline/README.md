@@ -70,8 +70,12 @@ Two conditions stop a write, on both routes into the vault
 
 A feed description becomes a digest entry's body only after `strip_link_footer` has been
 through it, and since backlog #2143 that includes **removing every block that carries a
-URL** — a block being a run of non-blank lines, removed whole, including the sentence that
-introduced the link. Whatever is left is the body; if nothing is left, the entry carries the
+URL** — a block being a run of non-blank lines. Backlog #4558 narrowed where the cut
+starts: it begins at the block's first line that carries a link, so a channel's opening
+sentence welded to the sponsor URL below it is kept and the link plus everything under it
+goes. (Before that, a block was removed whole and the row published no sentence at all: the
+2026-11-25 digest entry was nothing but `🎥 Related Videos 🎥`, two separator rules and a
+chapter list.) Whatever is left is the body; if nothing is left, the entry carries the
 scorer's `why` instead.
 
 It keys on a URL being present, never on the wording around it, because the corpus is
@@ -84,10 +88,14 @@ footer had already been stripped above it.
 
 Two consequences to know before wondering where a description went:
 
-- A URL glued into a line of prose takes that line's whole block with it — 39 of the 55
-  URL-carrying youtube rows in `feeds/raw/2026-*.jsonl` write their links that way
-  (`CPU: Ryzen 9800X3D https://amzn.to/40Nor9v` is the shape) — and a description that held
-  nothing but link blocks (12 of those 55) ends up carrying `why`.
+- A URL glued into a line of prose cuts from that line down — 39 of the 55 URL-carrying
+  youtube rows in `feeds/raw/2026-*.jsonl` write their links that way, as measured when
+  #2143 was filed (`CPU: Ryzen 9800X3D https://amzn.to/40Nor9v` is the shape) — and a
+  description that held nothing but link blocks (12 of those 55) ends up carrying `why`.
+  Since #4558 the lines above the glued line survive when they read as prose — no shape on
+  the closed residue list, and sentence-final punctuation — so a row whose only prose sat
+  above its first URL publishes that prose; a remainder that still ends no sentence falls
+  through to `why` as before.
 - GitHub is untouched: `_entry_body` only strips non-GitHub text, so an issue or PR body
   keeps its links, which is what `clean_body`/`clip_body` exist to publish.
 
