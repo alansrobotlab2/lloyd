@@ -5088,8 +5088,13 @@ async def test_the_reader_never_consults_the_machine_for_a_rows_half_only_its_re
                         lambda entry, path=None: real_append(entry, path or led))
     # An id whose disagreement lives in this window's events: the proposal `draft` and the
     # machine's side, both as that tick filed them. The only source a widened row may use.
+    # #7 is in the same tick's `disagree` too — this node is about #3914's abstention, and an
+    # id that disagreed for the first time this tick would be withheld by #4378's persistence
+    # guard before the abstention was ever reached (the guard has its own nodes further down).
     S.append_event({"event": "board_steward",
-                    "agreement": {"disagree": [3], "disagree_sides": [
+                    "agreement": {"disagree": [7, 3], "disagree_sides": [
+                        {"item_id": 7, "status": "up_next",
+                         "why": "ready by its acceptance"},
                         {"item_id": 3, "status": "up_next",
                          "why": "in the offered set, not started"}]},
                     "moves": [{"item_id": 3, "status": "draft", "note": "its reason"}]},
@@ -5516,9 +5521,13 @@ def _rule_filing(board, monkeypatch, led, *, win_ids, on_disk, machine,
         assert (Path(board) / f"{iid}-item-{iid}.md").exists(), (
             f"#{iid} never reached the board, so the live read would find nothing to "
             f"abstain and the node would pass on an empty fixture")
+    # #4378's persistence guard is cleared here on purpose: the preceding tick is written as
+    # having disagreed about EVERY id this filing will name — the tick's as well as the
+    # window's — so these nodes keep testing abstention and row provenance rather than
+    # silently becoming guard tests. The guard's own nodes are below.
     sides = {i: RULED_SIDES.get(i, ("up_next", "has a confirmed triage with acceptance text"))
-             for i in win_ids}
-    _ruled_tick(led, list(win_ids), sides=sides)
+             for i in list(tick_ids) + list(win_ids)}
+    _ruled_tick(led, list(tick_ids) + list(win_ids), sides=sides)
     monkeypatch.setattr(B, "desired_statuses", lambda ledger: dict(machine))
     out = file_or_update(_agree(*tick_ids), DIS_MOVES, DIS_EXPECTED,
                          window=_window7(disagree_ids=list(tick_ids) + list(win_ids)),
@@ -8344,3 +8353,426 @@ def test_the_abstention_reason_carries_the_steward_note_in_full(tmp_path, monkey
     why = want[9999][1]
     assert note in why, why
     assert f"{note[:60]});" not in why, f"the note is sliced at 60 again: {why}"
+
+
+# ─────────── #4378: a row is earned on a SECOND consecutive disagreeing tick ───────────
+#
+# `file_or_update` took its ids from THIS tick alone, so a single tick's disagreement — one
+# reading of one board by one model — was enough to put a row on the lloyd board and page a
+# ruling. #4378's bar: an id earns a body row and a `new_item_ids` entry only if the
+# IMMEDIATELY PRECEDING `board_steward` ledger event scored it as a disagree too.
+#
+# The size of that bar on live traffic, measured rather than assumed. Walking the ledger
+# (`/home/alansrobotlab/.local/state/lloyd-automod/promotions.jsonl`, 16,632 rows by
+# `wc -l` on 2026-11-24) — each of its 270 `board_steward` events against ITS OWN
+# immediately-preceding steward row, which is what `prior_tick_disagree` sees at filing time —
+# 17 ticks scored a non-empty `disagree`, naming 21 id-ticks over 14 ids: 4 id-ticks earn
+# (every one of them #4276, disagreeing on two ticks in a row), 1 is withheld (#4548, new
+# against its preceding tick), and 16 land on the no-comparison fallback because the tick
+# before them recorded no disagreement at all. So on this week's traffic the guard bites once
+# and the fallback answers sixteen times — the clause-3 shape is the common case, not a
+# curiosity, and a node that only ever exercised the withholding path would describe none of
+# it. The nodes below pin all three outcomes.
+# The prior tick is read from that event's `agreement` block through the store, never from a
+# new state file, and a tick with nothing to compare against files exactly as it did before.
+#
+# The one-tick delay is the cost, and it is not small: the median gap between consecutive
+# steward ticks measured 21.1 minutes on 2026-11-19 and its p90 was 112.9 minutes, so a real
+# disagreement is sometimes held back for about two hours before it earns its row. Whether
+# that lag is acceptable is owed-check's ruling, recorded as owed on #4378; these nodes only
+# pin that the bar is what was ruled.
+
+#: Sentinel for `agreement=_NO_BLOCK`: the key is absent, as it is on every row a tick
+#: wrote before #1688 shipped the block.
+_NO_BLOCK = object()
+
+
+def _steward_row(led, *, disagree=(), session_id="tick-prior", agreement=_NO_BLOCK,
+                 moves=None):
+    """One `board_steward` LEDGER row, written the way a tick writes it.
+
+    The payload is copied from `workers/sources/board_steward.py:1903-1915` — the same
+    keys, the real `S.append_event` writer, and `agreement` built by the house `_agree()`
+    helper — because every failure mode of this guard is a mismatch between what THAT
+    writer puts on the row and what the reader asks for. Not `_steward_tick`, which runs a
+    whole tick: this writes only the row a preceding tick left in the store.
+
+    `agreement=` overrides the built block: `_NO_BLOCK` omits the key (a row written
+    before #1688 shipped the record), `None` or a string is a block that is not a dict,
+    and a dict names its ids exactly.
+    """
+    from scripts.automod import state as S
+    row = {"event": "board_steward", "apply": False, "events": 3,
+           "items_shown": len(disagree),
+           "moves": (DIS_MOVES if moves is None else moves) if disagree else [],
+           "suppressed": [], "next_pick": 0, "next_pick_reason": "",
+           "applied": [], "session_id": session_id,
+           "summary": "tick over 5 shown items"}
+    row["agreement"] = _agree(*disagree) if agreement is _NO_BLOCK else agreement
+    S.append_event(row, path=led)
+    return led
+
+
+def test_an_id_that_disagreed_only_this_tick_earns_no_row(tmp_path):
+    """Clause 1: one tick's disagreement buys nothing.
+
+    The preceding tick disagreed about two of this tick's five ids. Those two earn their
+    rows; the three that appear for the first time this tick get no row, are absent from
+    the created event's `new_item_ids`, and are named in Coverage instead.
+    """
+    board = _new_board(tmp_path, "b-4378-earn")
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=DIS_AGREE[:2], session_id="tick-a")
+
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board, ledger=led,
+                           session_id="tick-b")
+    assert out is not None and out["action"] == "filed", out
+    held = DIS_AGREE[2:]
+    assert out["ids"] == DIS_AGREE[:2], out
+    assert out["rows"] == len(DIS_AGREE[:2]), out
+
+    body = _filed(board)[0].body
+    rows = "\n".join(_rows(body))
+    for i in DIS_AGREE[:2]:
+        assert f"# {i}:" in rows or f"#{i}:" in rows, f"earned id {i} lost its row:\n{rows}"
+    for i in held:
+        assert f"#{i}" not in rows, f"single-tick id {i} earned a row:\n{rows}"
+
+    from scripts.automod import state as S
+    events = [e for e in S.read_events(led, 0)
+              if e.get("event") == "board_steward_disagreement"]
+    assert len(events) == 1, events
+    assert events[0]["new_item_ids"] == DIS_AGREE[:2], events[0]
+    assert not (set(held) & set(events[0]["new_item_ids"])), events[0]
+
+
+def test_a_merged_filing_also_withholds_an_id_that_has_not_persisted(tmp_path):
+    """Clause 1's MERGED leg: the guard is upstream of both writers, not just of `_create`.
+
+    An item is already open (filed off a store with no steward row at all, so the guard had
+    nothing to compare and the first filing is the pre-#4378 shape). The tick now disagrees
+    about all five ids with a preceding tick that disagreed about two: the merge may add only
+    those two, and the three that have not persisted appear in its body and its `new_item_ids`
+    never — with the merge's own Coverage naming them.
+    """
+    from scripts.automod import state as S
+    board = _new_board(tmp_path, "b-4378-merge")
+    one = DIS_AGREE[0]
+    first = D.file_or_update(_agree(one),
+                             [m for m in DIS_MOVES if m["item_id"] == one],
+                             {one: DIS_EXPECTED[one]},
+                             window=_window7(), backlog_dir=board,
+                             ledger=tmp_path / "led-first.jsonl", session_id="tick-0")
+    assert first and first["action"] == "filed" and first["ids"] == [one], first
+
+    led = _steward_row(tmp_path / "led-merge.jsonl", disagree=DIS_AGREE[:2],
+                       session_id="tick-a")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board, ledger=led,
+                           session_id="tick-b")
+    assert out is not None and out["ids"] == DIS_AGREE[:2], out
+    held = set(DIS_AGREE[2:])
+
+    body = _filed(board)[0].body
+    rows = "\n".join(_rows(body))
+    for i in held:
+        assert f"#{i}" not in rows, f"a single-tick id merged in:\n{rows}"
+    cov = body[body.index("## Coverage"):]
+    assert "3 of this tick's ids were withheld as **not-yet-earned**" in cov, cov
+    assert f"#{DIS_AGREE[2]}" in cov and f"#{DIS_AGREE[4]}" in cov, cov
+
+    events = [e for e in S.read_events(led, 0)
+              if e.get("event") == "board_steward_disagreement"]
+    assert events, "the merge wrote no ledger row"
+    assert not (held & set(events[-1]["new_item_ids"] or [])), events[-1]
+
+
+def test_an_id_that_disagreed_on_the_preceding_tick_earns_the_same_bytes_as_today(
+        tmp_path):
+    """Clause 2: the guard is a gate on WHO is named, not a re-write of what a row says.
+
+    Two boards, the same five ids, the same window. One has a preceding tick that disagreed
+    about every id, the other has no `board_steward` row at all — the shape that falls back
+    to the pre-#4378 path — so the second filing IS what this build shipped before the
+    change. The created bodies must be byte-identical, and the two ledger rows must agree
+    field by field on everything but the instant.
+    """
+    from scripts.automod import state as S
+    led_prior = _steward_row(tmp_path / "led-prior.jsonl", disagree=list(DIS_AGREE),
+                             session_id="tick-a")
+    led_none = tmp_path / "led-none.jsonl"
+
+    with_prior = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                                  window=_window7(),
+                                  backlog_dir=_new_board(tmp_path, "b-4378-prior"),
+                                  ledger=led_prior, session_id="tick-b")
+    no_prior = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                                window=_window7(),
+                                backlog_dir=_new_board(tmp_path, "b-4378-none"),
+                                ledger=led_none, session_id="tick-b")
+    assert with_prior and no_prior and with_prior["ids"] == no_prior["ids"], (
+        f"{with_prior} vs {no_prior}")
+
+    b_prior = _filed(tmp_path / "b-4378-prior")[0].body
+    b_none = _filed(tmp_path / "b-4378-none")[0].body
+    if b_prior != b_none:
+        diff = "\n".join(list(difflib.unified_diff(
+            b_none.splitlines(), b_prior.splitlines(), "no-prior-tick", "prior-tick",
+            lineterm=""))[:60])
+        raise AssertionError(f"a guarded filing rewrote the body:\n{diff}")
+
+    fields = ("judged", "disagree", "rate", "window_since", "tick_item_ids",
+              "new_item_ids", "leg", "action", "item_id")
+    ev_p = [e for e in S.read_events(led_prior, 0)
+            if e.get("event") == "board_steward_disagreement"][-1]
+    ev_n = [e for e in S.read_events(led_none, 0)
+            if e.get("event") == "board_steward_disagreement"][-1]
+    assert {k: ev_p.get(k) for k in fields} == {k: ev_n.get(k) for k in fields}, (
+        f"{ev_p} vs {ev_n}")
+
+
+def test_the_preceding_tick_is_found_past_the_hundred_event_read_window(tmp_path):
+    """Clause 3's trap, held by a fixture that makes the naive read blind on purpose.
+
+    `S.read_events` defaults to the newest 100 rows, and it counts EVERY event, not steward
+    events: over the live ledger's 321 gaps between consecutive steward ticks the median gap
+    is 22 intervening rows and 30 of them exceed 100, so a default read finds no preceding
+    tick and silently takes the fallback — the guard would look green while never firing.
+    This fixture packs 120 `backlog_triage` rows between the two ticks, which is inside that
+    measured range, and asserts first that the default read really does see no steward row
+    at all. Then the guard must still withhold three of this tick's five ids.
+    """
+    from scripts.automod import state as S
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=DIS_AGREE[:2], session_id="tick-a")
+    for n in range(120):
+        S.append_event({"event": "backlog_triage", "item_id": 9000 + n,
+                        "verdict": "confirmed", "acceptance": "the check passes"},
+                       path=led)
+    assert len([e for e in S.read_events(led)
+                if e.get("event") == "board_steward"]) == 0, (
+        "the fixture stopped being the trap: a default read sees a steward row, so this "
+        "node no longer distinguishes a whole-file read from a bounded one")
+    assert D.prior_tick_disagree(led, session_id="tick-b") == set(DIS_AGREE[:2])
+
+    board = _new_board(tmp_path, "b-4378-deep")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board, ledger=led,
+                           session_id="tick-b")
+    assert out is not None and out["ids"] == DIS_AGREE[:2], out
+    solo = _steward_row(tmp_path / "led-solo.jsonl", disagree=list(DIS_AGREE),
+                        session_id="tick-b")
+    assert D.prior_tick_disagree(solo, session_id="tick-b") is None, (
+        "the store holds one steward row and it is THIS tick's: excluded by session, "
+        "nothing is left, so the answer is that there is no preceding tick at all — "
+        "reading that row as the preceding one would be the tick comparing itself "
+        "with itself")
+
+
+def test_the_guard_keeps_its_state_in_the_ledger_it_already_read(tmp_path):
+    """Clause 3's other half: no new store. A second file holding the last tick's ids is a
+    second truth that can disagree with the ledger, and the ledger already carries the ids —
+    `agreement.disagree` is what `_window_pairs` reads for the same purpose.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=[3024], session_id="tick-a")
+    before = sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*"))
+    assert D.prior_tick_disagree(led, session_id="tick-b") == {3024}
+    assert sorted(str(p.relative_to(tmp_path)) for p in tmp_path.rglob("*")) == before, (
+        "reading the preceding tick created a file; the guard's only store is the ledger")
+
+
+def test_a_tick_with_no_usable_preceding_tick_files_exactly_as_before(tmp_path):
+    """Clause 3's fallback, on every shape that has no prior data to compare against.
+
+    No `board_steward` row at all; the row predates #1688 and carries no `agreement` key;
+    the key holds a string instead of a dict; the block is a dict that names no disagreeing
+    id. Each of those must produce the body and the `new_item_ids` the build shipped before
+    #4378 produces — a guard that cannot answer must not also mute the alarm, or the
+    instrument that decides the flip would lose its reader every time a tick diverged.
+    """
+    from scripts.automod import state as S
+
+    def filing(name, led):
+        board = _new_board(tmp_path, f"b-4378-{name}")
+        out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                               window=_window7(), backlog_dir=board, ledger=led,
+                               session_id="tick-b")
+        assert out and out["ids"] == DIS_AGREE, f"{name}: {out}"
+        assert out["rows"] == len(DIS_AGREE), f"{name}: {out}"
+        return _filed(board)[0].body
+
+    baseline = filing("base", tmp_path / "led-base.jsonl")
+
+    # (a) no `board_steward` row anywhere in the store: only a triage row.
+    led = tmp_path / "led-none.jsonl"
+    S.append_event({"event": "backlog_triage", "item_id": 3024, "verdict": "confirmed",
+                    "acceptance": "the check passes"}, path=led)
+    assert filing("no-steward-row", led) == baseline
+
+    # (b) the row predates the record: it carries no `agreement` key at all, which is the
+    # shape `_window_pairs` calls "cannot be attributed either way".
+    led = tmp_path / "led-absent.jsonl"
+    S.append_event({"event": "board_steward", "apply": False, "events": 3,
+                    "items_shown": 5, "moves": DIS_MOVES, "applied": [],
+                    "session_id": "tick-a", "summary": "a row from before #1688"},
+                   path=led)
+    assert filing("block-absent", led) == baseline
+
+    # (c) the key holds a string, so there is no id list to read out of it.
+    led = _steward_row(tmp_path / "led-string.jsonl", session_id="tick-a",
+                       agreement="judged 5, agree 0")
+    assert filing("block-not-a-dict", led) == baseline
+
+    # (d) a dict naming no disagreement: an agreeing preceding tick is not evidence of
+    # persistence, and withholding this tick on that reading would be inventing a bar the
+    # ruling did not set — #4378 files it as shipped instead.
+    led = _steward_row(tmp_path / "led-empty.jsonl", session_id="tick-a", agreement=_agree())
+    assert filing("block-names-nothing", led) == baseline
+    assert D.prior_tick_disagree(led, session_id="tick-b") is None
+
+
+def test_the_current_tick_s_own_ledger_row_is_not_the_preceding_tick(tmp_path):
+    """The seam across `workers/sources/board_steward.py:1903`.
+
+    The tick appends its OWN `board_steward` row and only then files (`:1929`), so the newest
+    steward event when `file_or_update` runs is the filing tick itself. Read naively, the
+    guard would compare the tick with its own answer and let every id through — a gate that
+    never closes and never says so. The row is therefore excluded by the `session_id` the
+    tick already writes on its own row, and this node holds both halves: with the session
+    handed down, only the id the EARLIER tick disagreed about earns; without it, the tick's
+    own row is read as the preceding tick and all five earn, which is the failure.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=DIS_AGREE[:2], session_id="tick-a")
+    _steward_row(led, disagree=list(DIS_AGREE), session_id="tick-b")
+
+    guarded = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                               window=_window7(),
+                               backlog_dir=_new_board(tmp_path, "b-4378-self"),
+                               ledger=led, session_id="tick-b")
+    assert guarded and guarded["ids"] == DIS_AGREE[:2], guarded
+
+    naive = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                             window=_window7(),
+                             backlog_dir=_new_board(tmp_path, "b-4378-naive"),
+                             ledger=led)
+    assert naive and naive["ids"] == DIS_AGREE, (
+        "without the session id the newest steward row IS the current tick's, so this is "
+        "the shape that must fail open to today's behaviour rather than withhold at random")
+
+
+def test_the_steward_tick_hands_its_session_id_to_the_filer(tmp_path, monkeypatch):
+    """The wiring, from the writer's side: `_file_quietly` must carry `session_id` down.
+
+    A keyword the caller never passes is a guard that silently never fires in production
+    while every node above stays green, so the pin is on the forwarding function and on the
+    call site in the source that makes it — not on `file_or_update` alone. `_file_quietly`
+    reads the window itself, unlike `file_or_update`, so `window_now` is pinned here rather
+    than at the call site below, which is about a keyword, not about the trigger.
+    """
+    monkeypatch.setattr(D, "window_now", lambda **kw: _window7())
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=DIS_AGREE[:2], session_id="tick-a")
+    out = D._file_quietly(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                          backlog_dir=_new_board(tmp_path, "b-4378-wired"),
+                          ledger=led, session_id="tick-b")
+    assert out and out["ids"] == DIS_AGREE[:2], out
+
+    src = (Path(__file__).resolve().parents[1] / "workers" / "sources"
+           / "board_steward.py").read_text(encoding="utf-8")
+    call = src[src.index("_file_quietly, agree"):]
+    assert "session_id=" in call.split("rules_note=")[0], (
+        "the tick stopped passing its own session id into the filing, so its own ledger "
+        f"row becomes the preceding tick:\n{call[:400]}")
+
+
+def test_coverage_names_each_id_the_persistence_guard_withheld(tmp_path):
+    """Clause 5, first half: a withheld id is named, never subtracted.
+
+    A count without the ids is the silent subtraction this filing already swears against —
+    a reader could not tell a disagreement that has not persisted from a read that failed.
+    The bullet sits beside the abstained one, and the zero is stated like every other figure.
+    """
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=DIS_AGREE[:2], session_id="tick-a")
+    board = _new_board(tmp_path, "b-4378-cov")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board, ledger=led,
+                           session_id="tick-b")
+    assert out is not None, out
+    cov = _filed(board)[0].body
+    cov = cov[cov.index("## Coverage"):]
+    assert "3 of this tick's ids were withheld as **not-yet-earned**" in cov, cov
+    for i in DIS_AGREE[2:]:
+        assert f"#{i}" in cov, f"withheld id {i} not named: {cov}"
+    assert "did not score them as a disagreement" in cov, cov
+    assert (cov.index("not represented here") < cov.index("were abstained")
+            < cov.index("withheld as **not-yet-earned**")
+            < cov.index("named ids are unrecoverable")), (
+        f"the bullet moved away from the abstention it sits beside:\n{cov}")
+
+    earned_all = _steward_row(tmp_path / "led-all.jsonl", disagree=list(DIS_AGREE),
+                              session_id="tick-a")
+    board2 = _new_board(tmp_path, "b-4378-cov2")
+    D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=_window7(),
+                     backlog_dir=board2, ledger=earned_all, session_id="tick-b")
+    cov2 = _filed(board2)[0].body
+    cov2 = cov2[cov2.index("## Coverage"):]
+    assert "- 0 of this tick's ids were withheld as **not-yet-earned**." in cov2, cov2
+
+
+def test_a_tick_whose_ids_are_all_withheld_files_nothing_at_all(tmp_path):
+    """Clause 5, second half: the guard can empty the filing, so it must empty it cleanly.
+
+    Every id this tick scored disagreed about is new since the preceding tick, so there is
+    no row to write: no item, no `### Added` section on the one that is already open, and no
+    `board_steward_disagreement` ledger row. `abstained` cannot save it either — that list
+    is built from ids OUTSIDE this tick's disagreement, which is exactly why its comment
+    could claim the filing never empties while `tick_ids` survived the abstention.
+    """
+    from scripts.automod import state as S
+    led = tmp_path / "ledger.jsonl"
+    _steward_row(led, disagree=[999], session_id="tick-a")
+    board = _new_board(tmp_path, "b-4378-empty")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
+                           window=_window7(), backlog_dir=board, ledger=led,
+                           session_id="tick-b")
+    assert out is None, out
+    assert _filed(board) == [], f"an all-withheld tick filed: {_filed(board)}"
+    assert [e for e in S.read_events(led, 0)
+            if e.get("event") == "board_steward_disagreement"] == []
+
+
+def test_the_persistence_guard_leaves_the_window_figures_and_leg_wording_untouched(
+        tmp_path):
+    """Clause 4: the guard is not allowed to move a measure or re-name a leg.
+
+    A fixture whose ids all clear the bar. `judged`, `rate` and the window sentence are the
+    aggregate's own numbers — withholding a row changes who is named, never how much of the
+    window was measured — and the abstained list and #4251's direction wording are pinned to
+    the bytes they shipped with.
+    """
+    from scripts.automod import state as S
+    w = _window7()
+    led = _steward_row(tmp_path / "ledger.jsonl", disagree=list(DIS_AGREE),
+                       session_id="tick-a")
+    out = D.file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED, window=w,
+                           backlog_dir=_new_board(tmp_path, "b-4378-figs"),
+                           ledger=led, session_id="tick-b")
+    assert out and out["action"] == "filed", out
+    body = _filed(tmp_path / "b-4378-figs")[0].body
+    window_line = (f"- the window itself: {w['judged']} judged, `rate={w['rate']}` "
+                   f"against owed-check's {D.FLIP_MIN_RATE} floor, since "
+                   f"{w['window_since']}.")
+    assert window_line in body, body[body.index("## Coverage"):]
+    assert "- 0 of the window's ids were abstained as already ruled." in body, body
+    assert BELOW_FLOOR_CLAIM in body, (
+        "the rate-leg direction sentence moved: " + body[:600])
+
+    ev = [e for e in S.read_events(led, 0)
+          if e.get("event") == "board_steward_disagreement"][-1]
+    assert ev["judged"] == w["judged"] and ev["rate"] == w["rate"], ev
+    assert ev["leg"] == D.LEG_RATE, ev
+    assert ev["disagree"] == w["disagree"], ev

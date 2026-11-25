@@ -1928,6 +1928,11 @@ async def execute(item: QueueItem) -> dict[str, Any]:
     # different things. Same `apply` this tick read at the top; not re-read here.
     await asyncio.to_thread(
         _file_quietly, agree, parsed["moves"], expected,
+        # This tick's own session, the same string the `board_steward` row above carries: it
+        # is how #4378's persistence guard tells THIS tick's answer apart from the tick before
+        # it, since the row was appended seconds ago and is the newest in the store. Without
+        # it the guard compares the tick with itself and lets every id through.
+        session_id=run.get("session_id"),
         rules_note=("apply: true since 2026-11-16T00:06Z (#4147)" if apply
                     else "apply: false (dry run: this tick wrote nothing)"))
     verb = "applied" if apply else "proposed (dry run)"

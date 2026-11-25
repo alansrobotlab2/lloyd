@@ -700,6 +700,108 @@ def ruled_ids(ids: list[int], *, backlog_dir: Path | None = None,
     return out
 
 
+#: The event the persistence guard below reads: the tick's own ledger row.
+_STEWARD_EVENT = "board_steward"
+
+
+def _block_disagree_ids(agree: dict) -> list[int]:
+    """The ids one tick's `agreement` block scored as disagreements.
+
+    `disagree` is the published list; `disagree_sides` (#3680) is the same ids with the
+    machine's half attached. A row can carry one and not the other — the list is what
+    `agreement()` builds first — so the record is the fallback, never the reverse.
+    """
+    ids = [i for i in (agree.get("disagree") or []) if isinstance(i, int)]
+    if ids:
+        return ids
+    sides = agree.get("disagree_sides")
+    if isinstance(sides, list):
+        return [s.get("item_id") for s in sides
+                if isinstance(s, dict) and isinstance(s.get("item_id"), int)]
+    return []
+
+
+def prior_tick_disagree(ledger: Path | None = None,
+                        session_id: str | None = None) -> set[int] | None:
+    """The disagreement of the steward tick BEFORE this one; None where there is nothing to compare.
+
+    #4378's bar, and the reason for it: one tick's disagreement is ONE reading of ONE board
+    by ONE model, and it was already enough to put a row on the lloyd board and a question to
+    owed-check. Walked 2026-11-24 over the live ledger's 16,632 rows — each of its 270
+    `board_steward` events compared with ITS OWN immediately-preceding steward row, as this
+    function does at filing time — 17 ticks scored a non-empty disagreement, naming 21
+    id-ticks over 14 ids: 4 id-ticks earn (all of them #4276, disagreeing twice in a row), 1
+    is withheld (#4548, new against its preceding tick), and 16 fall through to the
+    no-comparison shape below because the steward tick before them recorded no disagreement
+    at all. That ratio is the honest size of this guard on current traffic, and it is the
+    clause-3 fallback doing the work: the bar bites when the tick before this one was also
+    scoring, which is what "consecutive" was ruled to mean.
+
+    The reader is the store the tick already writes, so no second copy of the answer exists
+    to disagree with the first: the `board_steward` event carries the tick's own `agreement`
+    block, whose `disagree` is the id list and whose `disagree_sides` is the machine's half
+    (#3680). `_window_pairs` reads that same block for the same purpose.
+
+    Three things about the read, each already learned elsewhere in this file:
+      - `limit=0`, the whole file, not `read_events`' default 100. The ledger holds far more
+        events than steward ticks, so a bounded newest-N window can end before the previous
+        tick and there is nothing to compare against — the trap #3651 documents at
+        `_window_pairs`, where the same fix is applied.
+      - THIS tick's row is excluded by `session_id`, not by position, because the tick
+        appends its own `board_steward` event (`workers/sources/board_steward.py:1903`) and
+        files only afterwards. Read by position the newest row IS the current tick, so the
+        comparison would be the tick against its own answer and every id would pass. A row
+        whose session cannot be read is never taken for the current one: an unreadable head
+        makes the row eligible, it does not end the filing.
+      - It consults exactly ONE row: the steward tick immediately before this one. Walking
+        back to the last tick that DID record a disagreement would score "disagreed twice,
+        with ten agreeing ticks in between" as persistence, and the ruling is about a
+        CONSECUTIVE pair — #4240 disagreed on two ticks 26 minutes apart with an agreeing tick
+        between them, and the item rules that withheld. So a preceding row whose `agreement`
+        block is missing (it predates #1688), is not a dict, or names no disagreement returns
+        None: there is nothing to compare, and the filing goes unguarded — the shape that
+        files this tick exactly as before #4378, because a guard that cannot answer must not
+        also mute the alarm.
+    """
+    from scripts.automod import state as S   # function-local: see the module docstring
+    try:
+        events = S.read_events(ledger, 0)   # limit=0 is the whole file
+    except Exception as exc:  # noqa: BLE001 — the rail `_window_pairs` documents verbatim
+        logger.warning("board-steward persistence guard: reading %s failed (%s: %s); the "
+                       "filing proceeds unguarded, which files this tick as it did before "
+                       "the guard existed", ledger or S.LEDGER_PATH,
+                       type(exc).__name__, exc)
+        return None
+
+    for ev in reversed(events):            # newest first: the tick immediately before this
+        if not isinstance(ev, dict) or ev.get("event") != _STEWARD_EVENT:
+            continue
+        if session_id is not None and ev.get("session_id") == session_id:
+            continue                       # this tick's own row: never its own evidence
+        agree = ev.get("agreement")
+        if not isinstance(agree, dict):
+            # The row is the preceding tick and it records nothing: an event from before
+            # #1688, or one a diverged or dead turn left without a block. No comparison
+            # exists, so the filing is today's — and NOTHING is looked for further back.
+            return None
+        ids = _block_disagree_ids(agree)
+        if not ids:
+            # A preceding tick that named no disagreement — it agreed, or judged nothing — is
+            # not evidence that anything persisted, and clause 3 rules the fallback for it:
+            # this tick files as it did before the guard. It is never read as "disagreed
+            # about nothing", which would withhold every id this tick just named.
+            if isinstance(ev.get("moves"), list) and ev["moves"]:
+                # The same absence inside a block that should have named the tick's own
+                # disagreements: said out loud, because a broken record and a tick that
+                # agreed read the same way to the filing and only one of them is a fault.
+                logger.warning("board-steward persistence guard: the immediately preceding "
+                               "tick's agreement block names no disagreement while its "
+                               "`moves` propose %d; its side cannot be recovered, so this "
+                               "filing proceeds unguarded", len(ev["moves"]))
+        return set(ids) if ids else None
+    return None
+
+
 def _widen(agree: dict, moves: list[dict], expected: dict[int, tuple],
            window: dict, ledger: Path) -> tuple[list[int], list[dict], dict]:
     """The rows a ruling can actually be made on: the window's, not the tick's.
@@ -809,7 +911,8 @@ def row_stats(ids: list[int], rows: list[dict], window: dict) -> dict:
 def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *,
                    window: dict, backlog_dir: Path | None = None,
                    ledger: Path | None = None,
-                   rules_note: str = "") -> dict | None:
+                   rules_note: str = "",
+                   session_id: str | None = None) -> dict | None:
     """File or add to the ONE open disagreement item; return what happened.
 
     `window` is `judgement_aggregate`'s dict for the same 7 days the health route
@@ -823,13 +926,22 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     module keeps being filed over. None means the production store, resolved by
     `read_events` itself.
 
+    `session_id` is the filing tick's OWN session, which its `board_steward` ledger row
+    already carries. The tick appends that row and files afterwards, so it is how the
+    persistence guard (#4378, `prior_tick_disagree`) tells the tick's own answer apart from
+    the tick before it. None means the caller did not name itself: the newest steward row is
+    then read as the preceding tick, which for a live tick is its own row — the guard is
+    consulted, passes everything, and the filing is today's. `_file_quietly` forwards it.
+
     `rules_note` is the block's OWN line about the flag (e.g. "`apply: true` since
     2026-11-16T00:06Z") carried down onto the created item's body, so a reader of the
     alarm can see whether the flip was live when it fired — the reading that decides
     `config.yaml`'s 7-day stop condition. Absent (the pre-flip default) prints `absent`.
 
     Returns `None` when nothing was filed (bar met, volume leg unmet, nothing
-    disagreed, or an open item a round is working). Never raises on a missing
+    disagreed, an open item a round is working, or every id this tick named being
+    withheld by the persistence guard as not yet earned — which writes no item, no body
+    section and no `board_steward_disagreement` row). Never raises on a missing
     store; raises on a real write failure, and its caller swallows — see
     `_file_quietly`.
     """
@@ -866,9 +978,36 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     abstained = ruled_ids([i for i in ids if i not in set(tick_ids)],
                           backlog_dir=backlog_dir, ledger=led)
     if abstained:
-        # Never empties `ids`: `tick_ids` is non-empty past its own leg above and is
-        # never a candidate, so at least this tick's disagreement survives.
+        # Empties nothing on its own: `tick_ids` is non-empty past its own leg above and is
+        # never a candidate here, so at least this tick's disagreement survives the
+        # abstention. It does NOT survive the persistence guard below, which can withhold
+        # every id this tick named — that is the one path that can leave `ids` empty, and it
+        # returns `None` rather than filing an empty body (#4378).
         ids = [i for i in ids if i not in abstained]
+
+    # #4378: two consecutive disagreeing ticks, not one, earn a row. Applied AFTER the
+    # widening above and to `ids` as a whole — both the tick's ids and the window's — because
+    # the bar is "did the preceding tick disagree about this id", which is exactly as true of
+    # an id the window remembers as of one this tick just named. A gate on the tick's ids
+    # alone would leave every single-tick window row in place and not achieve the bar at all.
+    # `prior_tick_disagree` returns None where there is nothing to compare (no steward row,
+    # no `agreement` block, or a block that names no disagreement), and then nothing is
+    # withheld: a guard that cannot answer files this tick as it did before #4378 rather than
+    # muting the instrument that decides the flip.
+    prior = prior_tick_disagree(led, session_id=session_id)
+    withheld: list[int] = []
+    if prior is not None:
+        withheld = [i for i in ids if i not in prior]
+        ids = [i for i in ids if i in prior]
+        if withheld and not ids:
+            # Everything this tick named is a single tick's reading. There is no row to
+            # write, so there is nothing to merge into an open item either: a body section
+            # naming no id and a ledger row naming no `new_item_ids` would be an event that
+            # reads as a filing and decides nothing.
+            logger.info("board-steward persistence guard (#4378): %s was each scored a "
+                        "disagreement by this tick and by none before it, so nothing is "
+                        "filed and no %s row is written", withheld, EVENT)
+            return None
     stats = row_stats(ids, wide_moves, window)
     # Of the rows this filing actually WRITES, how many carry the machine's side as the
     # disagreeing tick recorded it. Ruleability needs both halves of a disagreement, and
@@ -881,6 +1020,10 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     # figure without the names is exactly the silent subtraction this filing swears
     # against — a reader cannot tell "the ruling landed" from "the read failed".
     stats["abstained"] = abstained
+    # Named individually like the abstentions beside them: the count says how many rows the
+    # guard withheld, the ids say WHICH questions are waiting for their second tick, and a
+    # bare count is the silent subtraction this filing swears against.
+    stats["withheld"] = withheld
 
     B = _backlog()
     openers = [it for it in B.open_items((BOARD,), backlog_dir=backlog_dir)
@@ -914,7 +1057,8 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
 def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: int = 0,
               dropped: int = 0, distinct: int | None = None, unruled: int = 0,
               recorded: int | None = None,
-              abstained: dict[int, str] | None = None) -> str:
+              abstained: dict[int, str] | None = None,
+              withheld: list[int] | None = None) -> str:
     """What these rows do NOT cover, in numbers.
 
     Before #3651 the ids were the CURRENT tick's (`file_or_update` took them from
@@ -935,6 +1079,11 @@ def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: 
       moves `un` in the line above: without the names a reader cannot tell a question
       that stopped being open from a read that failed, which is the difference between
       a filing that abstains and one that silently loses rows.
+    * **withheld** (#4378) — ids scored a disagreement that have NOT yet earned a row,
+      because the steward tick immediately before this one did not also score them as one.
+      Named individually for the same reason as the abstentions, and kept in its own line
+      because the two are different states: an abstained id's ruling has landed and will
+      never be written, a withheld id is one more disagreeing tick from being written.
 
     State the zero for each. An item that covers its window has to say so, or a reader
     cannot tell a genuinely small case from an unstated large one — and a merge moves both
@@ -966,6 +1115,19 @@ def _coverage(named: int, window: dict, *, merged: bool = False, unrecoverable: 
                    "(#3089 asked, #3329 set the bar), not this filing's.\n")
     else:
         extra = "- 0 of the window's ids were abstained as already ruled.\n"
+    # The persistence guard's share, in the same shape as the abstentions beside it and with
+    # its zero stated: a reader has to be able to tell "nothing was withheld" from
+    # "the guard never ran", which is why the line is printed unconditionally.
+    wh = [int(i) for i in (withheld or [])]
+    if wh:
+        extra += ("- " + str(len(wh)) + " of this tick's ids were withheld as "
+                  "**not-yet-earned**: the steward tick immediately before this one did not "
+                  "score them as a disagreement, so #4378 holds them back until one does — "
+                  + ", ".join(f"#{i}" for i in sorted(wh))
+                  + ". `judged` and `rate` still count the ticks they were scored on; only "
+                    "the row waits.\n")
+    else:
+        extra += "- 0 of this tick's ids were withheld as **not-yet-earned**.\n"
     if distinct is not None:
         extra += (f"- the window's {total} disagreement rows are {distinct} distinct "
                   f"items, and this item names {int(named)} of them: a row is a tick's "
@@ -1014,7 +1176,8 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
             recorded: int | None = None, rules_note: str = "",
             trigger: str = "",
             revert_pairs: list[dict] | None = None,
-            abstained: dict[int, str] | None = None) -> dict:
+            abstained: dict[int, str] | None = None,
+            withheld: list[int] | None = None) -> dict:
     rows = disagreement_rows(ids, moves, expected)
     # The direction sentence, derived (#4251). This used to be one unconditional f-string
     # declaring the window "measured **below** owed-check's flip floor", which is FALSE of
@@ -1062,7 +1225,8 @@ def _create(B: Any, ids: list[int], moves: list[dict], expected: dict[int, tuple
         f"`agreement.disagree_sides`, recorded by the tick that scored it (#3677). "
         f"{reply_here}\n\n"
         f"## Rows\n\n" + "\n".join(rows) + "\n\n"
-        + _coverage(min(len(ids), ROWS_MAX), window, unrecoverable=unrecoverable,
+        + _coverage(min(len(ids), ROWS_MAX), window, withheld=withheld,
+                    unrecoverable=unrecoverable,
                     dropped=dropped, distinct=distinct, unruled=unruled,
                     recorded=recorded, abstained=abstained) +
         f"## What to decide\n\n"
@@ -1131,7 +1295,8 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
            unrecoverable: int = 0,
            dropped: int = 0, distinct: int | None = None,
            revert_pairs: list[dict] | None = None,
-           unruled: int = 0, abstained: dict[int, str] | None = None) -> dict | None:
+           unruled: int = 0, abstained: dict[int, str] | None = None,
+           withheld: list[int] | None = None) -> dict | None:
     """Add the ids this item does not name yet, into the same file.
 
     `recorded` is deliberately NOT a parameter: the caller's figure counts the ids THIS
@@ -1192,7 +1357,7 @@ def _merge(item: Any, B: Any, ids: list[int], moves: list[dict],
     appended = (f"### Added {stamp} (window `judged={window.get('judged')}`, "
                 f"`rate={window.get('rate')}`) — widened by the "
                 f"**{leg_from_trigger(trigger)}** leg\n\n" + "\n".join(rows) + "\n\n"
-                + _coverage(named, window, merged=True,
+                + _coverage(named, window, merged=True, withheld=withheld,
                             unrecoverable=unrecoverable, dropped=dropped,
                             distinct=distinct, unruled=unruled, recorded=recorded,
                             abstained=abstained))
@@ -1264,7 +1429,8 @@ def _write_body(path: Path, fm: dict, appended: str, B: Any, *,
 def _file_quietly(agree: dict, moves: list[dict], expected: dict[int, tuple],
                   *, backlog_dir: Path | None = None,
                   ledger: Path | None = None,
-                  rules_note: str = "") -> dict | None:
+                  rules_note: str = "",
+                  session_id: str | None = None) -> dict | None:
     """`file_or_update` for the end of a tick: the window is read here, and no
     failure of any kind is allowed to reach the caller.
 
@@ -1284,7 +1450,7 @@ def _file_quietly(agree: dict, moves: list[dict], expected: dict[int, tuple],
         # store, resolved by `read_events`/`append_event` themselves — never by a guess here.
         return file_or_update(agree, moves, expected, window=window,
                               backlog_dir=backlog_dir, ledger=ledger,
-                              rules_note=rules_note)
+                              rules_note=rules_note, session_id=session_id)
     except Exception as exc:  # noqa: BLE001 — deliberately broad: see the docstring
         logger.warning("board-steward disagreement filing failed (%s: %s); "
                        "the tick is unaffected", type(exc).__name__, exc)
