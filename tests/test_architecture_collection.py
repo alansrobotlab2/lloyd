@@ -56,6 +56,26 @@ def test_the_deployed_mode_is_both():
     assert "lloyd-architecture" in vault.VAULT_SEGMENTS
 
 
+def test_plans_is_a_member_exactly_once_under_every_architecture_mode(restore):
+    """#4276 (2026-11-24): `plans` joined the fan-out, and the swap leaves it alone.
+
+    The clause is membership counted, not membership present: this module's own reason
+    for existing is that `apply_architecture_collection` rewrites `VAULT_SEGMENTS` in
+    place, so a segment appended by a mode transition arrives twice on the next
+    `both`, and a segment rebuilt by a literal vanishes under `repo`. The loop is what
+    makes `count("plans") == 1` a statement about the swap rather than about the source
+    text. `~/obsidian/plans` is a real vault directory, so the counters list carries the
+    name too — and it has to stay a separate list, or the swap would start walking the
+    checkout's tree.
+    """
+    assert vault.VAULT_SEGMENTS.count("plans") == 1
+    for mode in ("both", "repo", "vault", "both"):
+        vault.apply_architecture_collection(mode)
+        assert vault.VAULT_SEGMENTS.count("plans") == 1, mode
+    assert "plans" in vault.VAULT_DIR_SEGMENTS
+    assert vault.VAULT_DIR_SEGMENTS is not vault.VAULT_SEGMENTS
+
+
 # ── #4392: one export of the mode, so no importer re-maps it ──────────────────
 #
 # The mapping used to be written twice: here, and as a `== "repo"` ternary in

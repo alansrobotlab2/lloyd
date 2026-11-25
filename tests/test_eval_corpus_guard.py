@@ -3194,6 +3194,21 @@ RECALL_SEGMENT_SOURCE = ROOT / "agent_mcp" / "vault.py"
 #: `test_a_collection_deployed_but_not_named_leaves_its_label_unreachable` pins.
 COLLECTIONS_INDEXED_BUT_NOT_RECALLED = {"autonomy-runs", "sessions", "subliminal"}
 
+#: The mirror of that set, and the smaller of the two by design: names the recall's
+#: unrestricted list asks the daemon for while the index still serves nothing under
+#: them. `plans` joined `VAULT_SEGMENTS` on 2026-11-24 (#4276) ahead of its qmd
+#: collection, because the collection is a person's edit to the daemon's own
+#: `~/.config/qmd/index.yml` plus `qmd update && qmd embed`, and the point of landing
+#: the name first is that the recall is ready the moment the block exists. qmd answers
+#: such a name with HTTP 200 and no rows (#3160, measured 2026-10-22), so the cost
+#: while it stands is one dead name in the collection list, which is what the
+#: `absent` check below was written to notice. A pending name the index DOES serve is
+#: not an allowance — it is #3076's arm read backwards — so the node that uses this set
+#: asserts the intersection is empty rather than trusting the comment. When the owed
+#: live step lands `plans`, this set goes empty in the same change that edits
+#: `agent-services/conf/qmd-index.yml`.
+RECALLED_BUT_NOT_YET_INDEXED = {"plans"}
+
 
 def _vault_segments_literal() -> set:
     """The collection names `vault_recall`/`vault_search` put in the qmd payload.
@@ -3272,13 +3287,14 @@ def test_no_gold_label_names_a_collection_the_recall_never_requests():
     list that the index does not serve is the mirror: the payload asks for a collection
     that holds nothing, and every real collection shares its candidate quota.
     """
-    assert len(_vault_segments_literal()) == 11, (
-        "this node's claim about the eleven vault segments and its read of "
+    assert len(_vault_segments_literal()) == 12, (
+        "this node's claim about the twelve vault segments and its read of "
         "`VAULT_SEGMENTS` have to be re-read together, not re-literalled")
     named = _recall_named_collections()
-    assert "lloyd-architecture" in named and len(named) == 12, (
+    assert "lloyd-architecture" in named and len(named) == 13, (
         f"the recall names {sorted(named)}; on 2026-11-10 `vault_search.architecture: "
-        "both` made it the eleven vault segments plus the checkout's docs")
+        "both` made it the eleven vault segments plus the checkout's docs, and #4276 put "
+        "`plans` in the literal on 2026-11-24, which is the twelfth")
 
     pairs = _gold_label_pairs()
     rooted = [lab for _, lab in (p.split(" -> ", 1) for p in pairs)
@@ -3294,10 +3310,17 @@ def test_no_gold_label_names_a_collection_the_recall_never_requests():
 
     served = {c["name"] for c in _deployed_collections()}
     assert served, "the index reports no collections at all; the subset check is vacuous"
-    absent = sorted(named - served)
+    absent = sorted(named - served - RECALLED_BUT_NOT_YET_INDEXED)
     assert absent == [], (
         f"{absent}: the recall asks for a collection the qmd index does not serve, so the "
         "ask is dead weight in every unrestricted search's collection list")
+    # The pending set is an allowance, not a shrug: it only buys time for a name the
+    # index genuinely lacks. A name listed as pending that the index DOES serve has no
+    # reason to be pending, and leaving it here would silence the check above for it.
+    stale_pending = sorted(RECALLED_BUT_NOT_YET_INDEXED & served)
+    assert stale_pending == [], (
+        f"{stale_pending} is in RECALLED_BUT_NOT_YET_INDEXED but the index already serves "
+        "it — drop it from the set, or the `absent` check stops covering a real name")
     gap = served - named
     assert gap == COLLECTIONS_INDEXED_BUT_NOT_RECALLED, (
         f"the index serves {sorted(gap)} that the recall does not name, and the "
@@ -5431,14 +5454,19 @@ def test_the_episodic_floor_leg_legalises_no_gold_label():
         "a reason to add it: putting chat transcripts into every unrestricted "
         "search is the state the guard documents as deliberate")
 
-    # 4 — the corpus's stated size still matches its rows, and is still 86.
+    # 4 — the corpus's stated size still matches its rows, and is still the count
+    # the floor leg was added against, moved only by an announced growth. #4357
+    # (2026-11-24) is such a growth: 86 → 88, two rows naming one plan-mode document
+    # each, and it re-based the document leg — which is exactly what this count is
+    # here to make loud rather than to prevent.
     shape = _gold_set_shape_report()
     stated = re.search(r"GOLD SET SIZE: (\d+) queries", text)
     assert stated, f"{CORPUS} lost the GOLD SET SIZE line the guard re-counts"
-    assert int(stated.group(1)) == shape["n_queries"] == 86, (
+    assert int(stated.group(1)) == shape["n_queries"] == 88, (
         f"header says {stated.group(1)}, the rows count {shape['n_queries']}, and "
-        "the floor leg was added against 86. A growth is allowed but it is a "
-        "re-base point and must update the header and this count together")
+        "the floor leg was added against 86, re-based to 88 by #4357. A growth is "
+        "allowed but it is a re-base point and must update the header and this "
+        "count together")
 
     # The leg's own label shape is what the guards refuse — this is the clause's
     # teeth: the leg scores labels of exactly the class the corpus may never hold.

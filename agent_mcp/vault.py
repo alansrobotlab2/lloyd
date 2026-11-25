@@ -85,7 +85,7 @@ QMD_DAEMON_URL = service_url("qmd", "http://localhost:8181/query")
 # decision; see qmd/GAMEPLAN.md item 4.
 VAULT_SEGMENTS = [
     "memory", "knowledge", "projects", "personal", "work", "skills",
-    "architecture", "lloyd", "autonomy", "backlog", "people",
+    "architecture", "lloyd", "autonomy", "backlog", "people", "plans",  # #4276: named, not yet indexed
 ]
 #: The vault's own top-level directories, for the counters (`vault_overview`, the
 #: Memory page). Not the search fan-out: since 2026-11-10 `VAULT_SEGMENTS` may name

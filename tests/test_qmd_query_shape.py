@@ -78,6 +78,24 @@ def test_unrestricted_search_names_the_segments_it_filters_to(sent):
     assert sent[0]["collections"] == list(vault.VAULT_SEGMENTS)
 
 
+def test_the_fan_out_names_plans_on_the_wire(sent):
+    """#4276: a new segment has to reach the payload, not just the module list.
+
+    The assertion above is dynamic on both sides, so it stayed green when
+    `lloyd-architecture` arrived and says nothing about a segment added today: it is
+    true of a fan-out that lost `plans` again. What #4276 lands is the name in front of
+    the daemon — the collection itself is a person's edit to `~/.config/qmd/index.yml`
+    that comes after this, so the one thing the code half can promise is that the
+    request already asks for it, exactly once, in the order the module declares.
+    """
+    vault._qmd_daemon_search("exit plan mode plan", 10, list(vault.VAULT_SEGMENTS))
+    assert sent[0]["collections"] == list(vault.VAULT_SEGMENTS)
+    assert "plans" in sent[0]["collections"], (
+        f"the recall would not ask qmd for plans at all: {sent[0]['collections']}")
+    assert sent[0]["collections"].count("plans") == 1, (
+        "a collection named twice is the same document scored twice into one pool")
+
+
 def test_scope_restricted_search_keeps_its_collections(sent):
     """A named subset is a deliberate scope and keeps the exact-scan path.
 
@@ -662,8 +680,8 @@ def test_memory_search_with_nothing_left_after_sanitizing_asks_nothing(monkeypat
 
 # ── #3160: the collections Mission Control's search names are the recall's ────
 
-def test_memory_search_names_the_recall_s_eleven_collections(monkeypatch):
-    """#3160 clause 1: an unrestricted memory search names the eleven collections
+def test_memory_search_names_the_recall_s_full_collection_list(monkeypatch):
+    """#3160 clause 1: an unrestricted memory search names every collection
     in `agent_mcp.vault.VAULT_SEGMENTS`, and `agents` is not among them.
 
     An unrestricted search is not an edge case here — it is the only shape
@@ -686,10 +704,15 @@ def test_memory_search_names_the_recall_s_eleven_collections(monkeypatch):
     named = seen[0]["collections"]
     assert named == list(vault.VAULT_SEGMENTS), (
         f"the search named {named}; the recall names {list(vault.VAULT_SEGMENTS)}")
-    # Eleven vault segments, plus the checkout's architecture docs when
+    # Twelve vault segments in the literal since #4276 appended `plans` on
+    # 2026-11-24, plus the checkout's architecture docs when
     # `vault_search.architecture` is `both` (the deployed value since 2026-11-10).
-    want = 12 if vault.architecture_collection_mode() == "both" else 11
+    want = 13 if vault.architecture_collection_mode() == "both" else 12
     assert len(named) == want, f"{len(named)} collections named, not the recall's {want}: {named}"
+    assert "plans" in named, (
+        "#4276: the Memory tab's unrestricted search is the same fan-out as the recall's, "
+        "so it asks for `plans` too — a route that silently kept the old twelve would "
+        "answer differently from `vault_search` and nothing here would notice")
     assert "agents" not in named, (
         "`agents` is on `subliminal`'s ignore list in both index configs and is not a "
         "vault directory: qmd cannot answer for it")

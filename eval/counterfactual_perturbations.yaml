@@ -106,6 +106,16 @@ perturbations:
   - Browser-Based Extraction
   expected_pinned: []
   sibling_source: kg_alias_table
+- id: browser-upload-files-spec
+  axis_changed: qualifier
+  old_value: unattended
+  new_value: attended
+  perturbed_query: Why can no attended run attach a local file to a web form, and
+    what was the spec written to end that?
+  expected_to_move: []
+  expected_pinned:
+  - local file
+  - web form
 - id: cheaper-model-every-turn
   axis_changed: qualifier
   old_value: cheap
@@ -132,6 +142,17 @@ perturbations:
   expected_to_move: []
   expected_pinned:
   - mention classifier
+- id: collection-overlap-rung-handoff
+  axis_changed: artifact
+  old_value: handoff
+  new_value: run log
+  perturbed_query: How does the nightly qmd index maintenance run measure cross-collection
+    duplication, and what did its run log say about a vault-wide collection swallowing
+    the others?
+  expected_to_move: []
+  expected_pinned:
+  - cross-collection duplication
+  - vault-wide collection
 - id: config-yaml-readonly
   axis_changed: qualifier
   old_value: never

@@ -368,6 +368,29 @@ PLAN: dict[str, tuple[str, str, str, list[str], list[str]]] = {
     "qmd-embed-model-switch": ("artifact", "embedding model", "reranking model",
                                [], ["qmd"]),
     "djev-rank-not-gate": ("qualifier", "fixed cutoff", "learned cutoff", [], ["djev"]),
+
+    # ── #4551: the two `plans` rows #4357 added (86 -> 88 queries, 2026-11-25) ─
+    # Neither entry takes the `entity` axis, and the reason is in the two rows:
+    # both anchor docs carry no `related:` key at all, and both rows carry
+    # `expect_entities: []`, so the alias table holds no surface->canonical pair
+    # to read a sibling out of — and a sibling invented to get green is #541's
+    # risk 1, an unfair sibling that manufactures a false failure. Each entry is
+    # therefore one swap of a modifier or artifact the query already states,
+    # authored from the query text alone and never from a recall run, with
+    # `expected_to_move` empty because a non-entity axis names no new row, and
+    # with every pin a phrase the swap leaves standing in the variant's own text.
+    # The overlap row asks what the #2180 HANDOFF says; asking instead what the
+    # run's LOG says leaves the measured quantity and the containment shape
+    # intact, and what should move is which document answers.
+    "collection-overlap-rung-handoff": ("artifact", "handoff", "run log",
+                                        [], ["cross-collection duplication",
+                                             "vault-wide collection"]),
+    # The upload row asks why NO UNATTENDED run can attach a local file; the same
+    # question about an attended run is answered by a person at the keyboard, and
+    # that is the constraint the swap tests. "local file" and "web form" both
+    # survive the swap verbatim.
+    "browser-upload-files-spec": ("qualifier", "unattended", "attended",
+                                  [], ["local file", "web form"]),
 }
 
 

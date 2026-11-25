@@ -623,6 +623,47 @@ def test_the_narrow_is_block_scoped_and_the_documented_resync_would_break_it():
 # name the daemon has never heard of — the same shape, forward-proof, and the one
 # a hand-synced list cannot give.
 
+#: Names the recall's fan-out already asks for that this copy does not declare yet,
+#: because the daemon's own file has to gain them first. #4276 landed `plans` in
+#: `agent_mcp/vault.py`'s `VAULT_SEGMENTS` on 2026-11-24 while `~/.config/qmd/index.yml`
+#: has no `plans` collection, and the order is not an accident: the live block, the
+#: `qmd update && qmd embed` that fills it and the printed re-sync
+#: (`cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml`) all run ahead of this
+#: file, which is a copy of the live one and never an original. Writing the block here
+#: first would not get the collection indexed a day sooner — it would put a
+#: `template_only` row in the nightly `config_drift` for a collection the daemon has
+#: never seen, which is #1298's drift read from the wrong end. So while a name is
+#: pending it is absent from both copies, and the re-sync commit that brings it here
+#: empties this set: `test_a_pending_collection_is_absent_from_this_copy_too` going red
+#: is what says so, the same friction `EXPECTED_PATTERNS` holds for every pattern.
+AWAITING_INDEX = {"plans"}
+
+
+def test_a_pending_collection_is_absent_from_this_copy_too():
+    """#4276 clause 5: the tracked template never leads the file the daemon reads.
+
+    `grep -c plans agent-services/conf/qmd-index.yml` is 0 in the landed tree, and this
+    node is the version of that which survives the re-sync instead of merely expiring:
+    the pending set and this file must disagree by exactly the names in the set, so a
+    premature block here fails the assertion while the name is pending, and once the
+    owed live step lands and the re-sync brings `plans` in, the same assertion fails
+    until the name comes out of `AWAITING_INDEX`. The premise is checked too — a pending
+    name the fan-out no longer asks for is a stale allowance, not a pending one.
+    """
+    from agent_mcp import vault
+
+    colls = yaml.safe_load(TEMPLATE.read_text())["collections"]
+    overlap = sorted(set(colls) & AWAITING_INDEX)
+    assert overlap == [], (
+        f"{overlap} is declared here while it is listed as awaiting its index — the "
+        "re-sync direction is live -> template, so a block written here first is a "
+        "template_only drift row, not an early landing (#1298)")
+    pending_unasked = sorted(AWAITING_INDEX - set(vault.VAULT_SEGMENTS))
+    assert pending_unasked == [], (
+        f"{pending_unasked} is pending an index nobody asks for: the recall does not "
+        "name it either, so the allowance is holding nothing up")
+
+
 def _undeclared(names, colls: dict) -> list[str]:
     """The names for which this template declares no collection of that name."""
     return [n for n in names if n not in colls]
@@ -663,15 +704,21 @@ def test_every_collection_the_memory_route_names_is_declared_by_the_template(mon
     while the scoped branches are where a caller's typo would land: the default
     set, a scope naming one undeclared thing, and a scope naming a path inside a
     real collection.
+
+    One name is allowed to be undeclared and it is named in `AWAITING_INDEX` below,
+    not waived in prose: #4276 put `plans` in `VAULT_SEGMENTS` on 2026-11-24 and this
+    copy cannot follow until the daemon's own file does, because the re-sync runs
+    live -> template. Everything else keeps #3160's rule exactly.
     """
     colls = yaml.safe_load(TEMPLATE.read_text())["collections"]
     for scope in ("", "agents", "knowledge/youtube", "agents,notes"):
         named = _memory_search_collections(monkeypatch, scope=scope)
-        assert _undeclared(named, colls) == [], (
+        unexplained = sorted(set(_undeclared(named, colls)) - AWAITING_INDEX)
+        assert unexplained == [], (
             f"scope={scope!r}: the memory route would send {named}, and "
-            f"{_undeclared(named, colls)} of that is not a collection this template "
-            "declares — qmd answers such a name with 200 and no rows, so the search "
-            "comes back empty with no signal anywhere (#3160)")
+            f"{unexplained} of that is neither a collection this template declares nor "
+            "one recorded in `AWAITING_INDEX` — qmd answers such a name with 200 and no "
+            "rows, so the search comes back empty with no signal anywhere (#3160)")
 
     # The check bites. `agents` is the name this incident was about, and this file
     # does not declare it: without this line an `_undeclared` that always returned

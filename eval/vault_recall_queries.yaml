@@ -66,12 +66,20 @@
 #   retriever currently returns manufactures the passing eval this growth exists to
 #   prevent, which is why the spot-check is owed by a person and not by this file.
 #
-# GOLD SET SIZE: 86 queries — the count of `- id:` entries below, which is the
+# GOLD SET SIZE: 88 queries — the count of `- id:` entries below, which is the
 #   denominator the nightly's document-leg means are taken over. Read as a measurement
 #   and not a memo: tests/test_eval_corpus_guard.py
 #   ::test_the_gold_file_states_the_size_it_actually_has re-counts the entries on every
 #   run and fails if this line disagrees, which is the only thing that makes a stated
 #   count worth the bytes it sits on.
+#
+#   2026-11-24 (#4357) — two queries ADDED, 86 → 88. A RE-BASE POINT FOR THE
+#   DOCUMENT LEG: DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. Each new row
+#   names ONE document in the plan-mode directory (`agent_mcp/builtin_plan.py:52`
+#   writes it; #4276 is the item that puts its name in the recall's request list and
+#   in qmd's index), so the doc-gold population gains its first two rows that no
+#   other collection can answer. tests/test_eval_corpus_guard.py re-counts 88 beside
+#   this line and reddens if either number moves alone.
 #
 #   2026-11-10 (#1662 option (a)) — the same five RESTORED, 81 → 86. A RE-BASE POINT
 #   FOR THE DOCUMENT LEG: DO NOT COMPARE ABSOLUTE VALUES ACROSS THIS POINT. The qmd
@@ -1066,6 +1074,22 @@ queries:
     expect_docs:
       - 'lloyd-architecture/djev.md'  # #1354: checkout doc, §7.2 "Accuracy — the reason nothing gates"
     notes: "Listwise capacity and label_mass collapse; thresholds belong to one frozen schema, so rank with it, do not gate on it."
+
+  - id: collection-overlap-rung-handoff
+    query: "How does the nightly qmd index maintenance run measure cross-collection duplication, and what did its handoff say about a vault-wide collection swallowing the others?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'plans/handoff-2180-collection-overlap.md'  # #4357: the #2180 handoff is the only note that states how the `collection_overlap` block is computed and why it stays report-only
+    notes: "Strict-prefix containment, each shared document counted once per containing collection, and `_exit_code` never reading the block — the redundancy itself remains a human scope call plus a config edit plus a re-index."
+
+  - id: browser-upload-files-spec
+    query: "Why can no unattended run attach a local file to a web form, and what was the spec written to end that?"
+    category: technical
+    expect_entities: []
+    expect_docs:
+      - 'plans/browser-upload-files.md'  # #4357: the 2026-11-17 work spec; no other note in the vault states the four routes and why the tool was the only one that ended the class
+    notes: "Written out of the 2026-11-16 RSSC upload session: option 4 was 'fix the tool', the browser MCP surface having no verb for an <input type=file>."
 
   # --- #1354's checkout-doc queries: RETIRED by #1662 on Alan's ruling (2026-09-28) ---
   #

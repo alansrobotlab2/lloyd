@@ -1494,7 +1494,30 @@ def main(argv: list[str] | None = None) -> int:
           "on 86; do not compare absolute DOCUMENT-leg means across it. It arrives as "
           "the id-join ERROR line, naming the five ids present only in the later "
           "night. The paired measurement that licensed it is "
-          "eval/measurements/architecture-collection-2026-11-10.md.")
+          "eval/measurements/architecture-collection-2026-11-10.md.\n"
+          "  - The eighth re-base point is #4551's, on 2026-11-25 (86 -> 88 gold "
+          "queries), and it is ADDITIVE: #4357's clause 3 contributes the two `plans` "
+          "rows and removes nothing, one per plan-mode document — "
+          "`plans/handoff-2180-collection-overlap.md` and "
+          "`plans/browser-upload-files.md`. A row may name a gold doc in that "
+          "collection at all only because `plans` joins the recall's segment list in "
+          "the same diff (#4276's code half, the `VAULT_SEGMENTS` membership the guard "
+          "counts), and the live qmd index does not serve `plans` yet: until its block "
+          "is added and `qmd embed` re-run, both rows are scorable only as "
+          "`gold_doc_unreturnable`, which is the condition the "
+          "`RECALLED_BUT_NOT_YET_INDEXED` allowance in "
+          "`tests/test_eval_corpus_guard.py` states out loud. Neither row joins the "
+          "unanchorable residue — "
+          "`tests/test_retrieval_seed_anchoring.py` still lists the same 24 ids and "
+          "moved only its denominator, 24 of 86 to 24 of 88 — and neither row carries "
+          "`expect_entities`, so their two `eval/counterfactual.py` PLAN entries take a "
+          "non-entity axis each and name NO sibling: neither anchor document has a "
+          "`related:` key, so the alias table holds nothing to read a sibling out of, "
+          "and an invented one is the single sibling fault no gate can catch. Like the "
+          "second point's, this re-base has NO paired measurement beside it and will "
+          "not get one: nothing has been scored on 88, and the first night scored on 88 "
+          "is the first row of this leg's trend. It arrives, as the sixth did, as the "
+          "id-join ERROR line naming two ids present only in the later night.")
 
     by_label = {n.label: n for n in nights}
     claims = [] if args.no_claims else list(CLAIMS) + [_parse_claim(c) for c in args.claim]

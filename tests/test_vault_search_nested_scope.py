@@ -74,9 +74,13 @@ def test_a_scope_outside_the_segments_still_searches_everything(monkeypatch):
 
 
 def test_a_scope_outside_the_indexed_segments_is_an_error_not_an_empty_list(monkeypatch):
-    """`scope="sessions"` (or `plans`) names no collection. It used to search
-    everything and filter the reply to nothing, so the model read "no notes"
-    where the truth was "not indexed here"."""
+    """`scope="sessions"` (or a name like `nonexistent`) names no collection. It used to
+    search everything and filter the reply to nothing, so the model read "no notes"
+    where the truth was "not indexed here".
+
+    `plans` was this node's example until 2026-11-24, when #4276 made it a real segment;
+    the example moved to a name the fan-out cannot acquire, so the node cannot quietly
+    go vacuous the next time a directory is admitted."""
     called: list = []
     monkeypatch.setattr(vault_mod, "_qmd_daemon_search",
                         lambda *a, **k: called.append(1) or [])
@@ -89,9 +93,16 @@ def test_a_scope_outside_the_indexed_segments_is_an_error_not_an_empty_list(monk
 
 
 def test_a_mixed_scope_names_only_the_unknown_segment(monkeypatch):
-    out = vault_mod._vault_search({"query": "talk", "scope": "knowledge, plans/x",
+    """One good segment and one that names nothing: the error names only the latter.
+
+    `plans` stood in for the unknown segment until #4276 admitted it to
+    `VAULT_SEGMENTS` on 2026-11-24, which turned this node green by accident — so the
+    stand-in is now a name no segment directory can become.
+    """
+    out = vault_mod._vault_search({"query": "talk",
+                                   "scope": "knowledge, nonexistent/x",
                                    "consolidate": False})
-    assert "'plans'" in out["error"] and "'knowledge'" not in out["error"]
+    assert "'nonexistent'" in out["error"] and "'knowledge'" not in out["error"]
 
 
 def test_nested_and_multi_segment_scopes_stay_valid():

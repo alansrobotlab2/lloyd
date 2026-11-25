@@ -479,8 +479,15 @@ def test_the_anchorless_residue_survives_the_corpus_growth_and_is_pinned():
     # 2026-11-10: the five checkout-doc queries came back (81 -> 86). None joins the
     # residue — the list above is unchanged — so only the denominator moves:
     # (86-24)/86 = 0.721.
+    # 2026-11-25, #4551: #4357's two `plans` rows — `collection-overlap-rung-handoff`
+    # (plans/handoff-2180-collection-overlap.md) and `browser-upload-files-spec`
+    # (plans/browser-upload-files.md) — are the whole of the next growth, 86 -> 88, and
+    # neither joins the residue: the list above is byte-identical at 24 ids, so again
+    # only the denominator moves, (88-24)/88 = 0.727. Re-measured from the corpus by
+    # this node's own run, not typed in: the assertion below failed at (24, 88, 0.727)
+    # before this line was moved.
     assert (len(out["anchorless"]), out["n_queries"], round(ceiling, 3)) == (
-        24, 86, 0.721
+        24, 88, 0.727
     ), f"{len(out['anchorless'])} anchorless of {out['n_queries']} queries"
 
 
