@@ -59,6 +59,16 @@ in a live body only in the doc that owns it plus a closed register of dated grow
 records. `## Review log` history stays standing, and both guards are shown red by
 planting the retired prose into the shipped pages themselves — never by being handed a
 sentence typed by the same hand that wrote the guard.
+
+The same rule reaches one scope wider below the Review-log nodes, over the
+vault-protection layer set. The index row for it was de-counted under this file's rule,
+and the four other places that typed the same count — `README.md`'s table row,
+`CLAUDE.md`'s vault section, and one sentence each in
+`architecture/threat-model.md` and `architecture/background-runs.md` — were left
+stating a number the tree had outgrown, because the count check was fed only
+`index.md`'s rows. They now cite §2 of `architecture/vault-protection.md` as the list
+and state no figure, and the one figure that survives is the owner page's own, pinned
+there against its own §2 headings.
 """
 
 from __future__ import annotations
@@ -1308,3 +1318,432 @@ def test_the_retired_section_says_git_history_is_the_only_copy_left():
     assert "`.archive/` claims" in log, (
         "the Review-log entry that records how the .archive claims were measured "
         "has been edited; a correction may not rewrite the record of the error")
+
+
+# --------------------------------------------------------------------------- #
+# The same rule one scope wider: the vault-protection layer set.  (#4441)
+# --------------------------------------------------------------------------- #
+
+#: The page that owns the vault-protection layer set, and the one file the guard below
+#: exempts.
+#:
+#: allowed: its own lead figure. Why a count is allowed there: `vault-protection.md` is
+#: the only doc that enumerates the set as sections, so a number on that page sits beside
+#: the thing it counts, and
+#: `test_the_owner_pages_lead_figure_matches_its_own_enumeration` refuses it the moment §2
+#: stops holding that many headings. Every other doc cites §2 and types no number.
+VAULT_DOC = ARCH / "vault-protection.md"
+README = ROOT / "README.md"
+CLAUDE = ROOT / "CLAUDE.md"
+#: `README.md`'s vault-protection table row, located by prefix rather than by line number:
+#: the shipped assertion and the planted control below must land on the same row after
+#: someone re-wraps the page.
+README_VAULT_ROW = "| [vault-protection]("
+#: `CLAUDE.md`'s vault section, named by the clause the item names it by.
+CLAUDE_VAULT_HEADING = "## The vault is protected at the tool layer"
+
+#: A count of *this* set: the shipped rot was the spelled word `four`, and #2700's lesson is
+#: that a digits-only pattern watches that happen, so the figure is `_NUMBER` itself,
+#: composed the way `_OWNED_COUNT` composes it. The noun must be PLURAL, because "one layer
+#: up" is how this tree says "further up the stack" — `interaction-loop.md`,
+#: `editing-safeguards.md` and `desktop-use.md` each use that idiom, one of them in a
+#: paragraph that cites `vault-protection` — so a singular match would report a distance in
+#: the stack as a count of this set. The `-?` covers the attributive hyphen ("four-layer").
+_VAULT_LAYER_COUNT = re.compile(rf"\b{_NUMBER}\s*-?\s*layers\b", re.I)
+#: How a doc points at the owner. Both shipped spellings: the wikilink
+#: `[[vault-protection]]` that architecture prose uses, README's table form
+#: `[vault-protection](architecture/vault-protection.md)`, and bare prose such as "the
+#: vault-protection follow-up".
+_VAULT_POINTER = re.compile(r"vault[\s-]*protection", re.I)
+#: The figure spelled as a word, for the one place a count is allowed and must be checked.
+_WORD_NUMBERS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                 "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12}
+
+#: Which mechanism each §2 ordinal is, as the shortest token a list must contain for that
+#: mechanism to be NAMED. Keyed by the ordinal so the table cannot drift from the section it
+#: indexes. Each marker matches its own §2 body: the lists are written at deliberately
+#: different lengths — §2.2's heading is "Every trial is recorded", README's cell says "trial
+#: recording", `CLAUDE.md`'s bullet says "Every bench or eval trial is recorded" — so the
+#: marker is the word all three share, not any one of those sentences.
+_VAULT_SET_MARKERS: dict[str, re.Pattern[str]] = {
+    "2.1": re.compile(r"sandbox", re.I),
+    "2.2": re.compile(r"trial", re.I),
+    "2.3": re.compile(r"wholesale|protected_paths", re.I),
+    "2.4": re.compile(r"tripwire|vaultwatch", re.I),
+    "2.5": re.compile(r"snapshot", re.I),
+    "2.6": re.compile(r"sync[- ]registration", re.I),
+}
+
+#: The counts of OTHER sets, quoted from the shipped files and located by that quote. Four
+#: different sets share the noun "layer" and none of them is this one, so each row asserts
+#: three things at once: the phrase is still in the file, `_vault_layer_count` still matches
+#: the phrase alone (or the green below would only prove the pattern stopped matching), and
+#: the wired guard reports nothing at that line.
+UNRELATED_LAYER_SETS: tuple[tuple[str, str], ...] = (
+    ("README.md", "Four layers fit a session to the model's window"),
+    ("architecture/context-window.md", "Four layers, cheapest first"),
+    ("architecture/context-window.md", "this doc's four layers run at turn start"),
+    ("architecture/data-home.md", "A stray in the tree: four layers"),
+    ("architecture/data-home.md", "Four layers, in the order a turn meets them"),
+    ("architecture/data-home.md", "That gap is why the next two layers exist"),
+    ("architecture/subliminal.md", "Three layers of context injection operate independently"),
+)
+#: Where the injection corpus keeps the layer count the guard must never reach, and the
+#: count itself: quoted prompt material about transformer offload, in a tree the guard's
+#: scope cannot name.
+EVAL_CORPUS_DOC = "eval/injection_canary/corpus/persistence-digest-webpage.md"
+EVAL_CORPUS_FIGURE = "last 4 layers"
+
+#: The retired figure, planted into shipped bytes rather than typed beside the pattern: an
+#: `== []` over a corpus is the same green as a guard that stopped matching, which is the
+#: failure this file has been bitten by twice (#2700's digits-only pattern, #2701's
+#: set-based extractors). Both spellings, because the word is the form that rotted and the
+#: digit is the form a fresh edit would type.
+PLANTED_VAULT_COUNTS: tuple[str, ...] = ("The four layers of this set are below.",
+                                        "There are 6 layers here.")
+
+
+def _vault_layer_count(text: str) -> str | None:
+    """The figure `_VAULT_LAYER_COUNT` matches in `text`, or None. A function rather than the
+    pattern so a caller that wants the matched words gets them in one step."""
+    hit = _VAULT_LAYER_COUNT.search(text)
+    return hit.group(0) if hit else None
+
+
+def _vault_guard_files() -> list[Path]:
+    """Every file the vault-layer guard reads: `README.md`, `CLAUDE.md`, and each
+    `architecture/*.md` except the owner page, sorted. `eval/` is absent by construction,
+    not by a filter: the injection corpus under it is quoted prompt material whose "last 4
+    layers" is about transformer offload, and a guard that walked it would turn an edit to
+    a fixture into a documentation failure.
+    """
+    return sorted([README, CLAUDE, *(p for p in ARCH.glob("*.md") if p != VAULT_DOC)])
+
+
+def _vault_layer_offenders(name: str, text: str) -> list[str]:
+    """Each `<figure> layers` in `name` that counts the vault-protection set, as
+    `name:line: figure in context`.
+
+    Pointer-scoped by section — the rule that keeps `index.md`'s rows honest (#2700),
+    widened from a table row to a heading-delimited block because prose has no rows. Both
+    narrower and wider scopes are wrong on the shipped tree, and both were measured before
+    this was written: whole-FILE scope fires on `README.md`'s context-window row, sixteen
+    lines from the vault-protection row in the same file, whose four layers belong to
+    `context-window.md`; a paragraph-only window misses `CLAUDE.md`'s vault lead line, whose
+    only pointer is the `Long version:` sentence below the list it introduces. A section is
+    the unit both edges agree on, and `## Review log` keeps quoted history out of prose.
+    """
+    lines = text.splitlines()
+    heads = [i for i, ln in enumerate(lines) if re.match(r"^#{1,6} ", ln)]
+    hits = []
+    for i, ln in enumerate(lines):
+        figure = _vault_layer_count(ln)
+        if not figure:
+            continue
+        above = [h for h in heads if h <= i]
+        below = [h for h in heads if h > i]
+        block = "\n".join(lines[above[-1] if above else 0: below[0] if below else len(lines)])
+        if _VAULT_POINTER.search(block):
+            hits.append(f"{name}:{i + 1}: {figure!r} in {ln.strip()[:72]!r}")
+    return hits
+
+
+def _vault_layer_sites() -> list[str]:
+    """`_vault_layer_offenders` over every shipped file in `_vault_guard_files()`."""
+    out: list[str] = []
+    for path in _vault_guard_files():
+        out += _vault_layer_offenders(path.relative_to(ROOT).as_posix(),
+                                      path.read_text(encoding="utf-8"))
+    return out
+
+
+def _section_two() -> dict[str, str]:
+    """The owner page's §2, keyed by ordinal in insertion order, values the section body
+    including its heading. The enumeration every list is checked against, so a mechanism
+    added to §2 becomes a hole in every doc that fails to name it without any number being
+    typed anywhere.
+    """
+    lines = VAULT_DOC.read_text(encoding="utf-8").splitlines()
+    heads = [(i, ln) for i, ln in enumerate(lines) if re.match(r"^### 2\.\d+ ", ln)]
+    out: dict[str, str] = {}
+    for k, (i, ln) in enumerate(heads):
+        end = heads[k + 1][0] if k + 1 < len(heads) else len(lines)
+        out[re.match(r"^### (2\.\d+) ", ln).group(1)] = "\n".join(lines[i:end])
+    return out
+
+
+def _numbered_items(text: str) -> list[str]:
+    """The numbered items of the first ordered list in `text`, continuation lines folded in."""
+    items: list[str] = []
+    for ln in text.splitlines():
+        if re.match(r"^\d+\. ", ln):
+            items.append(ln.strip())
+        elif items and ln.startswith("  ") and ln.strip():
+            items[-1] += " " + ln.strip()
+    return items
+
+
+def _planted_row(text: str, prefix: str, clause: str) -> str:
+    """`text` with `clause` appended to the Covers cell of the first table row starting with
+    `prefix`, in place: the control is planted into the REAL page so a green shipped-tree
+    node and a red planted one differ only by the plant.
+    """
+    lines = text.splitlines(keepends=True)
+    for i, ln in enumerate(lines):
+        if ln.startswith(prefix):
+            body, pipe, _tail = ln.rstrip("\n").rpartition("|")
+            assert pipe, f"row {prefix!r} has no closing pipe to plant before"
+            lines[i] = f"{body}{clause} {pipe}\n"
+            return "".join(lines)
+    raise AssertionError(f"no table row starts with {prefix!r}")
+
+
+def test_no_shipped_doc_counts_the_vault_protection_layers():
+    """No shipped doc outside the owner page says how many layers protect the vault.
+
+    Five sites used to, and #4441 names four of them: `README.md`'s vault-protection table
+    row, `CLAUDE.md`'s vault-section lead, `architecture/threat-model.md`'s pointer to the
+    owner, and two sentences in `architecture/background-runs.md` that leaned on the list to
+    say what the grant gate is NOT. All five said four. Four was wrong twice over: §2 grew a
+    mechanism that no list mentioned (§2.2, every trial recorded) and had always carried
+    another the lists left out (§2.6, no tool call may change the sync registration) — the
+    second is the omission this item calls the worse half, because `app/harness/`
+    `sync_registration.py` exists only because Lloyd deleted the sync registration twice on
+    2026-09-14 from a Mission Control chat, and the one page a newcomer reads for the layer
+    set never named it. `CLAUDE.md` is the copy an agent actually reads, which is why its
+    list now carries all six inside the numbered items rather than demoting the sync guard
+    to a trailing aside.
+
+    The fix is the ruling #3131 reached for `check_bash_command`'s lane chain: the number is
+    removed rather than corrected, and each site cites §2 of the owner page as the list —
+    which is what `index.md`'s own row has done since #2700, and why its row was the only
+    one of the six that stayed true. An empty list is the invariant; the controls below are
+    what make it mean something.
+    """
+    offenders = _vault_layer_sites()
+    assert offenders == [], "shipped docs count the vault-protection layers: " + "; ".join(offenders)
+
+
+def test_the_vault_layer_guard_fires_on_a_count_planted_into_readmes_row():
+    """The guard is wired: the page it reads green goes red on a planted count, at that row.
+
+    `README.md`'s vault-protection row is where the retired number comes back first — it is
+    the sentence a newcomer reads — so the control is planted there, into the shipped bytes,
+    at the row the guard is about. Each spelling alone must produce exactly one offender, and
+    it must name README at the vault-protection row's line and nowhere else in the file; the
+    unplanted page must be clean in the same call, or the control proves nothing about the
+    shipped tree.
+    """
+    text = README.read_text(encoding="utf-8")
+    assert _vault_layer_offenders("README.md", text) == [], (
+        "README.md already trips the vault-layer guard, so a planted count there could "
+        "not be attributed to the plant")
+    row_line = next(ln for ln in text.splitlines() if ln.startswith(README_VAULT_ROW))
+    for planted in PLANTED_VAULT_COUNTS:
+        hits = _vault_layer_offenders("README.md", _planted_row(text, README_VAULT_ROW, planted))
+        assert len(hits) == 1, f"planting {planted!r} into README's row produced {hits}"
+        line_no = int(hits[0].split(":")[1])
+        assert row_line[:24] in text.splitlines()[line_no - 1], (
+            f"the planted count was reported at line {line_no}, which is not the "
+            "vault-protection row, so the guard is firing on some other site")
+
+
+def test_the_vault_layer_guard_stays_off_the_other_layer_sets():
+    """Seven other counts of layers ship in these files, and this guard touches none of them.
+
+    One noun, four sets. `architecture/context-window.md` heads a section "Four layers,
+    cheapest first" and says "this doc's four layers run at turn start" — its compaction
+    stack, whose owner is that doc; `architecture/data-home.md` counts its tree-strays guards
+    three times, including "That gap is why the next two layers exist" under its own
+    Protection heading; `architecture/subliminal.md` has "Three layers of context injection";
+    and `README.md`'s context-window table row still says "Four layers fit a session to the
+    model's window", sixteen lines from the vault-protection row this guard owns — which is
+    the whole reason the rule is pointer-scoped and not file-scoped. That row is the same rot
+    one line away (`architecture/index.md`'s row for it is de-counted while
+    `context-window.md`'s own section still heads with its count); it is a different set and a
+    different item, recorded on #4441 rather than fixed here.
+
+    `EVAL_CORPUS_DOC` is out of scope by construction and asserted so: `_vault_guard_files()`
+    names `README.md`, `CLAUDE.md` and `architecture/*.md` and nothing else, so no edit to
+    the injection corpus can ever be read as a documentation failure.
+    """
+    scoped = {p.relative_to(ROOT).as_posix() for p in _vault_guard_files()}
+    for rel, phrase in UNRELATED_LAYER_SETS:
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert phrase in text, f"{rel} no longer ships {phrase!r}, so this control moved"
+        assert _vault_layer_count(phrase), (
+            f"{phrase!r} is no longer matched by the count pattern, so the guard's silence "
+            f"on {rel} proves nothing about the guard")
+        at = next(i for i, ln in enumerate(text.splitlines(), 1) if phrase in ln)
+        near = [h for h in _vault_layer_offenders(rel, text) if h.startswith(f"{rel}:{at}:")]
+        assert near == [], f"the guard fired on an unrelated set: {near}"
+    corpus = (ROOT / EVAL_CORPUS_DOC).read_text(encoding="utf-8")
+    assert EVAL_CORPUS_FIGURE in corpus, (
+        "the eval corpus no longer holds the transformer-layer figure the scope carve-out "
+        "exists for, so the assertion below has nothing to keep out")
+    assert EVAL_CORPUS_DOC not in scoped, "the vault-layer guard's scope reached the corpus"
+    assert not any(p.startswith("eval/") for p in scoped), sorted(scoped)
+    assert {"README.md", "CLAUDE.md", "architecture/index.md"} <= scoped, sorted(scoped)
+    assert "architecture/vault-protection.md" not in scoped, (
+        "the owner page is inside the scope its lead figure is allowed in")
+
+
+def test_readmes_vault_row_names_the_whole_set_without_counting_it():
+    """README's row names all six mechanisms and states no number, so it cannot rot by growth.
+
+    The row used to advertise "the four layers built after them: tool sandbox,
+    wholesale-delete refusal, guardian tripwire, 15-minute snapshots". Half of that was
+    missing rather than miscounted: trial recording (§2.2) and the sync-registration guard
+    (§2.6) were absent, and the second omission is the one that matters, because the guard
+    that answers a deleted sync registration is exactly what a reader would go looking for
+    after an incident. It now lists all six and cites §2, matching `architecture/index.md`'s
+    row, and holds no figure — so when §2 gains a seventh mechanism this row goes red for
+    not naming it (`_VAULT_SET_MARKERS`), not for being one short of a number nobody typed.
+    """
+    row = next(ln for ln in README.read_text(encoding="utf-8").splitlines()
+               if ln.startswith(README_VAULT_ROW))
+    assert _vault_layer_count(row) is None, (
+        f"the README vault row counts the set again ({_vault_layer_count(row)!r}); the "
+        "ruling on this set is that no doc but the owner page states a figure")
+    cells = [c.strip() for c in row.strip().strip("|").split("|")]
+    assert len(cells) == 2, f"the row no longer parses as link-cell plus Covers-cell: {row!r}"
+    cell = cells[1]
+    assert "layers" in cell, (
+        "the row stopped naming the set at all, which de-counts it by deleting the claim "
+        "rather than by citing the owner")
+    assert "§2" in cell, (
+        "the row names mechanisms but cites no section, so a reader has no way to check "
+        "the list against the page that owns it")
+    missing = [o for o, rx in _VAULT_SET_MARKERS.items() if not rx.search(cell)]
+    assert missing == [], (
+        f"§2.{','.join(missing)} is not named in README's row: the cell must name every "
+        "mechanism the owner page enumerates")
+
+
+def test_claude_md_lists_every_mechanism_the_owner_page_enumerates():
+    """`CLAUDE.md`'s numbered list is §2 in §2's order: six items, no count, no trailing aside.
+
+    This is the file a turn actually reads, and it was the worst of the five sites: its lead
+    said "Four layers now, none of which trusts the model or the caller", trial recording
+    (§2.2) appeared nowhere, and the sync-registration guard (§2.6) survived only as an
+    unnumbered sentence below the list, where nothing indexes it. The list now has one item
+    per §2 heading, in §2's order, each carrying that mechanism's marker, and the lead states
+    no figure — so the item count and the section count are pinned together and the file
+    cannot quietly drop back to four. The retired aside sentence is asserted absent, because
+    a list that grows back a trailing paragraph has not been fixed, only re-wrapped.
+    """
+    text = CLAUDE.read_text(encoding="utf-8")
+    assert CLAUDE_VAULT_HEADING in text, (
+        f"CLAUDE.md no longer heads its vault section {CLAUDE_VAULT_HEADING!r}, so this "
+        "node is reading the wrong section")
+    body = _section(text, CLAUDE_VAULT_HEADING)
+    for ln in body.splitlines():
+        assert _vault_layer_count(ln) is None, (
+            f"the vault section counts the set: {ln.strip()[:72]!r}")
+    sections = _section_two()
+    items = _numbered_items(body)
+    assert len(items) == len(sections), (
+        f"CLAUDE.md's vault list has {len(items)} numbered items and §2 enumerates "
+        f"{len(sections)} mechanisms: one item per mechanism, in §2's order")
+    for (ordinal, sbody), item in zip(sections.items(), items):
+        assert _VAULT_SET_MARKERS[ordinal].search(item), (
+            f"item {ordinal} of CLAUDE.md's list does not name mechanism §2.{ordinal}: "
+            f"{item[:80]!r} against {sbody.splitlines()[0]!r}")
+    assert "The sync registration is guarded the same way" not in text, (
+        "the sync-registration guard is back in a trailing aside below the list; §2.6 is a "
+        "numbered item here or the count is wrong again")
+
+
+def test_the_three_prose_sites_cite_the_owners_section_instead_of_counting():
+    """The three sentences that leaned on the list now cite §2 of the owner page as the list.
+
+    `architecture/threat-model.md` pointed at "the vault's four layers";
+    `architecture/background-runs.md` said "vault protection is now four layers below any
+    hook" and then named four mechanisms, and its Known-limits bullet closed with "the grant
+    gate is none of those four layers". Each sentence did real work — the last one says what
+    the grant gate is NOT — so each keeps its point and loses its number, and now reaches §2
+    by section rather than by page: a pointer to the doc as a whole is how a count survived
+    beside a de-counted index for two months. The phrases are located by the words that
+    replaced them, so a re-wrap cannot hide a site from this node, and the citation must sit
+    in the same few lines as the sentence that needs it.
+    """
+    for rel, phrase in (("architecture/threat-model.md",
+                         "the vault's layers are §2 of"),
+                        ("architecture/background-runs.md", "is the list of them"),
+                        ("architecture/background-runs.md",
+                         "the grant gate is none of the layers")):
+        lines = (ROOT / rel).read_text(encoding="utf-8").splitlines()
+        at = [i for i, ln in enumerate(lines) if phrase in ln]
+        assert at, f"{rel} no longer says {phrase!r}: the sentence this node pins moved"
+        window = "\n".join(lines[max(0, at[0] - 2): at[0] + 3])
+        assert "§2" in window, f"{rel}: {phrase!r} cites the page but not §2 — {window!r}"
+        assert _VAULT_POINTER.search(window), (
+            f"{rel}: {phrase!r} cites a §2 with no owner page named beside it")
+
+
+def test_the_owner_pages_lead_figure_matches_its_own_enumeration():
+    """The one count this file allows is checked against the headings it counts.
+
+    `architecture/vault-protection.md`'s lead says "Six mechanisms, in §2.1–§2.6" and its §2
+    holds six `### 2.N` headings. That is the only place a figure survives, and it survives
+    because it is checkable where it is read: the sentence is on the same page as the
+    enumeration, so unlike the four that rotted in README, CLAUDE.md and the two prose sites
+    it cannot disagree with anything. The node refuses both ways — a lead figure that stops
+    matching the headings, and a lead that stops stating a figure at all, which would leave
+    the exemption below with nothing to exempt.
+
+    The exemption is then shown to be a scope decision and not a pattern that misses the
+    page: the owner's own front block still carries the retired figure inside quoted history
+    ("It said \"four layers\" while §2.2 and §2.6 existed"), so the same function, run on the
+    same bytes, does report it — and the file is not in `_vault_guard_files()`, which is what
+    keeps that report from being a failure.
+    """
+    text = VAULT_DOC.read_text(encoding="utf-8")
+    front = text.split("\n## ")[0]
+    stated = None
+    for hit in re.finditer(_NUMBER, front, re.I):
+        if re.match(r"^\s+mechanisms\b", front[hit.end():]):
+            word = hit.group(0).lower()
+            stated = _WORD_NUMBERS.get(word, None) if not word.isdigit() else int(word)
+            break
+    sections = _section_two()
+    assert stated is not None, (
+        "the owner page's lead states no figure beside `mechanisms`, so the one count this "
+        "file allows has nothing left to check against §2")
+    assert stated == len(sections), (
+        f"the owner page's lead says {stated} mechanisms and §2 holds {len(sections)} "
+        "headings; the figure and the enumeration are on one page and must agree")
+    quoted = _vault_layer_offenders("architecture/vault-protection.md", text)
+    assert quoted, (
+        "the owner page's front block no longer holds a count its own prose points at, so "
+        "excluding it from the guard is no longer a decision anyone can see")
+    #: allowed: the owner page's own lead figure. Why a count is allowed here when no other
+    #: doc may type one: §2 is on the same page as the sentence stating the figure, so this
+    #: number is checkable where it is read, which is the one thing the counts in README,
+    #: CLAUDE.md and the two prose sites never had. The exemption is paid for by the
+    #: assertion above, which refuses the page a figure that disagrees with its own headings.
+    assert "architecture/vault-protection.md" not in {
+        p.relative_to(ROOT).as_posix() for p in _vault_guard_files()
+    }, "the owner page is inside the scope its lead figure is allowed to stand in"
+
+
+def test_the_vault_set_marker_table_indexes_every_section_two_mechanism():
+    """A mechanism added to §2 is a hole in every list the moment it is added.
+
+    The marker table is the only thing that turns §2's growth into a red node in README and
+    `CLAUDE.md`, so it is pinned to §2 from both ends: the table's keys are exactly the
+    ordinals §2 heads, and each marker matches the body of its own section — proof that the
+    token is about the mechanism it indexes and not merely about the page. §2.2 and §2.6 are
+    how this set rotted once: they existed, and the four-item lists beside them stayed at
+    four because nothing compared a list against the section.
+    """
+    sections = _section_two()
+    assert list(sections) == sorted(sections), (
+        f"§2's headings are not in ordinal order ({list(sections)}), so 'one item per "
+        "section, in order' in CLAUDE.md's list would be pinned to nothing")
+    assert set(sections) == set(_VAULT_SET_MARKERS), (
+        f"§2 enumerates {sorted(sections)} and the marker table knows {sorted(_VAULT_SET_MARKERS)}")
+    for ordinal, body in sections.items():
+        assert _VAULT_SET_MARKERS[ordinal].search(body), (
+            f"the marker for §2.{ordinal} matches nothing in §2.{ordinal}'s own section, so "
+            "it does not identify that mechanism")

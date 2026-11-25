@@ -94,7 +94,7 @@ the tl;drs below are the short way in.
 | [authority-surfaces](architecture/authority-surfaces.md) | Every guard in one list, in the order an action meets it. |
 | [guard-coverage](architecture/guard-coverage.md) | The union of what no guard sees, each gap with its mechanism and the command that proves it. |
 | [editing-safeguards](architecture/editing-safeguards.md) | What stands between a turn and the tree: read-before-edit, edit diagnostics, the change and effect ledgers, the code graph. |
-| [vault-protection](architecture/vault-protection.md) | Two vault wipes and the four layers built after them: tool sandbox, wholesale-delete refusal, guardian tripwire, 15-minute snapshots. |
+| [vault-protection](architecture/vault-protection.md) | Two vault wipes and the layers built after them (§2): the bench/eval tool sandbox, trial recording, the wholesale-delete check, the guardian's tripwire, 15-minute snapshots, and the sync-registration guard. |
 | [data-home](architecture/data-home.md) | Runtime data lives in `~/lloyd-data`, never in the code tree: the one path resolver, hourly read-only snapshots, restore. |
 
 ### Memory and knowledge

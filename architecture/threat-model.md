@@ -308,7 +308,7 @@ negative here is the honest deliverable, and this page will take it.
   the board still rather than testing anything.
 - **The guards themselves.** Their order, their modules and where one rule is
   spelled twice are [[authority-surfaces]]; what none of them sees is
-  [[guard-coverage]]; the vault's four layers are `architecture/vault-protection.md`.
+  [[guard-coverage]]; the vault's layers are §2 of `architecture/vault-protection.md`.
   This page adds the threat each answers and nothing about how it works — two docs
   describing one guard in full is how one gets corrected and the other does not.
 - **Anything about Alan.** The desktop lease is modelled as an authority seam and

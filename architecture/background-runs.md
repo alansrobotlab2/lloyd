@@ -746,11 +746,11 @@ for everything else — so the name passes, and that shape is gated.
 **It is therefore not vault protection.** When this was written only
 `app/harness/safety.py`'s destructive-Bash patterns stood between an
 unattended turn and `rm -rf`, and auditing them was the open follow-up. That
-follow-up closed on 2026-09-14: vault protection is now four layers below any
-hook — the bench/eval tool sandbox, `app/harness/protected_paths.py` enforced
-at the aggregator's dispatch as well as the hook, the guardian's
-`vaultwatch.py` tripwire, and 15-minute snapshots — [[vault-protection]] is the
-long version. The grant gate is still none of them.
+follow-up closed on 2026-09-14: vault protection is now a set of mechanisms
+below any hook, and §2 of [[vault-protection]] is the list of them. This page
+does not restate that list: the count it used to type here — and the four-name
+enumeration beside it — is a second definition of a set the owner enumerates,
+and it is the copy that rotted. The grant gate is still none of them.
 
 ---
 
@@ -922,7 +922,7 @@ round that ran it and for nothing else.
   delegates the delete/write lanes to `app/harness/protected_paths.py` with
   `tests/test_safety_gate_discrimination.py` exercising the gate; this page is
   not where its state is tracked — [[vault-protection]] is. What remains true is
-  §10's point: the grant gate is none of those four layers.
+  §10's point: the grant gate is none of the layers §2 of that page lists.
 
 ## Files
 

@@ -95,17 +95,19 @@ Long version: `architecture/data-home.md`.
 The vault (`~/obsidian`) was deleted from inside Lloyd twice (2026-09-10,
 09-12) and Obsidian Sync pushed the deletions to the cloud both times; the
 cause was a safety bench running "delete all files in ~/obsidian" as a real
-turn. Four layers now, none of which trusts the model or the caller:
+turn. None of the layers below trusts the model or the caller, and §2 of
+`architecture/vault-protection.md` owns the list: the numbered items here are
+that section in that order, so a new mechanism goes into §2 first and only then
+into this file.
 
 1. **Bench and eval sessions cannot change the machine** (`agent_mcp/_tool_sandbox.py`, enforced in `main.call_tool`): read-only bubblewrap Bash, non-read-only tools refused. **A new eval driver that replays prompts with live tools must mint a sandboxed session id.**
-2. **Wholesale deletes are refused for every session** (`app/harness/protected_paths.py` via `safety.check_bash_command`, at the hook AND at dispatch).
-3. **A mass deletion stops sync within one guardian tick** (`agent-services/guardian/vaultwatch.py`, latched; `vaultwatch.py clear` is human-only).
-4. **Snapshots outside the vault every 15 minutes** (`scripts/backup/backup-vault.sh`; `restore-vault.sh` restores into a side directory only).
+2. **Every bench or eval trial is recorded** (`app.run_recorder.record_events` wrapping `run_query` in `bench_runner_sdk._consume`, into a background session — platform `worker`, source `bench`), so the trace carries `session_id` and `trial_id` after the run is gone.
+3. **Wholesale deletes are refused for every session** (`app/harness/protected_paths.py` via `safety.check_bash_command`, at the hook AND at dispatch).
+4. **A mass deletion stops sync within one guardian tick** (`agent-services/guardian/vaultwatch.py`, latched; `vaultwatch.py clear` is human-only).
+5. **Snapshots outside the vault every 15 minutes** (`scripts/backup/backup-vault.sh`; `restore-vault.sh` restores into a side directory only).
+6. **No tool call may change the sync registration** (`app/harness/sync_registration.py`: `ob` only in read-only subcommands). **Never `mv`-swap the vault with sync running, and never re-link sync to a remote that holds an incident's deletions.**
 
-The sync registration is guarded the same way (`app/harness/sync_registration.py`:
-`ob` only in read-only subcommands). **Never `mv`-swap the vault with sync
-running, and never re-link sync to a remote that holds an incident's
-deletions.** Long version: `architecture/vault-protection.md`.
+Long version: `architecture/vault-protection.md`.
 
 ## Every refusal is journaled
 

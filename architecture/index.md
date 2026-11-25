@@ -48,7 +48,7 @@ already uses; arch-review refreshes that one).
 | [[desktop]] | desktop computer use: `desktop_capture`/`desktop_act` over Alan's real Hyprland desktop, the lease only a human grants from the Desktop tab, chat sessions only, screenshots as refs never base64 |
 | [[editing-safeguards]] | read-before-edit gates, edit diagnostics and blast radius, the change and effect ledgers, the code graph |
 | [[data-home]] | runtime data outside the code tree since the 09-22 deletion: `~/lloyd-data`, the `DATA_ROOT` resolver and who gets which root, the delete guard, hourly read-only snapshots, the data tripwire, restore |
-| [[vault-protection]] | the 09-10/09-12 vault wipes and the layers after them: the bench/eval tool sandbox, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
+| [[vault-protection]] | the 09-10/09-12 vault wipes and the layers after them: the bench/eval tool sandbox, trial recording, the wholesale-delete check, the guardian's vault tripwire and sync gate, 15-minute snapshots |
 | [[inner-voice]] | deterministic turn guards on every turn, plus an opt-in terminal review and the loop that measures it |
 | [[subliminal]] | pre-call context retrieval: skills, facts, vault docs, sessions, backlog |
 | [[qmd]] | the vault search engine: Lloyd's fork, the daemon, index, config and models, its REST API, maintenance, eval pins |
