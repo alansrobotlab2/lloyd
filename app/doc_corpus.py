@@ -64,6 +64,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import urllib.error
 import urllib.request
@@ -189,8 +190,155 @@ def count_content_vectors(index_path: Path) -> int | None:
         con.close()
 
 
+#: qmd's own include-pattern default, quoted from the column declaration
+#: ``pattern TEXT NOT NULL DEFAULT '**/*.md'`` (`qmd/src/store.ts:1301`). A
+#: collection that declares nothing includes THIS, not the narrower `*.md`: a
+#: reader who guessed the other way drops every nested document from a
+#: returnability pool and prints gold nobody can find. #4575 clause 4.
+QMD_DEFAULT_GLOB = "**/*.md"
+
+#: A glob character this module's translation does not implement — a character
+#: class, a brace expansion or an extglob (`@(…)`, `!(…)`, `+(…)`, `?(`, `*(`).
+#: fast-glob supports all of them; the translation below does not, and pretending
+#: otherwise would apply a mangled pattern as though it were the declared one.
+_GLOB_UNTRANSLATABLE = re.compile(r"[\[\]{}]|[!@+*?]\(")
+
+
+def _ignore_list(raw) -> list[str]:
+    """``ignore_patterns`` as a list of glob strings.
+
+    The column is a JSON array or NULL. Anything else — malformed JSON, a bare
+    string, a number — is read as NO ignores, never as an error and never as a
+    blanket exclude: an exclude that cannot be parsed is an exclude that is not
+    there, which can only make a served pool larger. The other direction invents
+    a gold label that no collection can return.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [str(g) for g in parsed] if isinstance(parsed, list) else []
+
+
+def glob_matcher(pattern: str | None):
+    """Compile one qmd include/ignore glob, or None when it cannot be honoured.
+
+    Translated the way qmd's own engine reads one (`fast-glob` over paths relative
+    to the collection root, `qmd/src/store.ts:1651-1667` and
+    `qmd/src/cli/qmd.ts:1911-1930`): `**/` spans zero or more directory
+    components, `**` spans the rest, `*` is one component with no separator in it,
+    `?` is one character. Match with `.fullmatch` against the root-relative path —
+    a search would let `agents/**` exclude `x/agents/y.md`, which is not what the
+    daemon excludes, since its patterns are anchored at the root it was given.
+
+    None means NOT TRANSLATED, and comes back in two cases: no pattern at all
+    (the caller substitutes `QMD_DEFAULT_GLOB`), and a pattern holding syntax
+    outside the four rules above (`_GLOB_UNTRANSLATABLE`). The second is why the
+    caller must treat it as "walk unfiltered" rather than as "matches nothing":
+    the failure this module is guarding is a pool that silently reads as EMPTY,
+    which is a fabricated finding, while an over-wide pool is the pre-#4575
+    blindness that only ever hides a finding. Measured 2026-11-25 over the live
+    `store_collections`: all 15 declared patterns and both ignore entries are in
+    the translatable set, so neither arm is on the deployed path today.
+    """
+    if not pattern:
+        return None
+    if _GLOB_UNTRANSLATABLE.search(pattern):
+        return None
+    out: list[str] = []
+    i, n = 0, len(pattern)
+    while i < n:
+        if pattern.startswith("**/", i):
+            out.append("(?:[^/]*/)*")
+            i += 3
+        elif pattern.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif pattern[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    try:
+        return re.compile("".join(out))
+    except re.error:
+        return None
+
+
+def serves_path(coll: dict, rel_parts: tuple[str, ...] | list[str]) -> bool:
+    """Would ``coll`` index the root-relative path ``rel_parts``?
+
+    The include pattern, then the ignore list, then qmd's own dot rule: a path
+    with a dot-prefixed component is not a location the index can hold
+    (`qmd/src/cli/qmd.ts`, the `parts.some(part => part.startsWith("."))` filter
+    that runs after the glob). A collection dict with no `pattern` key is the
+    default — the state a hand-built caller, a fixture, or an index predating the
+    column leaves a collection in — and an UNTRANSLATED pattern admits everything
+    but the dot rule, for the reason in `glob_matcher`.
+
+    `rel_parts` is path parts, not a string, because the dot rule is a rule about
+    components and a caller holding parts should not have to rejoin them.
+    """
+    parts = [str(p) for p in rel_parts]
+    if any(p.startswith(".") for p in parts):
+        return False
+    posix = "/".join(parts)
+    pattern = str(coll.get("pattern") or QMD_DEFAULT_GLOB)
+    include = glob_matcher(pattern)
+    if include is not None and not include.fullmatch(posix):
+        return False
+    for raw in (coll.get("ignore") or []):
+        ignore = glob_matcher(str(raw))
+        if ignore is not None and ignore.fullmatch(posix):
+            return False
+    return True
+
+
+def walk_served(root: Path, coll: dict):
+    """Every file under ``root`` that ``coll``'s own patterns admit, yielded as paths.
+
+    The one consumer is the gold-doc returnability pool (`eval/run_eval.py
+    indexed_paths`), whose whole failure was walking a root instead of serving it.
+    The descent is iterative and refuses to descend a dot-prefixed directory rather
+    than filtering it afterwards, so it costs one `is_dir` per entry and no `stat` on
+    the files it yields.
+
+    Honouring a pattern is not cheaper than walking everything, it is only honest:
+    measured 2026-11-25 over the 15 deployed roots, 1.033 s for the 11,383 paths this
+    yields, against 0.741 s for an `rglob("*")` of the same roots that yielded 24,139.
+    If that ever matters, the way down is a pattern-bearing `glob` — on this vault a
+    `glob('**/*.md')` is far cheaper than `rglob('*')`, because the pattern prunes the
+    descent instead of describing the result (#3396's lesson, recorded in
+    `tests/test_eval_corpus_guard.py`).
+
+    An unreadable directory contributes nothing rather than raising: a subtree that
+    cannot be read is a partly-deployed collection, not a reason to lose the pool —
+    and losing the pool is how a guard starts reporting gold as unreachable.
+    """
+    stack = [root]
+    while stack:
+        here = stack.pop()
+        try:
+            entries = list(here.iterdir())
+        except OSError:
+            continue
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                stack.append(entry)
+            elif serves_path(coll, entry.relative_to(root).parts):
+                yield entry
+
+
 def deployed_collections(index_path: Path | str | None = None) -> list[dict] | None:
-    """``[{name, root}]`` for the collections this index actually serves, or None.
+    """``[{name, root, pattern, ignore}]`` for the collections this index serves, or None.
 
     #1599: a gold doc label naming a path no collection indexes can never be
     returned, so it is a permanent `doc_hit` miss — five of them were costing
@@ -204,10 +352,25 @@ def deployed_collections(index_path: Path | str | None = None) -> list[dict] | N
     `agent-services/conf/qmd-index.yml` is no substitute — it declared 15
     collections where the live config declared 14 on 2026-09-27.
 
+    #4575 added `pattern` and `ignore`, and they are the other half of the same
+    sentence: a ROOT is not a corpus. The deployed `subliminal` collection is
+    rooted at the whole vault with pattern `*.md` and ignores `agents/**` and
+    `templates/**`, so its root holds 11,280 markdown paths where its collection
+    indexes 4 (measured 2026-11-25, `select count(*) from documents where
+    collection='subliminal'`), and four of the deployed collections are narrower
+    than the default. A pool built from roots alone reached 24,134 paths against
+    the 11,382 documents the index holds that day; honouring these two columns
+    reproduces the index exactly, collection by collection.
+
     ``index_path`` goes through `index_path_for`, so a pinned run asks its own
     snapshot and a run under an overlay that named no index gets None rather than
     the live default: collections counted against the wrong index would be a
     confident wrong answer on the artifact that claims to be pinned.
+
+    An index whose `store_collections` has no `pattern` column — a snapshot or a
+    fixture table shaped before it existed — is read for the columns it HAS
+    (`pragma table_info`, not a guessed schema) and every row then carries the
+    default: a missing column is an undeclared pattern, not an unknown deployment.
 
     None means COULD NOT ANSWER — no path, no file, unreadable, or no table — and is
     never collapsed into `[]`. An empty list asserts that nothing is deployed, and
@@ -223,13 +386,23 @@ def deployed_collections(index_path: Path | str | None = None) -> list[dict] | N
     except sqlite3.Error:
         return None
     try:
+        cols = {r[1] for r in con.execute("pragma table_info(store_collections)")}
+        if not {"name", "path"} <= cols:
+            return None
         rows = con.execute(
-            "select name, path from store_collections order by name").fetchall()
+            "select name, path, pattern, ignore_patterns from store_collections"
+            " order by name"
+            if {"pattern", "ignore_patterns"} <= cols
+            else "select name, path, NULL, NULL from store_collections order by name"
+        ).fetchall()
     except sqlite3.Error:
         return None
     finally:
         con.close()
-    return [{"name": str(n), "root": str(p)} for n, p in rows] or None
+    return [{"name": str(n), "root": str(p),
+             "pattern": str(pat) if pat else QMD_DEFAULT_GLOB,
+             "ignore": _ignore_list(ignores)}
+            for n, p, pat, ignores in rows] or None
 
 
 #: The five identity keys, in one place so `collect` cannot quietly start

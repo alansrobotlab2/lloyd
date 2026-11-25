@@ -522,23 +522,26 @@ def _doc_satisfied_by(exps: list[str], got: str) -> bool:
 #: the index being scored, because no config in this repo is the deployment.
 
 def indexed_paths(collections: list[dict]) -> list[str]:
-    """Every path string a deployed collection could return, normalised, as one pool.
+    """Normalized `name/relative/path` for every document a deployed collection serves.
 
-    Shaped the way the retriever shapes it — `<collection name>/<path relative to that
-    collection's root>` — because that is the string `_doc_pair_satisfied` will be
-    asked about, and a pool built any other way would be a second definition of what
-    a returned path looks like.
+    The name is a prefix because that is how a qmd result arrives: `qmd search` returns
+    a root-relative path, so an entry is `f"{_norm(name)}/{_norm(rel)}"`.
 
-    Dot-prefixed components are excluded, which is qmd's own indexing rule (the
-    `parts.some(part => part.startsWith("."))` filter after the glob in
-    `qmd/src/cli/qmd.ts`): `skills/.archived/**` is not a location the index can hold,
-    so a label that only such a path would answer is not returnable either. A
-    collection whose root is not a directory contributes nothing — it is deployed in
-    config and empty on disk, which is the state #1599 is about.
+    #4575 is why serving is a pattern question and not a root question. The deployed
+    `subliminal` collection is rooted at the whole vault with include pattern `*.md`,
+    and the `rglob("*")` this held before contributed 11,282 pool paths for the 4
+    documents that collection indexes, so every nested vault file looked returnable
+    and the guard could print nothing but zero. `doc_corpus.walk_served` applies each
+    collection's declared `pattern` and `ignore` plus qmd's dot rule, and reproduces
+    the live index exactly: on 2026-11-25, 11,383 pooled paths against the 11,383 rows
+    `select count(*) from documents` returned in the same second, collection by
+    collection. A collection declaring no pattern falls back to qmd's own column
+    default `**/*.md`, never to the narrower `*.md`.
 
-    One walk of the whole deployed corpus per call, over ~14 roots: 0.70 s on 2026-11-04
-    for a 21,256-path pool: re-price it by timing this walk on `deployed_collections()`.
-    Call it once and pass the pool down; `gold_docs_unreturnable` does.
+    One walk of the whole deployed corpus per call, over ~14 roots, from timing this
+    walk on `deployed_collections()`: 1.033 s on 2026-11-25, against a `rglob("*")` of
+    the same roots that cost less over the same tree the same minute. Call it once and
+    pass the pool down; `gold_docs_unreturnable` does.
     """
     pool = []
     for coll in collections:
@@ -547,11 +550,8 @@ def indexed_paths(collections: list[dict]) -> list[str]:
         if not name or not root.is_dir():
             continue
         prefix = _norm(name) + "/"
-        for path in root.rglob("*"):
-            rel = path.relative_to(root)
-            if any(part.startswith(".") for part in rel.parts):
-                continue
-            pool.append(prefix + _norm(str(rel)))
+        for path in doc_corpus.walk_served(root, coll):
+            pool.append(prefix + _norm(str(path.relative_to(root))))
     return pool
 
 

@@ -1600,8 +1600,73 @@ CHECKOUT_LABEL_ROOTS = {"lloyd-architecture/": "architecture"}
 NO_COLLECTION_LIST = object()
 
 
+#: qmd's own `store_collections.pattern` default, the column default in
+#: `qmd/src/store.ts:1301`. A collection that declares no pattern is indexed with
+#: THIS and not with `*.md`: narrowing the fallback is what would make every nested
+#: gold label read unsearchable, the direction #1599's own first draft got wrong
+#: (12 of 86 called unreturnable where 5 are). #4575 clause 4.
+GUARD_QMD_DEFAULT_GLOB = "**/*.md"
+
+#: A glob character the translation below does not implement — a character class, a
+#: brace expansion or an extglob. fast-glob supports them; this does not, so such a
+#: pattern is reported as NOT TRANSLATED and the caller walks unfiltered rather than
+#: applying a mangled one.
+_GUARD_GLOB_UNTRANSLATABLE = re.compile(r"[\[\]{}]|[!@+*?]\(")
+
+
+def _guard_glob_regex(glob: str):
+    """Compile one qmd glob to a whole-path regex, or None when it cannot be honoured.
+
+    The guard's own copy, for the discipline at :1567-1573: `**/` spans zero or more
+    components, `**` spans the rest, `*` is one component, `?` one character, matched
+    with `fullmatch` against the root-relative path because fast-glob anchors a
+    pattern at the root it was handed — a `search` would let `agents/**` exclude
+    `x/agents/y.md`, which the daemon does not exclude.
+    """
+    if not glob or _GUARD_GLOB_UNTRANSLATABLE.search(glob):
+        return None
+    out, i = [], 0
+    while i < len(glob):
+        if glob.startswith("**/", i):
+            out.append("(?:[^/]*/)*")
+            i += 3
+        elif glob.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif glob[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        elif glob[i] == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(glob[i]))
+            i += 1
+    try:
+        return re.compile("".join(out))
+    except re.error:
+        return None
+
+
+def _guard_ignore_list(raw) -> list[str]:
+    """`ignore_patterns` as a list of glob strings; unreadable means NO ignores.
+
+    A column that is malformed JSON, a bare string or a number is read as an empty
+    list, never as a blanket exclude: an exclude that cannot be parsed is an exclude
+    that is not there, which can only make a served pool larger. The other direction
+    invents gold no collection can return.
+    """
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return []
+    return [str(g) for g in parsed] if isinstance(parsed, list) else []
+
+
 def _deployed_collections(index_path: Path = None) -> list[dict]:
-    """`[{name, root}]` for the collections the qmd index actually serves.
+    """`[{name, root, pattern, ignore}]` for what the qmd index actually serves.
 
     Re-implemented per this file's standing convention (header at
     `tests/test_eval_corpus_guard.py:1567-1573`): the guard reads the table the
@@ -1612,6 +1677,14 @@ def _deployed_collections(index_path: Path = None) -> list[dict]:
 
     `store_collections` is qmd's own table — the one the live proof command
     `select name, path from store_collections` answers with — opened `mode=ro`.
+    #4575 adds its other two columns: `pattern` is the include glob that decides
+    which files under a root the collection indexes, and `ignore_patterns` the JSON
+    array it excludes. A guard that read only `name` and `path` could not see the
+    difference between the vault-wide `subliminal` root and the 4 documents that
+    root actually serves, which is the blindness #4575 is about: the mirror and the
+    instrument had to gain the rule together or the pair would agree on a pool
+    neither can defend. A `store_collections` predating those columns answers the
+    fallback select with two NULLs, and both sides then read qmd's own default.
     Raises rather than returning `[]` when the file or the table is missing: an
     empty list would assert that nothing is deployed and every label in the corpus
     would read unsearchable, which is the same fabrication
@@ -1623,11 +1696,18 @@ def _deployed_collections(index_path: Path = None) -> list[dict]:
         else Path.home() / ".cache" / "qmd" / "index.sqlite"
     con = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
+        cols = {r[1] for r in con.execute("pragma table_info(store_collections)")}
         rows = con.execute(
-            "select name, path from store_collections order by name").fetchall()
+            "select name, path, pattern, ignore_patterns from store_collections"
+            " order by name"
+            if {"pattern", "ignore_patterns"} <= cols
+            else "select name, path, NULL, NULL from store_collections order by name"
+        ).fetchall()
     finally:
         con.close()
-    return [{"name": str(n), "root": str(p)} for n, p in rows]
+    return [{"name": str(n), "root": str(p),
+             "pattern": str(pat) if pat else GUARD_QMD_DEFAULT_GLOB,
+             "ignore": _guard_ignore_list(ign)} for n, p, pat, ign in rows]
 
 
 def _served_paths(collections: list[dict]) -> list[str]:
@@ -1649,8 +1729,10 @@ def _served_paths(collections: list[dict]) -> list[str]:
         root = Path(str(coll.get("root") or coll.get("path") or "")).expanduser()
         if not name or not root.is_dir():
             continue
-        pool.extend(_walk_normed(root, name + "/"))
-    return pool
+        pool.extend(_walk_normed(root, name + "/",
+                                 coll.get("pattern") or GUARD_QMD_DEFAULT_GLOB,
+                                 coll.get("ignore") or ()))
+    return sorted(pool)
 
 
 def _label_returnable(label: str, pool: list[str]) -> bool:
@@ -1669,17 +1751,61 @@ def _label_returnable(label: str, pool: list[str]) -> bool:
     return any(want in n for n in pool)
 
 
-def _walk_normed(root: Path, prefix: str = "") -> list[str]:
-    """Every path under `root` (files and dirs), `prefix` + root-relative,
-    normalised, minus any dot-prefixed component — qmd's own indexing rule."""
-    out = []
+#: Passed as `pattern` by a caller asking "does a path like this exist under here"
+#: rather than "would qmd index it": no include pattern, and directories and
+#: non-markdown files included, exactly as the bare `rglob("*")` did. The two
+#: existence walks in `_doc_label_satisfiability_report` keep that; only a
+#: collection's own served walk asks the qmd question.
+NO_INCLUDE_PATTERN = object()
+
+
+def _walk_normed(root: Path, prefix: str = "", pattern: str | None = NO_INCLUDE_PATTERN,
+                 ignore=()) -> list[str]:
+    """Every path under `root`, `prefix` + root-relative and normalised, minus any
+    dot-prefixed component — qmd's own indexing rule, applied to the whole path.
+
+    Two readings, and the caller says which. With `pattern` left at
+    `NO_INCLUDE_PATTERN` this is what it always was: the whole tree, directories and
+    non-markdown files included, which is the question "does a path like this exist
+    here". Given a pattern it becomes what qmd indexes at that root: `**/*.md` spans
+    directories and `*.md` does not, an ignore drops what it names, and only documents
+    are yielded, because a pattern describes documents — the directory entries a bare
+    `rglob("*")` handed over (`subliminal/plans`) are not returnable either.
+
+    #4575 is why the served side asks the second question. Walking the root instead
+    of serving the pattern made every nested vault file look returnable through the
+    vault-wide `subliminal` collection, so no gold label under a subdirectory could
+    ever be reported unreachable and the guard could only print zero.
+    """
+    out: list[str] = []
     if not root.is_dir():
         return out
-    for p in root.rglob("*"):
-        rel = p.relative_to(root)
-        if any(part.startswith(".") for part in rel.parts):
+    filtered = pattern is not NO_INCLUDE_PATTERN
+    include = _guard_glob_regex(str(pattern or GUARD_QMD_DEFAULT_GLOB)) if filtered \
+        else None
+    ignores = [g for g in (_guard_glob_regex(str(g)) for g in ignore) if g is not None]
+    stack = [root]
+    while stack:
+        here = stack.pop()
+        try:
+            entries = list(here.iterdir())
+        except OSError:
             continue
-        out.append(_doc_norm(prefix + str(rel)))
+        for entry in entries:
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                stack.append(entry)
+                if not filtered:
+                    out.append(_doc_norm(prefix + "/".join(entry.relative_to(root).parts)))
+                continue
+            posix = "/".join(entry.relative_to(root).parts)
+            if filtered:
+                if include is not None and not include.fullmatch(posix):
+                    continue
+                if any(g.fullmatch(posix) for g in ignores):
+                    continue
+            out.append(_doc_norm(prefix + posix))
     return out
 
 
@@ -2379,6 +2505,28 @@ def test_a_label_that_resolves_but_no_deployed_collection_covers_it_is_unsearcha
             "root": "checkout"} in rep2["satisfied_by"], rep2["satisfied_by"]
 
 
+#: Gold `(query id, expect_docs label)` pairs that no deployed qmd collection can
+#: return, declared here rather than asserted away, because the finding is the
+#: deliverable and the gold set is not this round's to edit.
+#:
+#: #4575 is what made them visible: `indexed_paths` walked each collection's ROOT with
+#: `rglob("*")` and ignored its include pattern, so the vault-wide `subliminal`
+#: collection — root `~/obsidian`, pattern `*.md`, 4 documents indexed — contributed
+#: 11,282 nested paths and every vault file looked returnable. With the pattern
+#: honoured, these two labels under `plans/` are named, which is the item's acceptance
+#: check. Both were added to the corpus by `63914918` (#4357/#4551).
+#:
+#: The gap is owned by #4276, which indexes `plans/` into qmd. The set may only SHRINK,
+#: and `test_no_gold_query_scores_a_doc_leg_no_deployed_collection_can_answer` reddens
+#: if either label becomes returnable, so a tolerance cannot quietly outlive the hole
+#: it tolerates. Each entry costs its query a permanent 0.00 on the document leg: 2 of
+#: 81 denominators, 0.017 of `doc_hit_rate` on 2026-11-25.
+GOLD_LABELS_AWAITING_A_COLLECTION = frozenset({
+    ("collection-overlap-rung-handoff", "plans/handoff-2180-collection-overlap.md"),
+    ("browser-upload-files-spec", "plans/browser-upload-files.md"),
+})
+
+
 def test_the_committed_corpus_reports_three_states_with_no_dead_label(tmp_path):
     """Clause 1's committed-corpus half: with the live collection list the corpus
     still has NO dead label, and every label lands in exactly one of the three
@@ -2452,10 +2600,14 @@ def test_the_committed_corpus_reports_three_states_with_no_dead_label(tmp_path):
     # instance of the condition: those queries are retired, so that set is empty by
     # construction and an `<=`-style inclusion over it would have gone red for
     # doing the work and green for not reading the file.
-    unsearched = {d["query"] for d in rep["unsearchable"]}
+    # The two #4575 labels are declared, so the assertion below is about anything
+    # ELSE. Tolerating them by name keeps #1662's rule live for the other 84 queries:
+    # a label nobody has ruled on yet still reddens here.
+    unsearched = ({(d["query"], d["label"]) for d in rep["unsearchable"]}
+                  - GOLD_LABELS_AWAITING_A_COLLECTION)
     assert unsearched == set(), (
         f"{len(unsearched)} gold queries score a doc leg no deployed collection can "
-        f"answer: {sorted(states['unsearchable'])}. #1662 retired the five that were "
+        f"answer: {sorted(unsearched)}. #1662 retired the five that were "
         "here; a new one is either the same bug again or the collection still is not "
         "deployed, and both are a finding, not a corpus to keep")
     assert unsearched <= {str(s.get("id")) for s in
@@ -2550,8 +2702,14 @@ def test_the_guard_and_the_eval_agree_on_which_collections_are_deployed(tmp_path
     con.close()
 
     here = _deployed_collections(index_path=db)
-    assert here == [{"name": "knowledge", "root": str(vault / "knowledge")},
-                    {"name": "subliminal", "root": str(vault)}], here
+    # Each row carries the include pattern and the ignore list beside name and root.
+    # This fixture's table predates qmd's columns — it has `include`, not `pattern` —
+    # so both sides must reach qmd's own default `**/*.md`, which is clause 4's
+    # fallback rule read through the sqlite seam rather than through a dict literal.
+    assert here == [{"name": "knowledge", "root": str(vault / "knowledge"),
+                     "pattern": "**/*.md", "ignore": []},
+                    {"name": "subliminal", "root": str(vault),
+                     "pattern": "**/*.md", "ignore": []}], here
     # The eval reaches the index through its owner, `app.doc_corpus` — never through
     # sqlite of its own, which is what
     # `test_no_script_under_eval_opens_the_knowledge_store_file` exists to keep true.
@@ -2710,12 +2868,23 @@ def test_no_gold_query_scores_a_doc_leg_no_deployed_collection_can_answer():
                for s in specs]
     assert records, f"{CORPUS} carries no queries to check"
     bad = ev.gold_docs_unreturnable(records, colls)
-    assert bad == [], (
-        f"{len(bad)} gold labels no deployed collection can return: "
-        + "; ".join(f"{b['query']} <- {b['label']}" for b in bad)
+    found = {(b["query"], b["label"]) for b in bad}
+    # Only the two #4575 labels are allowed, and only while the hole is open: an
+    # unexpected label is a permanent doc miss, and one that has STOPPED being a miss
+    # is a tolerance that should have been deleted when #4276 indexed `plans/`.
+    assert found - GOLD_LABELS_AWAITING_A_COLLECTION == set(), (
+        f"{len(found - GOLD_LABELS_AWAITING_A_COLLECTION)} gold labels no deployed "
+        "collection can return and nobody has ruled on: "
+        + "; ".join(f"{q} <- {l}"
+                    for q, l in sorted(found - GOLD_LABELS_AWAITING_A_COLLECTION))
         + ". Each is a permanent doc miss: the query scores 0 on the document leg "
         "however good retrieval gets, so it drags doc_hit_rate, doc_recall_avg, "
         "mrr_doc and ndcg10 as a standing penalty and a trend can never clear it")
+    assert GOLD_LABELS_AWAITING_A_COLLECTION - found == set(), (
+        f"{sorted(GOLD_LABELS_AWAITING_A_COLLECTION - found)} is declared awaiting a "
+        "collection but the deployed set can return it now: delete the tolerance. "
+        "#4276 indexing `plans/` is the event that reddens this, and a stale "
+        "tolerance is how a guard starts reading zero again")
 
     # The check must be able to fail. `[]` is also what a rule that matches nothing,
     # or a pool walk that found no paths, prints — so the same call is given one
@@ -2733,7 +2902,12 @@ def test_no_gold_query_scores_a_doc_leg_no_deployed_collection_can_answer():
                                        for d in r["expected"]["docs"])]
         + [{"id": "injected-checkout-label",
             "expected": {"docs": ["lloyd-architecture/harness.md"]}}], colls_without)
-    assert [n["query"] for n in named] == ["injected-checkout-label"], named
+    # The two declared #4575 labels ride along in those records — `plans/` is served
+    # by no deployment, `lloyd-architecture` in it or not — so the control is about
+    # the injected row alone.
+    assert ({(n["query"], n["label"]) for n in named}
+            - GOLD_LABELS_AWAITING_A_COLLECTION) == {
+                ("injected-checkout-label", "lloyd-architecture/harness.md")}, named
 
     # ...and one it must not: a label copied straight out of the live pool. Without
     # this the injection above could be satisfied by a predicate that calls everything
@@ -4933,7 +5107,7 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: did not. The anchor names `d0eed5d6`, the commit carrying the leg, stamped in the commit
 #: beside it because a commit cannot carry its own name; that object holds the bytes this
 #: tree has, and the projection compares the file against itself by that name.
-RUN_EVAL_CODE_ANCHOR = "d0eed5d6"
+RUN_EVAL_CODE_ANCHOR = "f7e36cb8"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
@@ -5474,3 +5648,338 @@ def test_the_episodic_floor_leg_legalises_no_gold_label():
     assert _label_root(leg_label) == "sessions"
     assert _labels_the_recall_cannot_request({f"floor-leg -> {leg_label}"}, named) == [
         ("floor-leg", leg_label)]
+
+
+# --------------------------------------------------------------------------------
+# #4575 — a returnability pool is a set of SERVED paths, not a walk of every root.
+#
+# `indexed_paths` built the pool with `root.rglob("*")` and never looked at the
+# collection's include pattern, so the deployed `subliminal` collection — root
+# `~/obsidian`, pattern `*.md`, 4 documents indexed — contributed 11,282 pool paths on
+# 2026-11-25 and every nested vault file looked returnable. The guard therefore could
+# not report an unreachable gold label anywhere under a vault subdirectory: it read 0
+# for the whole tree, the same blindness #1662 hit from the other side.
+#
+# Six nodes: the two pattern rules on a fixture (clauses 1 and 2), the owner's read of
+# the two columns (clause 3), the fallback that keeps #1599's false-alarm trap shut
+# (clause 4), the mirror walking the same rule (clause 5), and the guard-level
+# acceptance — the pool is what the index returns, and the two `plans/*` labels are
+# named on the archived artifact that printed zero.
+# --------------------------------------------------------------------------------
+
+
+def _served_fixture(tmp_path: Path) -> Path:
+    """A root holding one top-level note, one nested note, and two ignore targets.
+
+    `top.md` / `sub/nested.md` is the pair clause 1 is about; `agents/inner.md` and
+    `templates/page.md` are the two paths the deployed `subliminal` collection ignores,
+    so a pattern that matches them at all still has to be filtered by the ignore list.
+    """
+    root = tmp_path / "vaultroot"
+    for rel in ("top.md", "sub/nested.md", "agents/inner.md", "templates/page.md",
+                "notes/deep/thing.md"):
+        f = root / rel
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("# " + rel + "\n")
+    (root / ".hidden.md").write_text("# ignored by qmd's dot rule\n")
+    return root
+
+
+def test_a_collection_declaring_a_root_level_pattern_contributes_only_top_level_files(tmp_path):
+    """Clause 1: pattern `*.md` is an include at the root, not a recursive filter.
+
+    The deployed shape, measured 2026-11-25: `select name, path, pattern from
+    store_collections` gives `subliminal` root `/home/alansrobotlab/obsidian` with
+    pattern `*.md`, and `select count(*) from documents where collection='subliminal'`
+    gives 4 — the four notes sitting at the vault root. The pool said 11,282. Four
+    collections are narrower than qmd's default (`subliminal`, `autonomy`,
+    `lloyd-architecture`, and `autonomy-runs` with `*/run_*.md`), so the guard was
+    blind for all four, not only for the vault-wide one.
+    """
+    import eval.run_eval as ev
+    from app import doc_corpus
+
+    root = _served_fixture(tmp_path)
+    narrow = {"name": "flat", "root": str(root), "pattern": "*.md", "ignore": []}
+    broad = {"name": "deep", "root": str(root), "pattern": "**/*.md", "ignore": []}
+
+    for pool_fn in (ev.indexed_paths, _served_paths):
+        pool = pool_fn([narrow])
+        assert "flat/top.md" in pool, pool
+        assert "flat/sub/nested.md" not in pool, pool
+        assert "flat/notes/deep/thing.md" not in pool, pool
+        assert all(not p.startswith("flat/.") for p in pool), pool
+        assert len(pool) == 1, f"`*.md` over that root indexes exactly one file: {pool}"
+
+        pool = pool_fn([broad])
+        assert {"deep/top.md", "deep/sub/nested.md",
+                "deep/notes/deep/thing.md"} <= set(pool), pool
+        # A directory is not a document: honouring an include pattern also drops the
+        # entries `rglob("*")` handed over that no qmd result could ever name.
+        assert "deep/sub" not in pool and "deep/notes" not in pool, pool
+        # Five `.md` files in the fixture, plus nothing else: the dot file and the
+        # directories are out, and this collection declares no ignores.
+        assert len(pool) == 5, pool
+
+    # The two readings agree on the same fixture, which is what makes the live-pool
+    # equality above worth anything.
+    assert _served_paths([narrow, broad]) == sorted(ev.indexed_paths([narrow, broad]))
+    # An empty or absent pattern is clause 4's question, not this one; asserted apart
+    # so a change to the fallback cannot quietly become a change to this clause.
+    assert doc_corpus.QMD_DEFAULT_GLOB == "**/*.md"
+
+
+def test_a_collections_ignore_patterns_drop_matching_paths_from_its_contribution(tmp_path):
+    """Clause 2: `ignore_patterns` removes what it names, and is anchored at the root.
+
+    Anchoring is the half that can be got wrong in the permissive direction: matching
+    an ignore with a substring or an unanchored search would drop `x/agents/y.md` too,
+    which qmd keeps. The deployed value is `["agents/**","templates/**"]` on
+    `subliminal` (`select ignore_patterns from store_collections where
+    name='subliminal'`, 2026-11-25), so both spellings of the rule are live on this
+    box and only the anchored one matches the index.
+    """
+    import eval.run_eval as ev
+
+    root = _served_fixture(tmp_path)
+    coll = {"name": "subliminal", "root": str(root), "pattern": "**/*.md",
+            "ignore": ["agents/**", "templates/**"]}
+    for pool_fn in (ev.indexed_paths, _served_paths):
+        pool = pool_fn([coll])
+        assert not any("/agents/" in p for p in pool), pool
+        assert not any("/templates/" in p for p in pool), pool
+        assert {"subliminal/top.md", "subliminal/sub/nested.md",
+                "subliminal/notes/deep/thing.md"} == set(pool), pool
+
+    # An ignore that is anchored deeper must not fire at the root either.
+    deep_only = {"name": "subliminal", "root": str(root), "pattern": "**/*.md",
+                 "ignore": ["sub/agents/**"]}
+    pool = ev.indexed_paths([deep_only])
+    assert "subliminal/agents/inner.md" in pool, pool
+
+    # Malformed JSON in the column reads as NO ignores, never as a blanket exclude:
+    # the safe direction for a returnability guard, whose job is to refuse to call a
+    # label unreachable on a reading it cannot defend.
+    broken = {"name": "subliminal", "root": str(root), "pattern": "**/*.md",
+              "ignore": _guard_ignore_list('["agents/**"')}
+    assert "subliminal/agents/inner.md" in ev.indexed_paths([broken])
+
+
+def test_the_owner_of_the_collection_read_returns_pattern_and_ignore_and_none_not_empty(tmp_path):
+    """Clause 3: `deployed_collections` carries both columns, and None is not [].
+
+    `None` is the three-state answer #696 established and #1599 depends on: an index
+    that will not open is not a deployment with no collections, and `[]` would make
+    every gold label in the corpus read unreturnable — the false-positive direction
+    #1599's first draft actually shipped (12 of 86 called unreturnable where 5 were).
+    """
+    from app import doc_corpus
+    import sqlite3
+
+    root = _served_fixture(tmp_path)
+    db = tmp_path / "qmd-shaped.sqlite"
+    con = sqlite3.connect(str(db))
+    con.execute("""create table store_collections (
+                       name TEXT PRIMARY KEY,
+                       path TEXT NOT NULL,
+                       pattern TEXT NOT NULL DEFAULT '**/*.md',
+                       ignore_patterns TEXT,
+                       include_by_default INTEGER DEFAULT 1)""")
+    con.executemany("insert into store_collections (name, path, pattern, ignore_patterns)"
+                    " values (?,?,?,?)",
+                    [("subliminal", str(root), "*.md", '["agents/**","templates/**"]'),
+                     ("knowledge", str(root / "notes"), "**/*.md", None),
+                     ("broken", str(root), "**/*.md", "not json")])
+    con.commit()
+    con.close()
+
+    got = {c["name"]: c for c in doc_corpus.deployed_collections(index_path=db)}
+    assert got["subliminal"] == {
+        "name": "subliminal", "root": str(root), "pattern": "*.md",
+        "ignore": ["agents/**", "templates/**"]}, got["subliminal"]
+    # A pattern the deployment never overrode comes back as qmd's column default, the
+    # same string the fallback for a dict with no pattern key at all uses — clause 4.
+    assert got["knowledge"]["pattern"] == doc_corpus.QMD_DEFAULT_GLOB == "**/*.md"
+    assert got["knowledge"]["ignore"] == []
+    assert got["broken"]["ignore"] == [], "unreadable JSON is no ignore, not a blanket exclude"
+
+    # None, never [], for the two ways an index fails to answer.
+    assert doc_corpus.deployed_collections(index_path=tmp_path / "absent.sqlite") is None
+    garbage = tmp_path / "not-a-db.sqlite"
+    garbage.write_bytes(b"definitely not sqlite")
+    assert doc_corpus.deployed_collections(index_path=garbage) is None
+    # And a store with the table missing entirely, which is a store with no
+    # collections published rather than an empty deployment.
+    empty = tmp_path / "no-table.sqlite"
+    con = sqlite3.connect(str(empty))
+    con.execute("create table other (x int)")
+    con.commit()
+    con.close()
+    assert doc_corpus.deployed_collections(index_path=empty) is None
+
+
+def test_a_collection_with_no_declared_pattern_still_serves_nested_labels(tmp_path):
+    """Clause 4: a collection dict with no pattern key falls back to `**/*.md`.
+
+    The label is the shape this file already holds at :2527 and :2439 —
+    `projects/lloyd/architecture/qmd.md`, reachable only through a whole-vault
+    collection's NESTED walk, which is exactly what a fallback of `*.md` would cut.
+    Every fixture in this file hands collections as `{name, root}` with no pattern key
+    (#1599's own set, which the shipped reader still answers with qmd's default), so a
+    nested label flipping to `unsearchable` over such a fixture is #1599's original
+    false-positive direction reborn — the pass that called 12 of 86 labels unreturnable
+    where 5 are.
+
+    Asserted on a fixture vault rather than the live one so the two arms differ only by
+    the key under test: the same collection, the same tree, the same label.
+    """
+    import eval.run_eval as ev
+    from app import doc_corpus
+
+    vault = tmp_path / "vault"
+    note = vault / "projects" / "lloyd" / "architecture" / "qmd.md"
+    note.parent.mkdir(parents=True)
+    note.write_text("# qmd\n")
+    (vault / "top.md").write_text("# top\n")
+    corpus = tmp_path / "corpus.yaml"
+    corpus.write_text(
+        "queries:\n"
+        "  - id: nested-only-label\n"
+        "    query: qmd\n"
+        "    expect_docs:\n"
+        "      - 'projects/lloyd/architecture/qmd.md'\n")
+
+    bare = {"name": "subliminal", "root": str(vault)}
+    assert "pattern" not in bare, "the fixture must declare nothing to test a fallback"
+    rep = _doc_label_satisfiability_report(specs_path=corpus, vault_root=vault,
+                                           checkout_root=tmp_path / "empty-checkout",
+                                           collections=[bare])
+    assert [(d["query"], d["label"]) for d in rep["satisfied_by"]] == [
+        ("nested-only-label", "projects/lloyd/architecture/qmd.md")], rep
+    assert rep["unsearchable"] == [] and rep["dead"] == [], rep
+
+    # The same tree, the same label, and a pattern that says root-level only: this is
+    # the arm that proves the assertion above is about the fallback and not about a
+    # walk that ignores the pattern entirely.
+    narrow = {"name": "subliminal", "root": str(vault), "pattern": "*.md"}
+    rep = _doc_label_satisfiability_report(specs_path=corpus, vault_root=vault,
+                                           checkout_root=tmp_path / "empty-checkout",
+                                           collections=[narrow])
+    assert [d["query"] for d in rep["unsearchable"]] == ["nested-only-label"], rep
+
+    # And both copies agree on the fallback without going through the report at all.
+    assert ev._label_returnable("projects/lloyd/architecture/qmd.md",
+                                ev.indexed_paths([bare]))
+    assert _label_returnable("projects/lloyd/architecture/qmd.md", _served_paths([bare]))
+    assert doc_corpus.QMD_DEFAULT_GLOB == GUARD_QMD_DEFAULT_GLOB == "**/*.md"
+
+
+def test_the_guards_mirror_walk_honours_the_same_rule_the_instrument_walks(tmp_path):
+    """Clause 5: the private copy walks pattern and ignore identically, live included.
+
+    The mirror exists so the guard cannot be green by agreeing with the code it guards
+    (:1567-1573), which means it now carries the same rule twice and can drift again.
+    Two checks: identical pools on a fixture with every shape in it (root-level
+    include, recursive include, an ignore, a dot directory, a non-markdown file), and
+    identical pools over the DEPLOYED collections, which is the case that matters
+    because it is the pool the artifact prints a verdict from.
+    """
+    import eval.run_eval as ev
+
+    root = _served_fixture(tmp_path)
+    (root / "notes" / "raw.txt").write_text("not a document\n")
+    (root / ".archived").mkdir()
+    (root / ".archived" / "old.md").write_text("not indexable\n")
+    colls = [
+        {"name": "flat", "root": str(root), "pattern": "*.md", "ignore": []},
+        {"name": "deep", "root": str(root), "pattern": "**/*.md",
+         "ignore": ["agents/**"]},
+        {"name": "runs", "root": str(root), "pattern": "*/run_*.md", "ignore": []},
+        {"name": "bare", "root": str(root)},
+    ]
+    (root / "run_top.md").write_text("# not matched by */run_*.md\n")
+    (root / "sub" / "run_7.md").write_text("# matched by */run_*.md\n")
+
+    assert _served_paths(colls) == sorted(ev.indexed_paths(colls)), (
+        "the guard's walk and the instrument's walk disagree about the same fixture, "
+        "so one of them is not honouring pattern or ignore")
+    pool = _served_paths(colls)
+    assert "runs/sub/run_7.md" in pool, pool
+    assert "runs/run_top.md" not in pool, "`*/run_*.md` is one directory deep"
+    assert "deep/top.md" in pool and "deep/agents/inner.md" not in pool, pool
+    assert "flat/top.md" in pool and "flat/sub/nested.md" not in pool, pool
+    assert not any("/.archived/" in p or p.split("/", 1)[1].startswith(".")
+                   for p in pool), pool
+    assert not any(p.endswith(".txt") for p in pool), pool
+    # `bare` declares no pattern and therefore reaches the nested files: the fallback,
+    # walked by both copies.
+    assert "bare/sub/nested.md" in pool, pool
+
+    colls_live = _deployed_collections()
+    assert _served_paths(colls_live) == sorted(ev.indexed_paths(colls_live)), (
+        "the guard and the eval disagree about the deployed pool, so they can disagree "
+        "about the corpus on the same night — the same failure the collection-list "
+        "parity node refuses, one function later")
+
+
+def test_the_honoured_pool_is_what_the_live_index_can_return():
+    """#4575's mechanism, guard level: honouring the two columns reproduces the
+    deployment exactly, collection by collection, instead of approximating it.
+
+    Before the fix the pool held 24,139 paths against the index's 11,383 on
+    2026-11-25, 11,282 of them under `subliminal/` against that collection's 4
+    documents. After it the two readings agree per collection, which is the only
+    claim that makes the guard's zero mean anything: a pool that cannot be counted
+    against the store it claims to model is a pool that prints whatever it likes.
+
+    The index grows as notes are written, so both readings are taken inside one
+    second of each other and the per-collection loop is the real teeth; the total is
+    asserted apart so a double-pooled collection name cannot hide behind per-collection
+    counts that were taken a moment earlier.
+    """
+    import eval.run_eval as ev
+    import sqlite3
+    from app import doc_corpus
+
+    colls = doc_corpus.deployed_collections()
+    if colls is None:
+        pytest.skip("no deployed collection list could be read. The pool's denominator "
+                    "is a fact about the deployment, and this node's claim is that it "
+                    "equals the store's; with no store to read there is no claim here. "
+                    "`_running_in_a_round_worktree` is not the reason: the index is a "
+                    "HOME path, not a checkout path, so this skips only when qmd is "
+                    "genuinely absent from the box running the suite")
+    pool = ev.indexed_paths(colls)
+    pooled: dict[str, int] = {}
+    for path in pool:
+        head = path.split("/", 1)[0]
+        pooled[head] = pooled.get(head, 0) + 1
+    # The pool is name-normalised (`autonomy-runs` pools as `autonomy_runs`), and the
+    # index stores the raw name, so the two sides are compared in one namespace.
+    indexed_keys = None
+
+    con = sqlite3.connect(f"file:{doc_corpus.LIVE_INDEX}?mode=ro", uri=True,
+                          timeout=10)
+    try:
+        indexed = {str(r[0]): int(r[1]) for r in con.execute(
+            "select collection, count(*) from documents group by collection")}
+        total = int(con.execute("select count(*) from documents").fetchone()[0])
+    finally:
+        con.close()
+
+    assert total > 5000, f"a {total}-document index is not this deployment"
+    indexed_keys = {_doc_norm(k): k for k in indexed}
+    assert len(indexed_keys) == len(indexed), (
+        f"two collection names normalise to one key: {sorted(indexed)}")
+    for key, name in sorted(indexed_keys.items()):
+        assert pooled.get(key, 0) == indexed[name], (
+            f"collection {name!r}: the walk contributes {pooled.get(key, 0)} paths and "
+            f"the index holds {indexed[name]} documents. One of the two rules is not "
+            "qmd's, and the guard's verdict is worth only as much as this equality")
+    assert sum(pooled.values()) == total, (
+        f"pool {sum(pooled.values())} against the index's {total} with every "
+        "per-collection count passing: a collection is pooled under two names, or the "
+        "index moved between the two reads and this node cannot tell which")
+    assert pooled.get("subliminal", 0) == indexed.get("subliminal", 0) <= 8, (
+        "the vault-wide collection is what the whole item is about; if it is contributing "
+        "its root's whole tree again, `*.md` stopped being honoured")
