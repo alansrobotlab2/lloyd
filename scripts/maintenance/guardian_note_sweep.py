@@ -63,6 +63,29 @@ root per pass (`tripwire_reader=`), because the data root is a 705,803-file walk
 stamp names the halt flag as a second measurement rather than assuming the halt was lifted:
 the tree measuring whole is not the same fact as nobody holding a pause.
 
+The fifth key, and why the readout needs one rather than the tripwire's (#4389)
+------------------------------------------------------------------------
+`Guardian._snapshot_age_readout` (#4360) is a second claim over one incident: while the
+data tripwire marker stands, `snapshot-data.sh` refuses to take a copy, so the store ages
+past `policy.SNAPSHOT_MAX_AGE_SECONDS` by design and nothing counts the window except this
+readout. #4360's level ruling keeps it on the daily-note surface at `error`, which makes
+the note the only durable record of the exposure — and its one retraction is
+`_retract_snapshot_age_readout`'s `resolve`, which scans `notify.DAILY_SCAN_DAYS = 3`
+notes. Because `_alert_file` keeps no level comparison (`notify.py:663-676`: "There is no
+level comparison anywhere in this write path"), an `error` of that title can be buried in
+ALERT.md's single slot, and then even the three-day route is gone. So an aged block of
+this title needs a witness of its own or it stays a standing instruction forever.
+
+Its own, and NOT `TRIP_ALERT_TITLES`: `tripwire_refutes` answers on
+`guardian.tripwire_is_clear`, which is marker absent plus the tree evaluating clean and
+has no snapshot-store age arm whatsoever. Keying this title there would date a block whose
+store is still past the bound, in the wording of a tree walk. The witness here therefore
+asks the two questions the readout itself asks — `datawatch.snapshot_report` over
+`policy.DATA_SNAPSHOTS` at `policy.SNAPSHOT_MAX_AGE_SECONDS`, and the data marker's
+absence from `DataWatch.tripped()` — and stamps only when both answer clear, quoting the
+report's own sentence rather than rendering a second age. It dates and never clears, like
+the third and fourth.
+
 The placement audit, and why fixing the writes was not enough
 -------------------------------------------------------------
 `0b0789a4` (#3993) fixed where a retraction is WRITTEN. It could not fix the ones already
@@ -84,11 +107,13 @@ nothing. It never touches a block whose subject no tool can answer for: a `Rolle
 notice and a self-test notice have no live witness at all, and a disk figure with no probe
 behind it is not refuted by a probe measuring a different filesystem — each refuter is bound
 to the family that owns its reading, and a block whose family no witness speaks for comes back
-byte-identical. Four families are spoken for: a supervisor-state block by the live RUNNING
+byte-identical. Five families are spoken for: a supervisor-state block by the live RUNNING
 set, an inode block by `tmpwatch.measure`'s own fraction, a tripwire block by the
-guardian's `tripwire_is_clear` over the watch that raised it, and a vault-snapshot block by
-`vaultwatch.snapshot_age_state` — and each answers only the question its own reading asks,
-so the third and fourth date a block and never clear one.
+guardian's `tripwire_is_clear` over the watch that raised it, a vault-snapshot block by
+`vaultwatch.snapshot_age_state`, and the data snapshot layer's exposure under a standing
+tripwire by `datawatch.snapshot_report` read together with that marker's absence — and each
+answers only the question its own reading asks, so the third, fourth and fifth date a
+block and never clear one.
 And it does not delete or reword the body: a note that recorded a real outage keeps the
 record; what stops is the standing instruction below it.
 """
@@ -447,6 +472,167 @@ def snapshot_stamp(reading: "SnapshotReading | None", day: str) -> "str | None":
                                         scan=notify.DAILY_SCAN_DAYS)
 
 
+# ── the fifth witness: the data snapshot store while the data tripwire stands (#4389) ─
+
+#: The one title this witness speaks for: #4360's readout,
+#: `Guardian._snapshot_age_readout`, which is the only thing that ever measured how long
+#: the data snapshot layer stayed down under a standing tripwire. It is deliberately NOT
+#: added to `TRIP_ALERT_TITLES`, even though its body names the same incident:
+#: `tripwire_refutes` fires on `guardian.tripwire_is_clear`'s answer, and that answer is
+#: marker absent plus the tree evaluating clean against the watch's baseline — it has no
+#: snapshot-store age arm at all, so a title added there would earn a dating while the
+#: store is still past `policy.SNAPSHOT_MAX_AGE_SECONDS`, in the wording of a tree walk
+#: rather than of the reading this alarm was built from. A second claim over one incident
+#: needs its own witness, which is the same reason the readout has its own title.
+DATA_SNAPSHOT_AGE_TITLE = G.DATA_TRIP_SNAPSHOT_AGE_TITLE
+
+#: The reading's OWN sentence again, for the reason `SNAPSHOT_REFUTED_LINE` gives it:
+#: `datawatch.snapshot_report` already names the store, the newest snapshot's stamp and the
+#: age in the unit a person reads, and it is the same call `check_data` weighs against
+#: `policy.SNAPSHOT_MAX_AGE_SECONDS` on every poll. A stamp that rendered its own age would
+#: be a second definition of an age that can drift from the one the alarm prints.
+DATA_SNAPSHOT_REFUTED_LINE = (
+    "{prefix} {day}: `datawatch.snapshot_report` reads {quoted}, with the data tripwire "
+    "marker absent — the first is the reading `Guardian.check_data` weighs against the bound "
+    "this alarm names and `Guardian._snapshot_age_readout` raises it from, and the second is "
+    "the fact `Guardian._retract_snapshot_age_readout` acts on when it closes a live readout, "
+    "so the restore instructions above are stale. Both were asked because the marker is the "
+    "rail: `scripts/backup/snapshot-data.sh` refuses to take a copy while it stands, so a "
+    "fresh stamp proves nothing about the second layer until that rail is down, which is why "
+    "this witness reads the store and the marker instead of the directory alone. This is a "
+    "dating from today's "
+    "reading and not an observed recovery: it does not assert that the promotion halt or "
+    "the worker pause was lifted, which is still whoever holds it. The alarm above records "
+    "what was true when it fired and is not a standing instruction; this block sits outside "
+    "the `notify.DAILY_SCAN_DAYS = {scan}` daily notes `Notifier.resolve` scans back, and a "
+    "title that lost ALERT.md's single slot has no guardian retraction path at all. If this "
+    "line is wrong then the store is stale again or the marker stands as of now: re-run "
+    "`python3 agent-services/guardian/datawatch.py snapshot-age` before acting on the text "
+    "above.")
+
+
+class DataSnapshotReading(NamedTuple):
+    """The data snapshot store, as the readout's own probe read it, plus the rail's state.
+
+    `fresh` and `marker_absent` are carried separately and NOT folded into one boolean,
+    exactly as the guardian keeps them apart: while the marker stands the snapshot script
+    refuses, so a fresh directory under a standing marker is the ALARM and not its
+    refutation. `text` is that probe's own sentence, quoted into the stamp.
+    """
+    store: str               # the directory measured (`policy.DATA_SNAPSHOTS`)
+    fresh: bool              # inside `policy.SNAPSHOT_MAX_AGE_SECONDS`
+    marker_absent: bool      # the data tripwire marker is gone (unreadable is NOT gone)
+    max_age: float           # the bound that age was weighed against, in seconds
+    text: str                # the probe's own sentence, quoted into the stamp
+
+    @property
+    def clear(self) -> bool:
+        """Both halves, the way the readout's own retraction asks them."""
+        return bool(self.fresh and self.marker_absent)
+
+
+def data_trip_marker(*, gdir: Path | None = None) -> "dict | None":
+    """The data tripwire marker, as the watch that raises the data alarm reads it.
+
+    `DataWatch.tripped()` is the guardian's read and the reason this witness does not
+    invent one: it answers None only when there is no marker, and answers
+    `{"reason": "unreadable marker"}` for one that exists but does not parse, so an
+    incident this process cannot read is never counted as a closed one. Constructing the
+    watch loads its persisted baseline and walks nothing (`tripwire_watches`' own note), so
+    this costs one small file read on a pass that is already walking the corpus.
+    """
+    watch = datawatch.DataWatch(str(policy.DATA_ROOT), Path(gdir or policy.GUARDIAN_STATE))
+    return watch.tripped()
+
+
+def read_data_snapshot(*, store: str = policy.DATA_SNAPSHOTS,
+                       max_age: float = policy.SNAPSHOT_MAX_AGE_SECONDS,
+                       reporter=datawatch.snapshot_report,
+                       marker_reader=data_trip_marker) -> "DataSnapshotReading | None":
+    """Ask the probe that raises this readout what the data store is at, and whether the
+    rail is still up.
+
+    `reporter` and `marker_reader` are parameters for the standing reason in this module:
+    the gate runs where a test cannot steer the real snapshot directory to a chosen stamp
+    age, and cannot hand a test a marker it did not write. The defaults are the live reads,
+    so a hand-run has no seam to get wrong.
+
+    A probe that raises is a `RuntimeError` for `main` to turn into exit 2, the same shape
+    `read_snapshot` uses: an unread store is a read that did not happen, and defaulting it
+    to a fresh answer would date every block of this family in the vault off nothing. A
+    `marker_reader` that raises is refused for the same reason — half a pair is not a
+    clear. A report that is not the documented `(bool, str)` pair is refused rather than
+    defaulted, because a `fresh` read out of a malformed return is a value nobody measured.
+    """
+    try:
+        report = reporter(store, max_age)
+    except Exception as exc:                        # noqa: BLE001 — see read_running
+        raise RuntimeError(f"cannot read the data snapshot store {store}: "
+                           f"{type(exc).__name__}: {exc}") from exc
+    if (not isinstance(report, tuple) or len(report) != 2
+            or not isinstance(report[0], bool) or not isinstance(report[1], str)):
+        raise RuntimeError(f"`datawatch.snapshot_report` gave {report!r}, which is not the "
+                           "`(fresh, text)` pair this witness needs; nothing can be dated "
+                           "from it")
+    try:
+        marker = marker_reader()
+    except Exception as exc:                        # noqa: BLE001 — see read_running
+        raise RuntimeError("cannot read the data tripwire marker, so the rail this readout "
+                           f"is railed on cannot be ruled out: {type(exc).__name__}: {exc}"
+                           ) from exc
+    # The stamp and the age are NOT lifted out of the rendered sentence here. `snapshot_report`
+    # returns `(fresh, text)` and nothing else, and re-parsing its prose to put the same number
+    # back into the line is the second definition of an age this witness exists to avoid; the
+    # sentence itself is carried in `text` and quoted whole.
+    return DataSnapshotReading(store=str(store), fresh=bool(report[0]),
+                               marker_absent=(marker is None),
+                               max_age=float(max_age), text=str(report[1]))
+
+
+def data_snapshot_refutes(title: str,
+                          reading: "DataSnapshotReading | None") -> bool:
+    """Whether a data-snapshot reading refutes this block — the criterion, without the stamp.
+
+    Three ways this is False, each one a way the sweep could tell a lie:
+
+    * `reading is None` — no witness, so nothing is known. `main` passes None when the
+      probe refused; defaulting it would date this family from an absent reading.
+    * `DATA_SNAPSHOT_AGE_TITLE not in title` — the reading is of the data snapshot store
+      under the data rail, so it refutes the family that measured it and nothing else.
+      Without the binding it becomes a general "some store is recent today" pass.
+    * `not (reading.fresh and reading.marker_absent)` — a stale store is the readout's own
+      subject, and a standing marker is the reason the store is stale. Either one leaves
+      the block byte-identical, which is the case this witness exists to refuse.
+    """
+    return bool(reading and reading.fresh and reading.marker_absent
+                and DATA_SNAPSHOT_AGE_TITLE in title)
+
+
+def data_snapshot_stamp(reading: "DataSnapshotReading | None",
+                        day: str) -> "str | None":
+    """The stamp a refuted readout block earns, or None when the criterion does not hold.
+
+    Refused when the criterion does not hold — not merely when the line would be awkward —
+    because this is the function `date_note` asks, and a stamp emitted for a stale store
+    would be an all-clear for the incident the block is still describing. The quoted
+    sentence is re-checked rather than trusted, the way `snapshot_stamp` checks its own: it
+    arrives from a rendered string, and a probe whose wording changed must not be able to
+    put the word `cleared:` onto a historical block and have #2221's instrument count that
+    as a retraction that never happened.
+    """
+    if not data_snapshot_refutes(DATA_SNAPSHOT_AGE_TITLE, reading):
+        return None
+    if not reading.text:
+        return None
+    quoted = reading.text.strip().rstrip(".")
+    if (notify.DAILY_CLEARED_PREFIX in quoted or notify.DAILY_DATED_PREFIX in quoted
+            or "`" in quoted):
+        return None
+    return DATA_SNAPSHOT_REFUTED_LINE.format(prefix=notify.DAILY_DATED_PREFIX, day=day,
+                                             quoted=f"`{quoted}`",
+                                             scan=notify.DAILY_SCAN_DAYS)
+
+
 def already_sealed(body: str) -> bool:
     """Whether a retraction or a dating is already in the block.
 
@@ -529,40 +715,44 @@ def trip_stamp(reading: TripwireReading, day: str) -> str:
 def block_is_refuted(title: str, body: str, *, running: set[str],
                      fraction: float | None = None,
                      tripwire: "dict[str, TripwireReading] | None" = None,
-                     snapshot: "SnapshotReading | None" = None) -> bool:
+                     snapshot: "SnapshotReading | None" = None,
+                     data_snapshot: "DataSnapshotReading | None" = None) -> bool:
     """Whether any witness refutes this block. The one criterion the count and the write
     both consult: `count_refutations` is the CLI's "how many blocks does this pass change",
     and two definitions of "refuted" is how a report starts counting blocks that the writer
     then leaves alone — or the other way round, which is worse.
 
-    The four witnesses are disjoint by TITLE, which is what lets them OR together without
-    one block collecting four stamps: the first answers only a `name: STATE` line, the
+    The five witnesses are disjoint by TITLE, which is what lets them OR together without
+    one block collecting five stamps: the first answers only a `name: STATE` line, the
     second only `tmpwatch.ALERT_TITLE`, the third only the two titles in
-    `TRIP_ALERT_TITLES`, the fourth only `SNAPSHOT_ALERT_TITLE`. Each of the optional
-    readings defaults to None for the same reason — a pass that did not take a reading is
-    not a pass that read it healthy.
+    `TRIP_ALERT_TITLES`, the fourth only `SNAPSHOT_ALERT_TITLE`, the fifth only
+    `DATA_SNAPSHOT_AGE_TITLE`. Each of the optional readings defaults to None for the same
+    reason — a pass that did not take a reading is not a pass that read it healthy.
     """
     if already_sealed(body):
         return False
     return (bool(refutations(body, running)) or fraction_refutes(title, fraction)
-            or tripwire_refutes(title, tripwire) or snapshot_refutes(title, snapshot))
+            or tripwire_refutes(title, tripwire) or snapshot_refutes(title, snapshot)
+            or data_snapshot_refutes(title, data_snapshot))
 
 
 def count_refutations(text: str, running: set[str], fraction: float | None = None,
                       tripwire: "dict[str, TripwireReading] | None" = None,
-                      snapshot: "SnapshotReading | None" = None) -> int:
+                      snapshot: "SnapshotReading | None" = None,
+                      data_snapshot: "DataSnapshotReading | None" = None) -> int:
     """How many unsealed guardian blocks in `text` a live read refutes.
 
     The sweep's own metric, exposed so the CLI's "0 hits" and the test's "0 hits" are one
     measurement and not two definitions that can drift apart: it asks the same question
     `date_note` asks, over the same body slices. `fraction` defaults to None — a caller that
     has not read `/tmp` is not a caller that read it as clean, so the second refuter
-    contributes nothing until a reading is handed to it. Same for `tripwire` and `snapshot`.
+    contributes nothing until a reading is handed to it. Same for `tripwire`, `snapshot`
+    and `data_snapshot`.
     """
     return sum(1 for title, start, end in _guardian_sections(text)
                if block_is_refuted(title, text[start:end], running=running,
                                    fraction=fraction, tripwire=tripwire,
-                                   snapshot=snapshot))
+                                   snapshot=snapshot, data_snapshot=data_snapshot))
 
 
 def _guardian_sections(text: str):
@@ -796,7 +986,8 @@ def relocate_markers(text: str) -> "tuple[str, int, list[str]]":
 
 def date_note(text: str, running: set[str], day: str, fraction: float | None = None,
               tripwire: "dict[str, TripwireReading] | None" = None,
-              snapshot: "SnapshotReading | None" = None) -> "tuple[str, int, list[str]]":
+              snapshot: "SnapshotReading | None" = None,
+              data_snapshot: "DataSnapshotReading | None" = None) -> "tuple[str, int, list[str]]":
     """Append a `dated:` line to every refuted, unsealed guardian block: (text, n, notes).
 
     Appended at the END of the block, after the body, because the standing instruction these
@@ -805,7 +996,7 @@ def date_note(text: str, running: set[str], day: str, fraction: float | None = N
     rather than sealed in place because a block written before #2221 carries no open marker
     to replace, which is the same reason `resolve` cannot reach it.
 
-    A block earns one stamp per witness that refutes it. The four are bound to disjoint
+    A block earns one stamp per witness that refutes it. The five are bound to disjoint
     titles, so in practice a block earns one, and the count `n` is BLOCKS either way, not
     stamps: a block naming two programs already got two lines out of one pass before #3277,
     and the CLI's total is the number of notes a reader has to re-read, not the number of
@@ -816,7 +1007,8 @@ def date_note(text: str, running: set[str], day: str, fraction: float | None = N
     for title, start, end in _guardian_sections(text):
         body = text[start:end]
         if not block_is_refuted(title, body, running=running, fraction=fraction,
-                                tripwire=tripwire, snapshot=snapshot):
+                                tripwire=tripwire, snapshot=snapshot,
+                                data_snapshot=data_snapshot):
             continue
         stamps: list[str] = []
         reasons: list[str] = []
@@ -838,6 +1030,12 @@ def date_note(text: str, running: set[str], day: str, fraction: float | None = N
             stamps.append(snap_stamp)
             reasons.append(f"snapshot repo {snapshot.repo} fresh at commit "
                            f"{(snapshot.sha or 'unknown')[:8]}")
+        ds_stamp = (data_snapshot_stamp(data_snapshot, day)
+                    if data_snapshot_refutes(title, data_snapshot) else None)
+        if ds_stamp:
+            stamps.append(ds_stamp)
+            reasons.append(f"data snapshot store {data_snapshot.store} fresh with the data "
+                           f"tripwire marker absent ({data_snapshot.text})")
         # The offset is the end of the block's CONTENT, not of its span: `end` is the next
         # `## ` heading, or the end of the file for the note's last section, and dating at
         # that put a retraction below the human's own `---` rule and session digest (#3993).
@@ -943,10 +1141,12 @@ def read_fraction(path: str = tw.PATH, *, measurer=tw.measure) -> float:
 def main(argv: list[str] | None = None, *, running_reader=read_running,
          fraction_reader=read_fraction,
          tripwire_reader=read_tripwire,
-         snapshot_reader=read_snapshot) -> int:
-    """The CLI. All four witnesses are read here and nowhere else, and 2 means a partial pass.
+         snapshot_reader=read_snapshot,
+         data_snapshot_reader=read_data_snapshot) -> int:
+    """The CLI. All five witnesses are read here and nowhere else, and 2 means a partial pass.
 
-    `running_reader`, `fraction_reader`, `tripwire_reader` and `snapshot_reader` exist so a
+    `running_reader`, `fraction_reader`, `tripwire_reader`, `snapshot_reader` and
+    `data_snapshot_reader` exist so a
     test can put numbers under this function without steering the box — the `runner=` reason
     one level up, applied to the boundary where the counts a human acts on are printed. The
     defaults are the live reads, so a hand-run reaches `supervisorctl`, `statvfs`, the two
@@ -1021,6 +1221,29 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
         print(f"{SNAPSHOT_ALERT_TITLE} witness does NOT refute: {snapshot.text}",
               file=sys.stderr)
 
+    # Read ONCE for the same two reasons the other two snapshot reads are read once: the
+    # default lists the snapshot directory and loads the data watch's baseline, and a
+    # per-note call would pay both for every dated daily note to answer one question.
+    data_snapshot: "DataSnapshotReading | None" = None
+    try:
+        data_snapshot = data_snapshot_reader()
+    except Exception as exc:                        # noqa: BLE001 — a read, not a bug
+        partial = True
+        print(f"{DATA_SNAPSHOT_AGE_TITLE}: the `datawatch.snapshot_report` witness is "
+              f"unavailable, so no block of that family can be dated this pass: {exc}",
+              file=sys.stderr)
+    if data_snapshot is not None and not data_snapshot.clear:
+        # Either half alone leaves the block standing: a stale store is the readout's own
+        # subject, and a standing marker is the reason the store is stale — the snapshot
+        # script refuses while it is up. Both are reported rather than passed over, the way
+        # an un-clear tripwire and a stale vault snapshot are.
+        partial = True
+        print(f"{DATA_SNAPSHOT_AGE_TITLE} witness does NOT refute: {data_snapshot.text}"
+              + ("" if data_snapshot.marker_absent
+                 else "; the data tripwire marker still stands, which is what rails the "
+                      "snapshot script"),
+              file=sys.stderr)
+
     total = 0
     # The placement audit (#4229): counted on every pass, read-only, and printed on its own line
     # below, because the skill parses the headline and the autonomy job's regex pins it. The
@@ -1045,11 +1268,12 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
         post = misplaced_markers(new)
         audit_found += len(post)
         audit_notes += 1 if post else 0
-        if not count_refutations(new, running, fraction, tripwire, snapshot):
+        if not count_refutations(new, running, fraction, tripwire, snapshot, data_snapshot):
             if args.apply and new != text:
                 path.write_text(new, encoding="utf-8")
             continue
-        new, n, notes = date_note(new, running, args.day, fraction, tripwire, snapshot)
+        new, n, notes = date_note(new, running, args.day, fraction, tripwire, snapshot,
+                                  data_snapshot)
         total += n
         for note_line in notes:
             print(f"{path.name}: {note_line}")
@@ -1075,6 +1299,14 @@ def main(argv: list[str] | None = None, *, running_reader=read_running,
                     + ("" if snapshot.sha else " (no HEAD)")
                     + ("" if snapshot.sha is None else f" at {snapshot.sha[:8]}")
                     + ("" if snapshot.owned else f" — repo {snapshot.repo} is NOT the vault's"))
+    if data_snapshot is None:
+        witness += "; data snapshot unread; no data-snapshot-exposure block dateable"
+    else:
+        # The two halves named separately, because they are separately refused and a reader
+        # told only "NOT fresh" cannot tell a store that has not been written from a trip
+        # that has not been cleared — the two remedies a person would follow are different.
+        witness += (f"; data snapshot {'fresh' if data_snapshot.fresh else 'NOT fresh'}"
+                    f"{' with the data tripwire marker absent' if data_snapshot.marker_absent else ' but the data tripwire marker still stands'}")
     # Its own line, never appended to the headline: `guardian-note-sweep-daily` parses
     # `refutable blocks: N (` / `dated blocks: N (` to compose the job's `note-sweep: …` summary,
     # and `autonomy/110-guardian-note-sweep-daily.md` pins that summary's shape (#4229 clause 5).

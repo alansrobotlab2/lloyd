@@ -380,8 +380,9 @@ def _clean_tripwire() -> dict:
 def _run_cli(note_dir: Path, *argv: str, fraction: object = BELOW,
              frac_raises: bool = False, tripwire: object = "clean",
              trip_raises: bool = False, snapshot: object = None,
-             snap_raises: bool = False) -> int:
-    """`main` with all three witnesses injected, so a test never steers the box.
+             snap_raises: bool = False, data_snapshot: object = None,
+             ds_raises: bool = False) -> int:
+    """`main` with every witness injected, so a test never steers the box.
 
     `running_reader` answers the supervisor the same way the module's docstring records for
     `runner=`: the gate may run where no supervisor answers, and a node that shelled out
@@ -406,10 +407,18 @@ def _run_cli(note_dir: Path, *argv: str, fraction: object = BELOW,
             raise OSError("git: blocked by the sandbox")
         return snapshot
 
+    def _data_snapshot():
+        if ds_raises:
+            raise RuntimeError("cannot read the data snapshot store /test-root/data: "
+                               "FileNotFoundError: snapshot-data.sh has never run")
+        # A callable is CALLED, so a node can count how many times the pass asked; a plain
+        # value is the reading itself. `main` takes a reader, so the seam takes either.
+        return data_snapshot() if callable(data_snapshot) else data_snapshot
+
     return SWEEP.main(["--notes", str(note_dir), *argv],
                       running_reader=lambda conf: {"lloyd-mc:lloyd-backend"},
                       fraction_reader=_fraction, tripwire_reader=_tripwire,
-                      snapshot_reader=_snapshot)
+                      snapshot_reader=_snapshot, data_snapshot_reader=_data_snapshot)
 
 
 def test_the_cli_dates_a_fixture_copy_once_and_writes_it_once(tmp_path, capsys):
@@ -2023,3 +2032,386 @@ def test_the_live_corpus_reads_zero_after_one_pass_and_leaves_the_two_sanctioned
         out, _n, _why = SWEEP.relocate_markers(text)
         assert out.splitlines()[line - 1] == rows[line - 1], (
             f"the pass moved the sanctioned marker at {name}:{line}")
+
+# ── #4389: the fifth witness — the data snapshot layer's exposure under the data rail ──
+
+DATA_SNAP_TITLE = f"{SWEEP.GUARDIAN_TITLE} {Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE}"
+
+#: The block as `Guardian._snapshot_age_readout` publishes it (guardian.py:2879 + its
+#: `resolve`-keyed twin at :2907): the title in the heading, the store's own measurement and
+#: the trip's duration in the body, the restore instruction last. Seeded, never mined —
+#: #4360 landed 2026-11-20T00:35Z and the readout has never fired, so there is no live
+#: instance to copy, exactly as the #3502 and #3882 nodes seed theirs.
+DATA_SNAP_BODY = (
+    "Data snapshot layer down while the data tripwire stands — the `data-home` snapshot "
+    "store is past its 3 h bound and the data tripwire has stood 65,000s, so "
+    "`snapshot-data.sh` is refusing to take a copy at all.\n\n"
+    "Restore the data root and run `python3 agent-services/guardian/datawatch.py clear`; "
+    "the snapshot script resumes on its own.\n")
+
+#: What `datawatch.snapshot_report` answers when the store is inside the bound. Its wording,
+#: not ours: `snapshot_state` builds `f\"{snaps_dir}: newest snapshot {stamp} is "
+#: f\"{age_text(age)} old`\" and adds the `, past the N h limit` clause only when stale — so
+#: the stamp that quotes it must be able to quote it verbatim (clause 3).
+DATA_SNAP_REPORT = ("/test-root/data/research-note-snapshots: newest snapshot "
+                    "2026-11-24-070000 is 8 m 13 s old")
+
+#: The same probe over a store past the bound — the `, past the … limit` half is the
+#: readout's own subject, so a witness given this answer must write nothing.
+DATA_SNAP_REPORT_STALE = ("/test-root/data/research-note-snapshots: newest snapshot "
+                          "2026-11-22-213011 is 19 h 41 m old, past the 3 h limit")
+
+
+def _data_snap_note(body: str = DATA_SNAP_BODY) -> str:
+    return _trip_note((DATA_SNAP_TITLE, body))
+
+
+def _dsr(fresh: bool = True, marker_absent: bool = True,
+         text: str = DATA_SNAP_REPORT) -> SWEEP.DataSnapshotReading:
+    """A `read_data_snapshot` return, in the shape that function maps the probe into.
+
+    `store` is the directory the reading names and `max_age` the bound it was weighed
+    against, both carried for the same reason `SnapshotReading` carries them: the stamp has
+    to be able to say which store and which bound it is answering for.
+    """
+    return SWEEP.DataSnapshotReading(store="/test-root/data/research-note-snapshots",
+                                     fresh=fresh, marker_absent=marker_absent,
+                                     max_age=SWEEP.policy.SNAPSHOT_MAX_AGE_SECONDS,
+                                     text=text)
+
+
+# ── clause 1: a clear reading dates the readout's block ──────────────────────────────
+
+
+def test_the_snapshot_age_block_is_recognised_and_matches_none_of_the_four_old_keys():
+    """The premise, pinned as a node: this title is inside the sweep and outside the keys.
+
+    The block is a guardian section, so `_guardian_sections` sees it — that half is what
+    made this a missing key rather than a parser gap. And none of the four witnesses the
+    sweep had before #4389 refutes it on ANY reading, which is the whole defect: with the
+    `/tmp` fraction under its clear line, both tripwires reading clear, and the vault
+    snapshot repo fresh, the block still earns nothing. The four strings are full alert
+    titles, so none of them is a substring of "Data snapshot layer down while the data
+    tripwire stands" either.
+    """
+    assert DATA_SNAP_TITLE in _data_snap_note()
+    assert [t for t, _s, _e in SWEEP._guardian_sections(_data_snap_note())] == [
+        DATA_SNAP_TITLE]
+    assert SWEEP.DATA_SNAPSHOT_AGE_TITLE == Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE
+    assert Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE not in SWEEP.TRIP_ALERT_TITLES
+    assert Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE != TW.ALERT_TITLE
+    assert Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE != SWEEP.SNAPSHOT_ALERT_TITLE
+    body = _data_snap_note()[_data_snap_note().index(DATA_SNAP_TITLE):]
+    for old in (TW.ALERT_TITLE, SWEEP.SNAPSHOT_ALERT_TITLE, *SWEEP.TRIP_ALERT_TITLES):
+        assert old not in Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE, old
+    assert SWEEP.block_is_refuted(
+        DATA_SNAP_TITLE, body, running=NO_PROGRAMS, fraction=BELOW,
+        tripwire=_clean_tripwire(), snapshot=_snap_reading(fresh=True, owned=True),
+        data_snapshot=None) is False
+
+
+def test_a_clear_reading_dates_the_snapshot_age_block_once_and_keeps_the_alarm():
+    """Clause 1: fresh store + marker absent ⇒ the aged block earns one `dated:` line.
+
+    Both halves of the pair answer clear, which is the pair
+    `Guardian._retract_snapshot_age_readout` closes a live readout on. The stamp is appended
+    at the end of the block (`date_note`'s placement rule: a correction above "this needs a
+    human" reads as part of the alarm), the body is left byte-identical, and nothing is
+    written as a `cleared:` — this witness dates from today's reading and does not assert
+    the halt or the pause was lifted.
+    """
+    note = _data_snap_note()
+    out, n, reasons = SWEEP.date_note(note, NO_PROGRAMS, DAY, data_snapshot=_dsr())
+    assert out != note
+    assert n == 1 and len(_stamp_lines(out)) == 1
+    assert notify.DAILY_CLEARED_PREFIX not in out
+    stamped = _stamp_lines(out)[0]
+    assert stamped.startswith(f"{notify.DAILY_DATED_PREFIX} {DAY}")
+    assert DATA_SNAP_BODY in out, "the alarm's own bytes were rewritten"
+    assert out.index(DATA_SNAP_BODY) < out.index(stamped), "the stamp is not after the body"
+    assert "`datawatch.snapshot_report`" in stamped
+    assert "`Guardian._snapshot_age_readout`" in stamped
+    assert "`Guardian._retract_snapshot_age_readout`" in stamped
+    assert f"notify.DAILY_SCAN_DAYS = {notify.DAILY_SCAN_DAYS}" in stamped
+    assert "not an observed recovery" in stamped
+    assert "the promotion halt or the worker pause was lifted" in stamped
+    assert "refuses to take a copy while it stands" in stamped
+    assert len(reasons) == 1 and "fresh with the data tripwire marker absent" in reasons[0]
+
+
+def test_the_fifth_witness_is_reached_through_block_is_refuted():
+    """Clause 1's other half: the criterion is public and answers on the title alone.
+
+    `block_is_refuted` is the one criterion `count_refutations` and `date_note` share, so a
+    witness that exists only inside the writer would show up here as a disagreement; this
+    node pins the criterion itself, and pins that a clear reading of THIS witness dates
+    nothing whose heading does not name the readout.
+    """
+    body = DATA_SNAP_BODY
+    assert SWEEP.block_is_refuted(DATA_SNAP_TITLE, body, running=NO_PROGRAMS,
+                                  data_snapshot=_dsr()) is True
+    assert SWEEP.block_is_refuted(DATA_SNAP_TITLE, body, running=NO_PROGRAMS,
+                                  data_snapshot=None) is False
+    assert SWEEP.block_is_refuted(DATA_SNAP_TITLE, body, running=NO_PROGRAMS,
+                                  data_snapshot=_dsr(fresh=False)) is False
+    assert SWEEP.block_is_refuted(DATA_SNAP_TITLE, body, running=NO_PROGRAMS,
+                                  data_snapshot=_dsr(marker_absent=False)) is False
+    for other in (TMP_TITLE, VAULT_TRIP_TITLE, DATA_TRIP_TITLE, SNAP_TITLE, STATE_TITLE,
+                  ROLLBACK_TITLE):
+        assert SWEEP.block_is_refuted(other, "unrelated body\n", running=NO_PROGRAMS,
+                                      data_snapshot=_dsr()) is False, other
+
+
+# ── clause 2: anything short of clear leaves the block byte-identical ────────────────
+
+
+@pytest.mark.parametrize("reading,why", [
+    (_dsr(fresh=False, text=DATA_SNAP_REPORT_STALE),
+     "the store is still older than policy.SNAPSHOT_MAX_AGE_SECONDS"),
+    (_dsr(marker_absent=False),
+     "the data tripwire marker still stands, which is what rails the snapshot script"),
+    (_dsr(fresh=True, marker_absent=False),
+     "a FRESH store under a standing marker is the alarm, not its refutation"),
+    (None, "no reading was taken at all"),
+])
+def test_a_reading_that_is_not_clear_leaves_the_block_byte_identical(reading, why):
+    """Clause 2: three refusals, one outcome — the historical bytes, unchanged.
+
+    The third case is the one that makes this witness not a copy of `tripwire_refutes`:
+    `tripwire_is_clear` has no snapshot-store age arm, so keying this title there would date
+    a block whose store is still past the bound. Asking the pair instead means a fresh
+    directory under a standing rail dates nothing — the rail is why the directory is what
+    it is.
+    """
+    note = _data_snap_note()
+    out, n, reasons = SWEEP.date_note(note, NO_PROGRAMS, DAY, data_snapshot=reading)
+    assert out == note, why
+    assert (n, reasons) == (0, []), why
+    assert SWEEP.count_refutations(note, NO_PROGRAMS, data_snapshot=reading) == 0, why
+    assert _stamp_lines(out) == []
+
+
+def test_a_sealed_snapshot_age_block_is_left_as_it_is():
+    """A retraction or a dating already in the block wins over any witness, as for the others.
+
+    `already_sealed` runs first in `block_is_refuted`, so #2221's instrument keeps counting
+    one retraction per block and a second pass over an already-dated note is a no-op.
+    """
+    for marker in (f"{notify.DAILY_CLEARED_PREFIX} 2026-11-24T07:00:00Z",
+                   f"{notify.DAILY_DATED_PREFIX} 2026-11-23"):
+        body = DATA_SNAP_BODY + f"\n{marker} by hand\n"
+        note = _data_snap_note(body)
+        out, n, reasons = SWEEP.date_note(note, NO_PROGRAMS, DAY, data_snapshot=_dsr())
+        assert (out, n, reasons) == (note, 0, []), marker
+
+
+def test_a_probe_that_refuses_raises_rather_than_defaulting_to_clear():
+    """An unread store or an unread rail is a read that did not happen, in all three shapes.
+
+    Defaulting either half to a reassuring answer would date every block of this family in
+    the vault off nothing, which is the failure this module's readers have been built around
+    since #3277: a `RuntimeError` for `main`, exit 2, no write.
+    """
+    def _boom(*_a, **_k):
+        raise OSError("statvfs refused")
+
+    with pytest.raises(RuntimeError):
+        SWEEP.read_data_snapshot(reporter=_boom)
+    with pytest.raises(RuntimeError):
+        SWEEP.read_data_snapshot(reporter=lambda store, max_age: (True, DATA_SNAP_REPORT),
+                                 marker_reader=_boom)
+    with pytest.raises(RuntimeError):
+        SWEEP.read_data_snapshot(reporter=lambda store, max_age: ("yes", 4))
+    ok = SWEEP.read_data_snapshot(reporter=lambda store, max_age: (True, DATA_SNAP_REPORT),
+                                  marker_reader=lambda: None)
+    assert (ok.fresh, ok.marker_absent, ok.text) == (True, True, DATA_SNAP_REPORT)
+    assert ok.clear is True
+    held = SWEEP.read_data_snapshot(
+        reporter=lambda store, max_age: (True, DATA_SNAP_REPORT),
+        marker_reader=lambda: {"reason": "unreadable marker"})
+    assert held.marker_absent is False and held.clear is False, (
+        "a marker that exists but does not parse is an open incident, not a closed one")
+
+
+# ── clause 3: the stamp quotes the reading's own sentence ────────────────────────────
+
+
+def test_the_stamp_quotes_the_reading_s_own_sentence_and_renders_no_second_age():
+    """Clause 3: the age in the stamp is the probe's sentence, not a re-rendering.
+
+    `datawatch.snapshot_report` already names the store, the newest snapshot's stamp and the
+    age in the unit a person reads, and `Guardian.check_data` weighs that same call against
+    `policy.SNAPSHOT_MAX_AGE_SECONDS` on every poll. A stamp that computed its own duration
+    would be a second definition of an age, free to drift from the one the alarm prints — so
+    the sentence is carried whole in `DataSnapshotReading.text` and quoted, and the check is
+    that each figure it states appears in the note EXACTLY once.
+    """
+    out, n, _reasons = SWEEP.date_note(_data_snap_note(), NO_PROGRAMS, DAY,
+                                       data_snapshot=_dsr())
+    assert n == 1
+    stamped = _stamp_lines(out)[0]
+    assert f"`{DATA_SNAP_REPORT}`" in stamped
+    for figure in ("2026-11-24-070000", "8 m 13 s"):
+        assert out.count(figure) == 1, f"{figure} appears twice: an age was rendered twice"
+    assert "19 h 41 m" not in out, "a stale reading's figure reached a fresh stamp"
+    assert "h limit" not in stamped, "the stale-only clause reached a fresh stamp"
+
+
+# ── clause 4: the count and the write agree ─────────────────────────────────────────
+
+
+@pytest.mark.parametrize("reading,want", [
+    (_dsr(), 1),
+    (_dsr(fresh=False, text=DATA_SNAP_REPORT_STALE), 0),
+    (_dsr(marker_absent=False), 0),
+    (None, 0),
+])
+def test_the_count_and_the_write_agree_on_the_fifth_witness(reading, want):
+    """Clause 4: `count_refutations` and `date_note` return the same number, every reading.
+
+    The CLI prints the first and performs the second, and the reason both exist at all is to
+    be ONE measurement. A witness wired into the writer only would show up here as a report
+    that says "0 blocks to date" over a note it then stamps — the worse of the two
+    directions, per `block_is_refuted`'s own docstring.
+    """
+    note = _data_snap_note()
+    counted = SWEEP.count_refutations(note, NO_PROGRAMS, data_snapshot=reading)
+    _out, written, _reasons = SWEEP.date_note(note, NO_PROGRAMS, DAY, data_snapshot=reading)
+    assert counted == want, why_reading(reading)
+    assert written == want, why_reading(reading)
+
+
+def why_reading(reading) -> str:
+    return (f"reading={reading!r}" if reading is not None else "no reading")
+
+
+@pytest.mark.parametrize("reading,want", [(_dsr(), 1), (None, 0)])
+def test_the_agreement_holds_on_a_note_holding_more_than_one_family(reading, want):
+    """A mixed note: the fifth witness adds its one block and no other family's bytes move.
+
+    `/tmp` is held AT its clear line (`ABOVE`, 0.81) so the fraction witness contributes
+    nothing here and the only candidate stamp is the fifth witness's — which is what makes
+    "1 vs 0" a statement about this witness rather than about the note having work in it.
+    """
+    mixed = _trip_note((DATA_SNAP_TITLE, DATA_SNAP_BODY), (TMP_TITLE, TMP_BODY))
+    counted = SWEEP.count_refutations(mixed, NO_PROGRAMS, ABOVE, data_snapshot=reading)
+    out, written, _reasons = SWEEP.date_note(mixed, NO_PROGRAMS, DAY, ABOVE,
+                                             data_snapshot=reading)
+    assert counted == want == written
+    assert len(_stamp_lines(out)) == want
+    assert TMP_BODY in out and f"{notify.DAILY_DATED_PREFIX}" not in (
+        out if want == 0 else "")
+
+
+def test_the_cli_dates_the_snapshot_age_block_and_asks_the_probe_once(tmp_path):
+    """The real process over a seeded note: exit 0, one stamp, and the probe called ONCE.
+
+    The probe-call count is asserted because the default lists the snapshot directory and
+    loads the data watch's persisted baseline; a per-note call would pay both for every
+    dated daily note in the corpus to answer one question — the same reason `read_snapshot`
+    and `read_tripwire` are hoisted out of this loop.
+    """
+    calls = []
+
+    def _probe():
+        calls.append(1)
+        return _dsr()
+
+    d = tmp_path / "memory"
+    d.mkdir()
+    note = d / "2026-11-24.md"
+    note.write_text(_data_snap_note(), encoding="utf-8")
+    assert _run_cli(d, "--apply", data_snapshot=_probe) == 0
+    text = note.read_text(encoding="utf-8")
+    assert len(_stamp_lines(text)) == 1 and notify.DAILY_CLEARED_PREFIX not in text
+    assert len(calls) == 1, "the probe is read once per pass, not once per note"
+    assert _run_cli(d, "--apply", data_snapshot=_probe) == 0
+    assert note.read_text(encoding="utf-8") == text, "a second pass rewrote a dated note"
+
+
+def test_the_cli_refuses_the_pass_and_writes_nothing_when_the_probe_raises(tmp_path, capsys):
+    """The probe refusing is exit 2 with the byte-identical note, naming the title.
+
+    `main`'s exit-code contract: 0 means every witness answered, 2 means a partial pass. A
+    witness that cannot be read must not silently become a pass that dated nothing, because
+    "dated nothing" is also what a healthy pass over a clean vault does.
+    """
+    d = tmp_path / "memory"
+    d.mkdir()
+    note = d / "2026-11-24.md"
+    note.write_text(_data_snap_note(), encoding="utf-8")
+    assert _run_cli(d, "--apply", ds_raises=True) == 2
+    assert note.read_text(encoding="utf-8") == _data_snap_note()
+    err = capsys.readouterr().err
+    assert Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE in err
+
+
+def test_the_cli_reports_a_witness_that_answered_but_does_not_refute(tmp_path, capsys):
+    """A stale store is named on stderr as a refusal, not swallowed as "nothing to do".
+
+    Both halves get their own words: a reader told only "NOT fresh" cannot tell a store that
+    has not been written from a trip that has not been cleared, and those two have different
+    remedies — one is a restore, the other is `datawatch.py clear` plus whoever holds the
+    promotion halt.
+    """
+    d = tmp_path / "memory"
+    d.mkdir()
+    note = d / "2026-11-24.md"
+    note.write_text(_data_snap_note(), encoding="utf-8")
+    assert _run_cli(d, "--apply",
+                    data_snapshot=lambda: _dsr(fresh=False,
+                                               text=DATA_SNAP_REPORT_STALE)) == 2
+    assert note.read_text(encoding="utf-8") == _data_snap_note()
+    assert DATA_SNAP_REPORT_STALE in capsys.readouterr().err
+    assert _run_cli(d, "--apply", data_snapshot=lambda: _dsr(marker_absent=False)) == 2
+    assert note.read_text(encoding="utf-8") == _data_snap_note()
+    err = capsys.readouterr().err
+    assert "the data tripwire marker still stands" in err
+
+
+# ── clause 5: the four existing witnesses keep their bytes for their titles ──────────
+
+
+@pytest.mark.parametrize("title,body,running,kwargs", [
+    (TMP_TITLE, TMP_BODY, NO_PROGRAMS, dict(fraction=BELOW)),
+    (VAULT_TRIP_TITLE, VAULT_TRIP_BODY, NO_PROGRAMS, dict(tripwire=_clean_tripwire())),
+    (DATA_TRIP_TITLE, DATA_TRIP_BODY, NO_PROGRAMS, dict(tripwire=_clean_tripwire())),
+    (SNAP_TITLE, SNAP_BODY, NO_PROGRAMS, dict(snapshot=_snap_reading(fresh=True, owned=True))),
+    (STATE_TITLE, STATE_BODY, frozenset({"lloyd-mc:lloyd-backend"}), dict()),
+])
+def test_the_fifth_witness_changes_no_byte_of_what_the_other_four_write(title, body, running,
+                                                                       kwargs):
+    """Clause 5: each of the four still earns exactly one stamp, and gains nothing.
+
+    The comparison is the note WITH the fifth reading present against the note WITHOUT it,
+    for the reading that makes each witness fire. `n0 == 1` first, because a byte-identical
+    pair proves nothing if neither pass stamped anything: that half is the "still date only
+    their own titles" of the clause, and the equality half is the "unchanged bytes".
+    """
+    note = _trip_note((title, body))
+    out0, n0, _r0 = SWEEP.date_note(note, running, DAY, **kwargs)
+    out1, n1, _r1 = SWEEP.date_note(note, running, DAY, data_snapshot=_dsr(), **kwargs)
+    assert n0 == 1, f"{title}: the pre-existing witness stopped dating its own title"
+    assert len(_stamp_lines(out0)) == 1
+    assert out1 == out0 and n1 == n0, f"{title}: the fifth witness moved this family"
+    assert SWEEP.count_refutations(note, running,
+                                   data_snapshot=_dsr(), **kwargs) == n0, title
+
+
+def test_the_snapshot_age_title_is_not_added_to_the_tripwire_titles():
+    """The implementer trap, pinned: this title never joins `TRIP_ALERT_TITLES`.
+
+    `tripwire_refutes` fires on `reading.clear` alone — `guardian.tripwire_is_clear`, which
+    is marker absent plus the tree evaluating clean and carries no snapshot-store age arm —
+    and would stamp this block in the tripwire's wording via `tripwire_reading_for`. So the
+    set stays exactly the two titles it was, and a clear tripwire reading with no fifth
+    reading leaves a snapshot-age block byte-identical.
+    """
+    assert set(SWEEP.TRIP_ALERT_TITLES) == {Gmod.VAULT_TRIP_ALERT_TITLE,
+                                            Gmod.DATA_TRIP_ALERT_TITLE}
+    assert Gmod.DATA_TRIP_SNAPSHOT_AGE_TITLE not in SWEEP.TRIP_ALERT_TITLES
+    note = _data_snap_note()
+    out, n, reasons = SWEEP.date_note(note, NO_PROGRAMS, DAY, tripwire=_clean_tripwire(),
+                                      data_snapshot=None)
+    assert (out, n, reasons) == (note, 0, [])
+    assert SWEEP.tripwire_refutes(DATA_SNAP_TITLE, _clean_tripwire()) is False
