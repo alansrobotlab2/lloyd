@@ -19,9 +19,13 @@ What counts as reachable, in the order checked:
   ellipsis or a dash (`run-log-2026-10-27.md` … `run-log-2026-11-09.md`), the sibling's stem
   sitting between the two endpoints at the first position where they differ. This is how a
   dated run log is made reachable without editing the body every cycle — the literal-naming
-  rule alone would either fail the fleet or force a `SKILL.md` commit per run.
+  rule alone would either fail the fleet or force a `SKILL.md` commit per run. An endpoint may
+  carry a same-day repeat marker (`run-log-2026-11-24b.md` is the second cycle written on
+  11-24): the bracket is then taken over the stems the two endpoints have once that marker is
+  read off, because that is the comparison the line's reader makes.
 
-Anchored and not a substring soup: both endpoints must be backticked, the same length, and
+Anchored and not a substring soup: both endpoints must be backticked, the two endpoints and
+the sibling must all be the same length once any endpoint's repeat marker is read off, and
 share the sibling's stem, so a range cannot cover a name it was not written over.
 
 The corpus leg reads the live vault and stays unmarked, the ruling
@@ -116,24 +120,57 @@ _STEM_SUFFIX = ".md"
 #: one pair of backticks (`run-log-2026-11-11.md`) is never read as a range separator.
 _RANGE = re.compile(r"`([^`\n]*?\.md)`\s*(?:…|\.\.\.|–|—|–|-{1,2}|\bto\b)\s*`([^`\n]*?\.md)`")
 
+#: A same-day repeat of a dated sibling is spelled with a letter suffix on the later file:
+#: `run-log-2026-11-24b.md` is the second cycle written on 11-24. The marker makes a pair of
+#: backticked endpoints UNEQUAL in length, and the length test used to answer that by ignoring
+#: the pair whole — so when the 11-24b cycle did what its own skill file tells every cycle to
+#: do and pointed the range at the newest file, `run-log-2026-11-11.md` …
+#: `run-log-2026-11-24b.md` in `skills/kg-mention-classifier/SKILL.md` covered nothing, nine
+#: dated run logs (11-15 through 11-22, plus 11-24) fell out of a range the body still claimed,
+#: and both corpus nodes went red with no line of the report naming the marker as the cause
+#: (#4550, from vault commit `62d186ffb`, 2026-11-24 11:21 -0800). A reader sees one range
+#: either way, so the marker is read off the endpoint before the bracket is taken. The base has
+#: to end in a digit, which is what keeps this a repeat marker on a dated name and not a
+#: licence to ignore any length mismatch: `run-log-2026-11-24xyz` matches nothing here.
+_REPEAT_MARKER = re.compile(r"^(?P<base>.*[0-9])(?P<marker>[a-z]{1,2})$")
+
 #: The shape a cycle's own output has, used to prove the provenance exemption below can never
 #: cover a file a run writes.
 _DATED = re.compile(r"run-log-\d{4}-\d{2}-\d{2}")
 _H2 = re.compile(r"^## ", re.MULTILINE)
 
 
+def _bracket_stem(endpoint_stem: str) -> str:
+    """An endpoint's stem with a same-day repeat marker read off it — see `_REPEAT_MARKER`.
+
+    Returns the stem unchanged when it is not a dated name with a 1-2 letter tail. The marker
+    arm is a narrowing of the length test, not an opening, and two nodes hold it there:
+    `test_a_range_whose_length_difference_no_marker_explains_is_still_ignored` for the shapes
+    that are not a marker, and `test_the_repeat_marker_arm_reads_at_most_one_live_range`, which
+    counts the live ranges this arm decides and measured exactly one as shipped — `kg-mention-
+    classifier`'s `run-log-2026-11-11.md` … `run-log-2026-11-24b.md`.
+    """
+    marked = _REPEAT_MARKER.match(endpoint_stem)
+    return marked["base"] if marked else endpoint_stem
+
+
 def _covered_by_range(main: str, stem: str) -> str | None:
     """The range line whose endpoints bracket `stem`, or None.
 
-    Endpoints must be the same length and share the stem's prefix up to the first position
-    where they differ, so `run-log-2026-10-27.md … run-log-2026-11-09.md` brackets
-    `run-log-2026-11-03` and brackets nothing else: a comparison is only taken over the
-    suffix after the endpoints' common prefix, which is the only part of a range a reader
-    understood as a range.
+    Endpoints must be the same length as each other and as the sibling — once any endpoint's
+    same-day repeat marker is read off, which is the only thing `_bracket_stem` changes — and
+    must share the stem's prefix up to the first position where they differ, so
+    `run-log-2026-10-27.md … run-log-2026-11-09.md` brackets `run-log-2026-11-03` and brackets
+    nothing else: a comparison is only taken over the suffix after the endpoints' common
+    prefix, which is the only part of a range a reader understood as a range. A sibling that
+    carries a marker of its own is not the shape the range was written over and is reachable
+    only if the body names it — which naming an endpoint does anyway, so the marked file the
+    range points at is never the one left behind.
     """
     for line in main.splitlines():
         for low, high in _RANGE.findall(line):
-            low_stem, high_stem = low[: -len(_STEM_SUFFIX)], high[: -len(_STEM_SUFFIX)]
+            low_stem = _bracket_stem(low[: -len(_STEM_SUFFIX)])
+            high_stem = _bracket_stem(high[: -len(_STEM_SUFFIX)])
             if len(low_stem) != len(high_stem) or len(stem) != len(low_stem):
                 continue
             shared = 0
@@ -265,6 +302,81 @@ def test_a_hyphenated_name_is_not_read_as_a_range(tmp_path):
     assert unreachable_reason(body, "run-log-2099-01-01.md") is not None
 
 
+def test_a_range_endpoint_carrying_a_same_day_repeat_marker_still_brackets(tmp_path):
+    """#4550's own bug, pinned: the range a repeat cycle wrote, and the nine logs it blinded.
+
+    `skills/kg-mention-classifier/SKILL.md` carries "- `run-log-2026-11-11.md` …
+    `run-log-2026-11-24b.md`", because its own rule tells every cycle to point the range at the
+    newest file and the newest file that day was the SECOND cycle written on 11-24 (vault commit
+    `62d186ffb`, 2026-11-24 11:21 -0800). The `b` makes the two endpoints unequal in length, the
+    length test answered that by dropping the pair, and nine dated run logs — 11-15 through
+    11-22 plus 11-24 — stopped being reachable from a body that plainly brackets them. That is
+    what put both corpus nodes red at `1758eab8`.
+
+    Four arms, because the fix narrows the length test rather than dropping it. The interior log
+    the marker blinded is reachable, and so is the endpoint's own day. The NEXT cycle's log is
+    not: a marker extends the bracket by nothing, so a per-cycle writer still has to move the
+    pointer, which is the invariant
+    `test_a_dated_log_outside_the_stated_range_is_reported` holds and this arm keeps. And a
+    sibling carrying a marker of its own is not the shape the range was written over, so it
+    stays reachable only by name.
+    """
+    body = ("- `run-log-2026-11-11.md` … `run-log-2026-11-24b.md` — every cycle "
+            "since the fold\n")
+    folder = _folder(tmp_path, "repeat-endpoint", body,
+                     "run-log-2026-11-15.md", "run-log-2026-11-24.md",
+                     "run-log-2026-11-25.md", "run-log-2026-11-24c.md")
+    assert _covered_by_range(body, "run-log-2026-11-15") == body.strip()
+    assert unreachable_reason(body, "run-log-2026-11-15.md") is None
+    assert unreachable_reason(body, "run-log-2026-11-24.md") is None
+    assert unreachable_reason(body, "run-log-2026-11-25.md") is not None
+    assert unreachable_reason(body, "run-log-2026-11-24c.md") is not None
+    assert sorted(name for _slug, name, _why in corpus_offenders(tmp_path)) == [
+        "run-log-2026-11-24c.md", "run-log-2026-11-25.md"]
+    assert (folder / "SKILL.md").is_file()
+
+
+def test_a_range_whose_length_difference_no_marker_explains_is_still_ignored(tmp_path):
+    """The arm is a named shape, not a general relaxation of the length test.
+
+    Two spellings that differ in length and are NOT a repeat marker, both still read as no
+    range at all exactly as they were before #4550: a three-letter tail, which `_REPEAT_MARKER`
+    refuses because `[a-z]{1,2}` is one or two letters and the base before it has to end in a
+    digit; and a prose tail, whose last letters sit after letters rather than after a digit.
+    Without these arms the fix would be "ignore length mismatches", and a range could then
+    cover a name it was never written over.
+    """
+    three_letter = "- `run-log-2026-11-11.md` … `run-log-2026-11-24xyz.md` — no range\n"
+    assert _bracket_stem("run-log-2026-11-24xyz") == "run-log-2026-11-24xyz"
+    assert _covered_by_range(three_letter, "run-log-2026-11-15") is None
+    assert unreachable_reason(three_letter, "run-log-2026-11-15.md") is not None
+    _folder(tmp_path, "three-letter", three_letter, "run-log-2026-11-15.md")
+
+    prose_tail = "- `run-log-2026-11-11.md` … `run-log-notes-latest.md` — no range\n"
+    assert _bracket_stem("run-log-notes-latest") == "run-log-notes-latest"
+    assert _covered_by_range(prose_tail, "run-log-2026-11-15") is None
+    assert unreachable_reason(prose_tail, "run-log-2026-11-15.md") is not None
+    _folder(tmp_path, "prose-tail", prose_tail, "run-log-2026-11-15.md")
+
+
+def test_a_repeat_marker_on_the_earlier_endpoint_sets_the_floor_at_its_base(tmp_path):
+    """The other side of the bracket, so the arm is not a one-way patch on the high endpoint.
+
+    `run-log-2026-11-24b.md` … `run-log-2026-12-05.md` is what the pointer reads the day a
+    repeat cycle moves the floor and the next cycle has not moved it back: the base is
+    `run-log-2026-11-24`, so a log inside is reachable and a log before that floor is not. Both
+    directions are asserted because an implementation that only ever read the marker off the
+    high endpoint would pass every other node here.
+    """
+    body = ("- `run-log-2026-11-24b.md` … `run-log-2026-12-05.md` — every cycle since "
+            "the floor\n")
+    _folder(tmp_path, "marked-floor", body,
+            "run-log-2026-11-30.md", "run-log-2026-11-20.md")
+    assert _bracket_stem("run-log-2026-11-24b") == "run-log-2026-11-24"
+    assert unreachable_reason(body, "run-log-2026-11-30.md") is None
+    assert unreachable_reason(body, "run-log-2026-11-20.md") is not None
+
+
 # ── the corpus: the live library, and the fold that this round shipped ─────────
 
 
@@ -365,6 +477,73 @@ def test_the_whole_live_library_points_at_every_sibling():
     offenders = corpus_offenders(SKILLS_DIR)
     assert not offenders, "unreachable sibling(s): " + "; ".join(
         f"{slug}/{name}: {why}" for slug, name, why in offenders)
+
+
+def marker_read_ranges(skills: Path) -> list[tuple[str, str, str]]:
+    """`(slug, low, high)` for every range on `skills` that only the marker arm can read.
+
+    A pair is counted when its endpoints differ in length (so the pre-#4550 matcher ignored it)
+    and reading `_REPEAT_MARKER` off them makes them agree (so this one does not). It is counted
+    apart from `corpus_offenders` because widening what counts as a readable range can only ever
+    REMOVE offenders: an arm that read a line it was never meant to read would make the two
+    corpus assertions greener and nothing else in this file would notice. Same walk and same
+    shape as `corpus_offenders`, so the node below can show the count on a planted tree instead
+    of being trusted on the live one.
+    """
+    marked: list[tuple[str, str, str]] = []
+    for folder, _names in folders_with_siblings(skills):
+        main = (folder / "SKILL.md").read_text(encoding="utf-8", errors="replace")
+        for line in main.splitlines():
+            for low, high in _RANGE.findall(line):
+                low_stem = low[: -len(_STEM_SUFFIX)]
+                high_stem = high[: -len(_STEM_SUFFIX)]
+                if len(low_stem) == len(high_stem):
+                    continue          # read exactly as it was before #4550
+                if (_bracket_stem(low_stem), _bracket_stem(high_stem)) == (low_stem, high_stem):
+                    continue          # no marker explains the mismatch: ignored by length
+                marked.append((folder.name, low, high))
+    return marked
+
+
+def test_the_repeat_marker_arm_reads_at_most_one_live_range(tmp_path):
+    """How far the arm reaches, counted on a planted tree and then bounded on the live one.
+
+    The planted half first, because a live count of one proves nothing about a counter that
+    could be returning one for any reason at all: four folders, two with a marker on an endpoint,
+    one closed range whose endpoints agree in length, one mismatch no marker explains. Exactly
+    the two marked pairs come back, in the walk's own order.
+
+    The live half then bounds the arm's footprint to at most ONE range, and that one has to be
+    `kg-mention-classifier`'s run-log pointer — the prose the arm was measured against. Zero is
+    allowed on purpose: the pointer moves every cycle, so the marked endpoint is gone the moment
+    a cycle ends on an unmarked file, and a node that reddened on its absence would be this
+    module's own silent-red failure mode wearing a different hat.
+    """
+    _folder(tmp_path, "marked-high",
+            "- `run-log-2026-11-11.md` … `run-log-2026-11-24b.md` — one\n",
+            "run-log-2026-11-15.md")
+    _folder(tmp_path, "marked-low",
+            "- `run-log-2026-11-24b.md` … `run-log-2026-12-05.md` — two\n",
+            "run-log-2026-11-30.md")
+    _folder(tmp_path, "no-marker-explains",
+            "- `run-log-2026-11-11.md` … `run-log-2026-11-24xyz.md` — three\n",
+            "run-log-2026-11-15.md")
+    _folder(tmp_path, "unmarked",
+            "- `run-log-2026-10-27.md` … `run-log-2026-11-09.md` — four\n",
+            "run-log-2026-11-03.md")
+    assert marker_read_ranges(tmp_path) == [
+        ("marked-high", "run-log-2026-11-11.md", "run-log-2026-11-24b.md"),
+        ("marked-low", "run-log-2026-11-24b.md", "run-log-2026-12-05.md")]
+
+    assert SKILLS_DIR.is_dir(), _no_tree(SKILLS_DIR)
+    live = marker_read_ranges(SKILLS_DIR)
+    assert len(live) <= 1, (
+        f"{len(live)} live ranges are readable only because of the marker arm: {live} — each "
+        "one is a range whose meaning this arm decides, and a second is prose nobody measured "
+        "the arm against")
+    if live:
+        assert live[0][0] == "kg-mention-classifier", (
+            f"{live[0]} is not the run-log pointer the marker arm was written for")
 
 
 def test_the_provenance_exemption_stays_two_vendored_files():
