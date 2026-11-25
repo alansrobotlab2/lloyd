@@ -2673,11 +2673,20 @@ NAMED_SYMBOL_UNNAMED_FLOOR = 0
 #: 187 is made of: 22 docs, not 23 — `editing-safeguards.md`'s 3 are gone and
 #: `autonomy.md` is 6 -> 9, both moved by other rounds' doc edits since 2026-11-11, and
 #: `skills.md` 14 -> 13. The per-doc list above is prose and no node grades it; the
-#: total is the number two nodes do read.
+#: total is what the ceiling and the slack rail below compare against.
 #:
-#: The bound is one-way: re-typing an anchor so its sentence names the enclosing
-#: definition is the only way to move it, and doing that means lowering this
-#: number in the same commit that cleared the anchor.
+#: The bound is one-way in what can move it — re-typing an anchor so its sentence names
+#: the enclosing definition is the only way the population falls — but what to do about
+#: the gap that leaves is ADVICE, not a requirement. This block used to say the
+#: opposite, and #4266 deleted the equality arm that made that sentence a check: forcing
+#: the constant down alongside every cleared anchor meant a document's own accuracy pass
+#: had to edit THIS file to get cheaper, which no review of a document is allowed to do.
+#: So a ceiling standing above the population is now the point, not an oversight: it is
+#: what lets an accuracy pass land on its own. Looseness is advisory up to a rung and a
+#: finding past it, and `test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung`
+#: is what forces the shrink — at `CEILING_SLACK_RUNG` of slack it reddens, and tells the
+#: reader to clear the gap in a maintenance commit of its own rather than fold it into
+#: whoever's doc review opened it.
 #: `test_the_fallback_anchor_ceiling_is_shown_able_to_bite` is what re-measures it.
 #: #4045 is the first commit to move it from the 2026-11-02 measurement: three
 #: `threat-model.md` anchors that pointed at xdist worker sizing and at a lock
@@ -2787,14 +2796,29 @@ def unnamed_anchor_rows(docs: dict[str, str] | None = None) -> list[tuple[str, d
 
 
 def unnamed_anchor_ceiling_report(rows: list[tuple[str, dict]]) -> str:
-    """The text the ceiling raises: every offender by doc and span, then the fix.
+    """The text the ceiling raises: the three numbers, every offender, then the fix.
 
     Shaped on `test_the_stale_population_is_at_or_under_its_bound_and_names_every_offender`:
     the count against the bound, one line per doc in descending order with each span
-    spelled as the doc wrote it, then what to write instead, then the ratchet
-    instruction. Every doc is listed rather than only the one that tipped the total,
-    because nothing here knows which doc was edited — an author told "193 against
-    192" with no span has to go and re-measure the corpus themselves.
+    spelled as the doc wrote it, then what to write instead, then what to do about the
+    gap. Every doc is listed rather than only the one that tipped the total, because
+    nothing here knows which doc was edited — an author told "193 against 192" with no
+    span has to go and re-measure the corpus themselves.
+
+    #4424 added the second line, the one that states population, ceiling and slack
+    together. The headline sentence was always the population and the bound, so on a
+    corpus under the ceiling the one number a reader could not get from this text was
+    HOW LOOSE it is — and looseness is exactly what #4266 set free when it deleted the
+    equality arm, while this function stayed reachable only from a failing assert's
+    message, so a bound 40 anchors above the corpus printed nothing anywhere. The
+    slack line is what `test_the_ceiling_report_states_its_three_numbers_when_green`
+    reads on the green path, and what the slack rail pastes in
+    when it reddens, so the reader of that failure never has to count anything.
+
+    The closing instruction is advice, not an order, for the reason the constant's own
+    comment now gives: #4266 removed the check that made a doc edit owe a change to this
+    file, so the shrink is recorded by the slack line and compelled by the rung, not by
+    whoever happens to be clearing an anchor.
     """
     by_doc: dict[str, list[dict]] = {}
     for slug, row in rows:
@@ -2804,17 +2828,23 @@ def unnamed_anchor_ceiling_report(rows: list[tuple[str, dict]]) -> str:
         + ", ".join(f"`{s}`" for s in spans) + "\n"
         for slug, entries in sorted(by_doc.items(), key=lambda kv: (-len(kv[1]), kv[0]))
         for spans in [sorted({e["span"] for e in entries})])
+    slack = NAMED_SYMBOL_UNNAMED_CEILING - len(rows)
     return (
         f"{len(rows)} architecture-doc line anchors rest on the containment "
         f"fallback against a ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}:\n"
+        f"population {len(rows)}, ceiling {NAMED_SYMBOL_UNNAMED_CEILING}, slack {slack}.\n"
         + body
         + "Each anchor above cites a line with no symbol beside it, so the only "
         "verdict that could be reached was \"the line falls inside SOME definition\" "
         "— which is how both of #3580's drifts stayed green. Write the enclosing "
         "definition's name beside the citation (`main` at `eval/run_eval.py:2947`, "
-        "not the bare span) so that symbol's own span grades it. If you cleared "
-        "one, lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit — that is what "
-        "records the shrink.")
+        "not the bare span) so that symbol's own span grades it. That re-typing is "
+        "the whole of a clear, and the slack line above is what records it: lowering "
+        "NAMED_SYMBOL_UNNAMED_CEILING as you clear is advice about keeping the bound "
+        "honest, not a requirement of this commit — "
+        "`test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung` is what compels "
+        "the shrink, in a maintenance commit of its own, once the gap passes "
+        f"{CEILING_SLACK_RUNG}.")
 
 
 @pytest.mark.parametrize("slug", PATH_DOC_SLUGS)
@@ -3831,9 +3861,16 @@ def test_the_fallback_anchor_ceiling_is_shown_able_to_bite():
     # makes, because the tail there is pytest's `where` clause, not this node's prose.
     missing = [ln for ln in report.splitlines() if ln.strip() and ln not in msg]
     assert missing == [], missing[:2]
-    assert report.endswith("lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit — "
-                           "that is what records the shrink."), report[-200:]
-    assert "lower NAMED_SYMBOL_UNNAMED_CEILING in the same commit" in msg, msg[-600:]
+    # #4424 clause 5: the tail is advice now, and this is the pin that says so. The
+    # sentence it replaced told whoever cleared an anchor to re-type the constant here,
+    # which is the paired edit #4266 deleted the equality arm to stop demanding. Pinned
+    # against `CEILING_SLACK_RUNG` rather than a literal 12, so moving the rung moves
+    # this line with it instead of leaving a second copy of the number behind.
+    assert report.endswith(
+        "`test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung` is what compels "
+        "the shrink, in a maintenance commit of its own, once the gap passes "
+        f"{CEILING_SLACK_RUNG}."), report[-300:]
+    assert "not a requirement of this commit" in msg, msg[-900:]
     test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling()
 
 
@@ -3919,6 +3956,255 @@ def test_clearing_a_bare_citation_costs_the_doc_no_test_edit():
     assert unnamed_anchor_rows() == rows, (
         "the shrink seed outlived its `finally`, so every later reader of the corpus "
         "sees a doc this repo never wrote")
+
+
+#: #4424: how far `NAMED_SYMBOL_UNNAMED_CEILING` may stand above the live population
+#: before the gap stops being slack and becomes a finding. #4266 deleted the equality arm,
+#: so after it nothing forced a shrink at all, and `unnamed_anchor_ceiling_report` printed
+#: only inside a failing assert — a constant forty anchors over the corpus would have let
+#: forty new bare `path:NNN` citations in without reddening anything, and said nothing
+#: anywhere that it had. Twelve is the rung the owed-check ruled on when it filed #4424,
+#: priced against the oscillation #4413 measured: 187/188/187/188/187/187/189 across seven
+#: commits, four docs moving with no edit to themselves, so ordinary drift is one or two
+#: anchors and never a dozen. Below the rung the looseness is the point — it is what lets a
+#: document's accuracy pass land alone, which is what #4266 bought. Past it the constant is
+#: a number nobody has re-measured, and this rail is the thing that says so out loud.
+CEILING_SLACK_RUNG = 12
+
+#: #4424: the third user of `_CEILING_SEEDED_DOCS`, and the third kind of seed.
+#: `CEILING_SEED_SLUG` ADDS anchors to show the ceiling refusing a surplus,
+#: `CEILING_SHRINK_SLUG` drops ONE to show a doc edit costing no test edit, and this one
+#: drops thirteen to put the corpus past the slack rung. The three must never share a doc:
+#: on one slug an addition and a shrink cancel and neither control prices anything.
+#: `threat-model.md` pays a thirteen-anchor shrink in single-occurrence citations alone —
+#: 39 fallback-decided anchors over 25 distinct spans at this round's base, 13 of those
+#: spans cited exactly once — which the control below re-measures rather than assumes.
+CEILING_SLACK_SEED_SLUG = "threat-model.md"
+
+
+def test_the_ceiling_report_states_its_three_numbers_when_green():
+    """#4424 clause 1: population, ceiling and slack, read off a corpus that is on-side.
+
+    The report used to state the population and the bound and nothing else, which is the
+    one reading where the missing number matters: at-or-under the ceiling, the count tells
+    you nothing about how much room the bound is leaving, and that room is exactly what
+    #4266 set free. So the numbers are pinned here from the live corpus — green, unseeded,
+    no `pytest.raises` anywhere — because every other caller of this function reaches it
+    through a failing assert, where the reader already knows something went wrong.
+
+    The shipped bound is pinned in its own form at the bottom. #4266's ruling was that
+    `<=` is the whole of the corpus-side obligation and a shrink is compelled elsewhere;
+    this file has now had a node deleted over exactly which of those two an assert means,
+    so the operator is written here as bytes, not paraphrased.
+    """
+    rows = unnamed_anchor_rows()
+    assert len(rows) <= NAMED_SYMBOL_UNNAMED_CEILING, (
+        "the corpus is past the ceiling, so this node would be reading the report out of "
+        "a failing state and proving nothing about the green path #4424 asked for — the "
+        "slack rail and `test_the_ceiling_s_own_comment_gives_advice_and_names_what_forces"
+        "_a_shrink` are the nodes to answer to here")
+    report = unnamed_anchor_ceiling_report(rows)
+    slack = NAMED_SYMBOL_UNNAMED_CEILING - len(rows)
+    assert f"{len(rows)} architecture-doc line anchors rest on the containment fallback " \
+           f"against a ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}:" in report, report[:300]
+    line = next((ln for ln in report.splitlines() if ln.startswith("population ")), None)
+    assert line == (f"population {len(rows)}, ceiling {NAMED_SYMBOL_UNNAMED_CEILING}, "
+                    f"slack {slack}."), (
+        f"the slack line reads {line!r}: all three numbers have to appear on it with their "
+        "live values, or a reader of a green corpus still cannot see how loose the bound "
+        "is — the whole of what #4424 clause 1 asks this function to carry")
+    src = Path(__file__).read_text(encoding="utf-8")
+    assert ("assert len(rows) <= NAMED_SYMBOL_UNNAMED_CEILING, "
+            "unnamed_anchor_ceiling_report(rows)") in src, (
+        "the shipped corpus bound is no longer the plain `<=` against the ceiling: #4266 "
+        "ruled that this is the only obligation the corpus carries, and #4424 leaves it "
+        "exactly where it is")
+
+
+def test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung():
+    """#4424 clause 2: looseness is advisory up to a rung, and a finding past it.
+
+    The gap #4266 opened is fine — that was the ruling — but an unbounded gap is the same
+    hole at a different scale, and `NAMED_SYMBOL_UNNAMED_CEILING` only ever rejects growth,
+    so nothing between here and a constant nobody has re-measured in a hundred commits says
+    the bound has stopped meaning anything. This node is that say-so, and it is the only
+    ceiling node that reads the population without being asked to: the population oscillates
+    with the cited code, so the slack has an owner now even when no doc is being edited.
+
+    What it does NOT do is tax a document. The remedy it prescribes is a maintenance commit
+    touching this file alone, raised by the person who lowers the number, and it says in
+    its own words not to fold that into the doc review that made the slack — because the
+    paired-edit tax is precisely what #4266 was filed for and `architecture/memory.md` §4
+    records from the writing side. Growth past the ceiling still reddens
+    `test_the_corpus_fallback_decided_anchors_are_at_or_under_their_ceiling`, unchanged.
+    """
+    rows = unnamed_anchor_rows()
+    slack = NAMED_SYMBOL_UNNAMED_CEILING - len(rows)
+    assert slack <= CEILING_SLACK_RUNG, (
+        f"NAMED_SYMBOL_UNNAMED_CEILING is {NAMED_SYMBOL_UNNAMED_CEILING} while the corpus "
+        f"holds {len(rows)} fallback-decided anchors: {slack} anchors of slack, past the "
+        f"rung of {CEILING_SLACK_RUNG}. That is how many new bare `path:NNN` citations the "
+        "suite would now swallow without a word. Clear it as a MAINTENANCE COMMIT TOUCHING "
+        "ONLY THIS FILE: re-measure `unnamed_anchor_rows()` and re-type the constant to "
+        "that number with its dated census. Do NOT make it a paired edit inside the doc "
+        "review that made the slack — #4266 exists because clearing an anchor once obliged "
+        "a document's accuracy pass to edit this file, and a shrink smuggled into a doc "
+        "review is that tax back. The population by doc:\n"
+        + unnamed_anchor_ceiling_report(rows))
+
+
+def test_the_ceiling_slack_rung_is_shown_able_to_bite_on_both_of_its_edges():
+    """#4424 clause 3: the rung is demonstrated at 13 and at 12, both seeded from the live count.
+
+    Same shape as the two controls above it — seed through `corpus_doc_texts`' seam, refuse
+    or pass, restore in a `finally` — but the seed is a SHRINK, because the rail this one
+    prices fires when the population falls away from the constant. And the seed sizes come
+    out of `len(rows)`, never out of a literal: #4413 measured the corpus at
+    187/188/187/188/187/187/189 across seven commits with four docs moving unedited, so on
+    a commit already two under the ceiling a hard-coded 13 would seed 13 anchors and land 15
+    under, reddening a control on a legal corpus. Priced against the live count, the control
+    demonstrates the RUNG on whatever tree it runs in.
+
+    Both edges matter and both are seeded: 13-under is the arm that must raise (a control
+    that cannot fail is the #2795 shape), and 12-under is the arm that must not, because a
+    rail that reddens at its own stated bound is a second tax on the same doc pass and the
+    exact thing clause 2's message promises not to be.
+    """
+    slug = CEILING_SLACK_SEED_SLUG
+    assert slug not in (CEILING_SEED_SLUG, CEILING_SHRINK_SLUG), (
+        f"all three ceiling controls seed through one dict, and {slug} is already a seed "
+        "target for another of them: on one slug an addition and a shrink cancel")
+    assert slug in PATH_DOC_SLUGS, (
+        f"{slug} is not a doc the ceiling reads, so seeding it would prove nothing about "
+        "the corpus the rail actually refuses")
+    assert slug not in _CEILING_SEEDED_DOCS, (
+        f"{slug} already holds a seed, so this node's own seeded rows could not be told "
+        "apart from another control's")
+    assert corpus_doc_texts()[slug] == _text(slug), (
+        "the seam this control writes into is not the corpus the ceiling reads")
+
+    rows = unnamed_anchor_rows()
+    text = _text(slug)
+    # The item's own formulas: drop this many anchors and the corpus lands exactly `rung`
+    # under the constant. 13-under always buys at least one anchor while the rail is green;
+    # 12-under buys none exactly when the corpus already sits on the rung, and then the
+    # pass arm is the real corpus, which is the honest reading and not a skipped check.
+    drops = {rung: len(rows) - (NAMED_SYMBOL_UNNAMED_CEILING - rung)
+             for rung in (CEILING_SLACK_RUNG + 1, CEILING_SLACK_RUNG)}
+    assert drops[CEILING_SLACK_RUNG + 1] >= 1, (
+        f"the corpus is already {NAMED_SYMBOL_UNNAMED_CEILING - len(rows)} anchors under a "
+        f"ceiling of {NAMED_SYMBOL_UNNAMED_CEILING}, past the rung of "
+        f"{CEILING_SLACK_RUNG}, so the rail is red before any seed and this control cannot "
+        "show a bound biting on a corpus the bound already refuses — re-measure the "
+        "constant, as a maintenance commit of its own")
+    # Only a span the doc cites ONCE buys exactly one row: `fallback_decision` yields a row
+    # per graded citation, so dropping the number off a span cited twice takes two rows and
+    # lands the corpus past the target rather than on it.
+    single = sorted({r["span"] for s, r in rows if s == slug
+                     and text.count(r["span"]) == 1})
+    assert len(single) >= max(drops.values()), (
+        f"{slug} cites {len(single)} fallback-decided span(s) exactly once and the 13-under "
+        f"seed needs to drop {max(drops.values())}: a span cited twice drops two rows and "
+        "overshoots the target, so the pass arm would no longer be ON the rung. Re-point "
+        f"CEILING_SLACK_SEED_SLUG at a doc that can pay the shrink in single citations — "
+        "per-doc counts below — rather than widening this node's edit.\n"
+        + unnamed_anchor_ceiling_report(rows))
+
+    for rung, must_raise in ((CEILING_SLACK_RUNG + 1, True), (CEILING_SLACK_RUNG, False)):
+        drop = drops[rung]
+        seeded_text = text
+        for span in single[:drop]:
+            seeded_text = seeded_text.replace(span, span.rsplit(":", 1)[0])
+        assert drop == 0 or seeded_text != text, (
+            f"dropping the line number off {drop} span(s) left {slug} unchanged")
+        if drop:
+            _CEILING_SEEDED_DOCS[slug] = seeded_text
+        try:
+            after = unnamed_anchor_rows()
+            assert len(after) == NAMED_SYMBOL_UNNAMED_CEILING - rung, (
+                f"the seed left the corpus at {len(after)} rows against a ceiling of "
+                f"{NAMED_SYMBOL_UNNAMED_CEILING} — "
+                f"{NAMED_SYMBOL_UNNAMED_CEILING - len(after)} under, not exactly {rung}. "
+                "A seed that overshoots leaves the raise reachable for the wrong reason and "
+                "a seed that falls short leaves the pass arm proving nothing")
+            if must_raise:
+                with pytest.raises(AssertionError) as raised:
+                    test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung()
+                msg = str(raised.value)
+                assert (f"{rung} anchors of slack, past the rung of "
+                        f"{CEILING_SLACK_RUNG}") in msg, msg[:400]
+                assert "MAINTENANCE COMMIT TOUCHING ONLY THIS FILE" in msg, msg[:400]
+                assert "Do NOT make it a paired edit inside the doc review that made the " \
+                       "slack" in msg, (
+                    "the remedy has to say out loud that it is not a doc-review edit — "
+                    "that prohibition is the half of clause 2 #4266 was filed for")
+                assert f"slack {rung}" in msg, (
+                    "the rail's own failure message has to carry the report's slack line, "
+                    f"or the reader of this red counts anchors by hand: {msg[-600:]}")
+            else:
+                test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung()
+        finally:
+            if drop:
+                del _CEILING_SEEDED_DOCS[slug]
+
+    assert unnamed_anchor_rows() == rows, (
+        "the slack seed outlived its `finally`, so every later reader of the corpus sees a "
+        f"{slug} this repo never wrote")
+
+
+def test_the_ceiling_s_own_comment_gives_advice_and_names_what_forces_a_shrink():
+    """#4424 clause 4: the constant's comment may advise, and says what compels.
+
+    `test_the_ceiling_s_ruling_is_recorded_in_its_own_comment` reads the block above
+    `STALE_EXEMPTION_CEILING` and nothing else, so the block above
+    `NAMED_SYMBOL_UNNAMED_CEILING` graded nothing: it could keep telling a reader to
+    re-type the constant alongside every cleared anchor after #4266 deleted the arm that
+    made that an obligation, and the suite would not notice. That is the shape #2982 was
+    filed against one constant over — a comment stating a rule nobody enforces is a
+    comment, and here it was a rule the repo had deliberately stopped enforcing.
+
+    So the block is read out of this file's own bytes, whitespace-normalised the way that
+    precedent does it so a reflow is not a retraction, and the claim it is pinned to is
+    the live one: looseness is advice, the rung node is what forces a shrink, and the
+    rung it names in prose is the rung some assert below actually compares `slack` to —
+    checked against the parse rather than against a second copy of the sentence, because
+    prose graded against prose is the vacuity this node exists to refuse.
+    """
+    src = Path(__file__).read_text(encoding="utf-8")
+    lines = src.splitlines()
+    decl = next(i for i, ln in enumerate(lines)
+                if ln.startswith("NAMED_SYMBOL_UNNAMED_CEILING ="))
+    start = decl
+    while start and lines[start - 1].startswith("#:"):
+        start -= 1
+    assert decl - start >= 30, (
+        f"the block above the constant is {decl - start} lines: the census and the ruling "
+        "went missing, and a two-line comment cannot carry both")
+    block = re.sub(r"\s+", " ", " ".join(ln[3:] for ln in lines[start:decl]))
+
+    assert "ADVICE, not a requirement" in block, block[:400]
+    assert "test_the_fallback_ceiling_slack_stays_inside_its_bounded_rung" in block, (
+        "the block has to name the rail that actually forces a shrink, not just say the "
+        "old rule was retired")
+    assert "CEILING_SLACK_RUNG" in block, block[:400]
+    assert "maintenance commit" in block, (
+        "the block says where a shrink belongs; #4266's whole point was that it is not "
+        "inside the doc review that opened the gap")
+    assert "in the same commit" not in block, (
+        "the block is back to demanding a paired edit: #4266 deleted the equality arm "
+        "precisely because that demand made a document's accuracy pass owe an edit to "
+        "this file")
+
+    rung_checks = [n for n in ast.walk(ast.parse(src))
+                   if isinstance(n, ast.Assert) and isinstance(n.test, ast.Compare)
+                   and isinstance(n.test.left, ast.Name) and n.test.left.id == "slack"
+                   and isinstance(n.test.ops[0], ast.LtE)
+                   and isinstance(n.test.comparators[0], ast.Name)
+                   and n.test.comparators[0].id == "CEILING_SLACK_RUNG"]
+    assert len(rung_checks) == 1, (
+        f"{len(rung_checks)} assert(s) compare `slack` to `CEILING_SLACK_RUNG`; the block "
+        "names that rail as what compels a shrink, so exactly one must exist, and it must "
+        "be the one node #4424 clause 2 asks for")
 
 
 #: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
