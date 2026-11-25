@@ -546,7 +546,12 @@ that hit `max_turns` produced *nothing* while still reporting success: on
 earlier, and #42, #39 and #40 all consumed that stale file believing it current.
 #39 separately did its real writes and then died during bookkeeping, so
 `mental-models.md` was genuinely updated while the record said nothing had
-happened.
+happened. For #38 the claimed file is now a separate in-flight path,
+`signals-inflight.md`: since #1285 (2026-09-21) the canonical `signals-latest.md`
+is written exactly once per run, by Phase 3, because
+`run_38_20260920_050102` died infra-dead mid-investigation and left its 46-line
+`status: in-progress` stub in that slot — and the 2026-09-20 handoff read the stub
+as this cycle's report.
 
 The recurring failure is looping on "one last verification pass" until the turn
 limit kills the run. #42 is the reference implementation: a machine-checkable
@@ -560,11 +565,17 @@ was uncheckable prose and the only real backstop was the cap plus an auto-retry:
 `stop_reason: max_turns`, `num_turns: 61`, the artifact landing 39 ms before
 termination and the cycle still recorded FAILED — the same 61 turns and 2.5 M
 tokens spent on `tool_errors: 0` voluntary work that motivated the rule. What
-replaced it is three facts the run can read, not a number it cannot. #38 carries
-the same budget in **minutes**, because its turn limit was never what killed it:
-Phase 2 dies at 1809–1826 s against a 1800 s cap while healthy runs take
-181–639 s. Raising the ceiling is the wrong lever — the 600→1800 s raise on
-2026-09-01 enlarged the burn rather than making overruns rarer.
+replaced it is three facts the run can read, not a number it cannot — and since
+2026-10-30 the cap itself carries a verdict in code: a run that stops capped is
+recorded `failed` / `task` unless the `output_artifact` its task file declares is
+on disk at 512 B or more (`_ARTIFACT_MIN_BYTES`), and for #42 and #39 — the two
+members that also declare `artifact_complete_marker` — still reads
+`status: complete` (#3596, #3623). A cycle that produced nothing can no longer
+book itself as done. #38 carries the same budget in **minutes**, because its turn
+limit was never what killed it: Phase 2 dies at 1809–1826 s against a 1800 s cap
+while healthy runs that month took 181–639 s. Raising the ceiling is the wrong
+lever — the 600→1800 s raise on 2026-09-01 enlarged the burn rather than making
+overruns rarer.
 
 **The pairwise offset has since been undone, so the clock orders nothing.** All
 four once sat on 22–04 against `workers.slots: 2`, so #39 could be claimed in the
@@ -575,15 +586,18 @@ that consumes another's output now shares that output's whole window — and
 `workers.slots` is 6 (since 2026-09-18), not the 2 the windows were sized
 against. What orders the chain is the freshness half of `depends_on`, not the
 clock — which is the correct division of labour, and the reason the two holes
-above matter more than any window edit. The jobs are minutes (measured 2026-10-26
-over the 7-day window `/api/workers/health` holds unclamped: #38 avg 508 s with
-its slowest run at 683 s against its 1800 s cap, #42 730 s, #39 774 s, #40 513 s,
-against `timeout_seconds` 1800 / 1800 / 2400 / 1800), so whatever span the chain
-shows end to end is scheduling latency, not work.
+above matter more than any window edit. The jobs are minutes (measured 2026-11-25
+over the 7-day window `/api/autonomy/health` holds unclamped, `oldest_input` null:
+#38 avg 610 s with its slowest run at 1014 s against its 1800 s cap, #42 517 s /
+945 s, #39 732 s / 903 s, #40 543 s / 1420 s against `timeout_seconds`
+1800 / 1800 / 2400 / 1800), so whatever span the chain shows end to end is
+scheduling latency, not work.
 
 Two tool-shaped rules, both learned expensively. `Write` refuses to overwrite a
-file it has not read this session, so a Phase 0 skeleton write is *refused on
-every run* — `signals-latest.md` always exists from the night before. And the
+file it has not read this session, and both `signals-latest.md` and
+`signals-inflight.md` exist from the night before, so #38's Phase 0 opens with a
+`Read` of the in-flight path — that read is the reason the skeleton write is not
+*refused on every run*. And the
 vault tools reject anything under `~/lloyd/` with `PATH_ESCAPE`, so every
 `_pipeline/` artifact in this chain is written with `Write` at an absolute path,
 never `vault_write`.
@@ -650,16 +664,19 @@ out-of-scope source every time: 0 bundles across the 22 piloted runs in the wind
 to 2026-09-12, and `claims_checked: 0` over 713 fleet runs — which is also why
 #714's prediction of a first window full of `insufficient` gaps could not come
 true. The key is copied now when the model emitted one, and the pilot reports:
-measured 2026-10-26 over the 7-day window the route holds unclamped, all seven
-piloted tasks together, **892 claims checked, 850 verified, 17 refuted, 25
-insufficient, over 77 runs that carried a bundle** out of the source's 253. That
-supersedes the 2026-09-26 reading (22 checked, 22 verified, 0 refuted, 0
-insufficient, across 4 bundled runs — #38 11, #39 6, #40 5): both `insufficient`
-and `refuted` are now observed in volume, and the chain's own analyst is its
-largest refuter — read off the runs table for the same window, #42 emitted 69
-claims of which 6 were refuted and 1 insufficient, against #39's 4 refuted and
-#38's 2. What is left is coverage, not plumbing — 176 of those 253 runs carry no
-bundle at all, because only the piloted tasks emit a claims block. #902
+measured 2026-11-25 over the 7-day window `/api/autonomy/health` holds unclamped,
+all seven piloted tasks together, **839 claims checked, 827 verified, 7 refuted,
+5 insufficient, over 74 runs that carried a bundle** out of the fleet's 283 — and
+every bundled run in that window is one of the seven's. That supersedes the
+2026-09-26 reading (22 checked, 22 verified, 0 refuted, 0 insufficient, across 4
+bundled runs — #38 11, #39 6, #40 5), and the 2026-10-26 one after it (892
+checked, 850 verified, 17 refuted, 25 insufficient over 77 bundled runs of 253):
+both `insufficient` and `refuted` are observed in volume, but the refuters are the
+write jobs, not the chain's analyst — same window, #39 emitted 72 claims of which
+3 were refuted, #38 78 of which 2 refuted and 1 insufficient, #40 51 with 1
+refuted and 4 insufficient, while #42's 65 carried none. What is left is coverage,
+not plumbing — 209 of those 283 runs carry no bundle at all, because only the
+piloted tasks emit a claims block. #902
 (coverage: 4 of the fleet's unattended writers) and #945 (this severance) are
 both closed. **Widened 2026-10-09 (#2482):** #53
 Documentation Digester joined, so five tasks emitted a claims block on the day of that
