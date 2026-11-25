@@ -3,9 +3,17 @@
 `scripts/automod/fitness.py` runs the benches of `eval/fitness/manifest.yaml`
 and appends what they measured to `app.paths.FITNESS_SERIES`. This source is the
 caller and nothing else: the benches, their values, the noise floors and the
-attribution stay in the script. Ships **disabled** (`workers.sources.fitness
-.enabled: false`) — the noise floors are measured by hand first, and a delta
-with no floor under it reports nothing.
+attribution stay in the script.
+
+Whether it is armed at all is `config.yaml`'s claim, not this file's; what the
+code guarantees is the default, and the default is **disabled** —
+`WorkerPool._scheduler_pass` steps past a source whose `workers.sources.<name>`
+block does not arm it. Two preconditions sit behind that flag and outlive any
+particular value of it. A bench is believed only once its noise floor has been
+measured by hand with the pool paused, because a delta with no floor under it
+reports nothing; and `file_items` stays off until about 8 nightly rows per bench
+exist, so the intake has a series to judge a regression against
+(`architecture/automod.md` 12.5).
 
 Four rules:
 

@@ -21,6 +21,8 @@ import asyncio
 import inspect
 import json
 import logging
+import re
+import sys
 import time
 from pathlib import Path
 
@@ -3995,3 +3997,203 @@ def test_the_owed_check_row_says_nothing_was_refused_when_the_close_proceeds(tmp
     assert row["result"]["carrier_guard"] == [], row["result"]
     assert row["result"]["moved"] == "closed"
     assert "carrier guard" not in path.read_text(encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# #4559: whether the fitness source is armed is stated once, in `config.yaml`
+#
+# `workers/sources/fitness.py`'s module docstring and the comment above
+# `register(_fitness)` both said the source ships disabled, while `config.yaml`
+# carried its leaf as true from `229337f6` (2026-11-23, "The nightly fitness benches
+# run"). For the two weeks from that commit to the review that filed #4559 those two
+# were the surfaces an operator reads BEFORE opening `config.yaml`, and they
+# described a source that demonstrably ran: queue row 25939 completed inside the
+# 01-04 window and run `run_fitness_20261124_115713_6fa77c` spent 46 minutes on the
+# primary. The #4552 rail in `tests/test_workers_doc_claims.py` reads
+# `architecture/workers.md`, which is why the doc was corrected on 2026-11-24 and
+# the code stayed wrong. These nodes fence the two `workers/` surfaces; the
+# `config.yaml` block's own header is fenced in that file, beside the rail that
+# already holds its values.
+# ---------------------------------------------------------------------------
+
+_WROOT = Path(__file__).resolve().parents[1]
+
+#: A sentence stating a leaf's VALUE: `enabled: true` / `enabled: false`, backticked
+#: or not. Naming the key is wanted — pointing at the file that decides is the fix —
+#: but carrying the value is a copy with no writer, and the copy is what rotted.
+_LEAF_VALUE = re.compile(r"([\w.]*enabled)\s*:\s*(true|false)\b", re.I)
+
+#: The shipping CONCLUSION, in either spelling this tree used. Anchored on the verb
+#: on purpose: "the default is **disabled**" is the true sentence, so a ban on the
+#: word `disabled` would bite the replacement rather than the defect.
+_SHIPPING_CLAIM = re.compile(r"\bships\s*\*{0,2}(disabled|off|false)\b", re.I)
+
+
+def _fitness_docstring() -> str:
+    """`workers/sources/fitness.py`'s module docstring, read off disk.
+
+    Off disk rather than `fitness.__doc__`: the file is what a later round edits, and
+    an attribute of an already-imported module lags the edit that matters.
+    """
+    text = (_WROOT / "workers" / "sources" / "fitness.py").read_text(encoding="utf-8")
+    assert text.count('"""') >= 2, "no module docstring to grade"
+    doc = text.split('"""')[1]
+    assert doc.strip(), "the module docstring is empty, so every claim below is vacuous"
+    return doc
+
+
+def _registry_comment(source: str = "fitness") -> str:
+    """The `#` block directly above a source's import line in `sources/__init__.py`.
+
+    Block-anchored, not a whole-file grep: `unknown source` sits above three
+    registrations' lines, so the reason found beside `failure-ledger` or
+    `cost-investigate` would answer for `fitness` for free.
+    """
+    lines = (_WROOT / "workers" / "sources" / "__init__.py"
+             ).read_text(encoding="utf-8").splitlines()
+    pat = re.compile(rf"^from workers\.sources import {source} as _{source}\b")
+    hits = [i for i, ln in enumerate(lines) if pat.match(ln)]
+    assert len(hits) == 1, (
+        f"the import line for `{source}` matched {len(hits)} times, so the comment "
+        "graded below is not necessarily the one beside it")
+    i = hits[0]
+    block: list[str] = []
+    while i > 0 and lines[i - 1].lstrip().startswith("#"):
+        block.append(lines[i - 1].lstrip().lstrip("#").strip())
+        i -= 1
+    assert block, f"no comment block above the `{source}` import — deleted, not fixed"
+    return " ".join(" ".join(reversed(block)).split())
+
+
+#: What the docstring must keep saying. Each is a claim the item names as still true,
+#: so a "fix" that deletes the false sentence and takes a true one with it fails here
+#: as surely as the false sentence does.
+_DURABLE_DOC_CLAIMS = (
+    ("default", "states what happens when config.yaml says nothing about a source"),
+    ("disabled", "names that default with the word the pool's own read uses"),
+    ("config.yaml", "points at the one file that decides whether it is armed"),
+    ("_scheduler_pass", "cites the code that enforces the default"),
+    ("noise floor", "keeps the arming precondition"),
+    ("by hand", "keeps how that precondition is met"),
+    ("file_items", "keeps the intake precondition"),
+    ("8 nightly rows", "keeps the number the intake waits for"),
+)
+
+
+def _arming_prose_findings(doc: str, comment: str) -> list[str]:
+    """Every way the two `workers/` surfaces can outlive the flag they describe.
+
+    Arguments, not reads, so the seeded node re-runs THIS predicate against a doctored
+    surface — the shape #4552's rail uses, and the only way a green fence here is
+    evidence rather than decoration. Three kinds of finding, three different failures:
+    a leaf VALUE copied into prose (the copy with no writer that stood false for two
+    weeks); the shipping CONCLUSION, which is the same claim in words and rots the same
+    way; and a durable claim gone, which is what a rewrite that deletes instead of
+    correcting leaves behind.
+    """
+    out: list[str] = []
+    for where, text in (("the fitness docstring", doc), ("the registry comment", comment)):
+        for value in _LEAF_VALUE.finditer(text):
+            out.append(f"{where} states a leaf value ({value.group(0)!r}). The value "
+                       "lives in config.yaml and nothing writes the copies: this is the "
+                       "sentence that read false from 2026-11-23 to the #4559 review.")
+        claim = _SHIPPING_CLAIM.search(text)
+        if claim:
+            out.append(f"{where} states a shipping conclusion ({claim.group(0)!r}). It "
+                       "is the same claim as the value and moves on no flag flip; say "
+                       "what the CODE defaults to, and cite config.yaml for the rest.")
+    for needle, why in _DURABLE_DOC_CLAIMS:
+        if needle.lower() not in doc.lower():
+            out.append(f"the fitness docstring no longer {why} (needle {needle!r}) — "
+                       "#4559 removes a false sentence, not the true ones beside it.")
+    if "unknown source" not in comment:
+        out.append("the registry comment no longer gives the reason the source is "
+                   "registered whatever its leaf says: a queue row whose source is "
+                   "absent from `SOURCE_REGISTRY` is poisoned as `unknown source`.")
+    return out
+
+
+def test_the_fitness_armed_state_is_config_yamls_claim_alone():
+    """#4559 clauses 1-3: the two code surfaces describe the default, never the flag.
+
+    `workers.sources.fitness.enabled` is armed in `config.yaml`, so neither the
+    source's own docstring nor the registry's comment may restate that state — one of
+    them did for two weeks while the benches ran nightly. What each may do is state
+    what the code guarantees and point at the file that owns the rest, which is the
+    split `architecture/automod.md` 12.5 keeps.
+
+    The two claims those sentences make about CODE are checked against the code here,
+    not against each other, so neither sentence can outlive the behaviour either. The
+    default is disabled because `WorkerPool._scheduler_pass` reads
+    `src_cfg.get("enabled", False)`; the `cfg.get("enabled", True)` reads elsewhere in
+    `workers/pool.py` (round-hold, KV gate, data-trip hold) are pool subsystems, NOT
+    the source tick, so citing one of those instead would flip the docstring's claim
+    upside down and this assert is what catches it.
+    """
+    doc, comment = _fitness_docstring(), _registry_comment()
+    findings = _arming_prose_findings(doc, comment)
+    assert not findings, "\n".join(findings)
+
+    from workers.pool import WorkerPool
+    tick = inspect.getsource(WorkerPool._scheduler_pass)
+    assert 'src_cfg.get("enabled", False)' in tick, (
+        "the docstring says a source config.yaml does not arm stays disabled and "
+        f"cites `_scheduler_pass` for it; the tick no longer reads the leaf that way:\n"
+        f"{tick[:300]}")
+
+    poison = (_WROOT / "workers" / "pool.py").read_text(encoding="utf-8")
+    assert 'f"unknown source {item.source}"' in poison, (
+        "the registry comment's whole argument for registering an un-armed source is "
+        "that its rows are poisoned as `unknown source`, and `workers/pool.py` no "
+        "longer writes that text — the comment needs re-finding, not this assert "
+        "deleting")
+
+
+def test_the_fitness_armed_state_rail_fails_on_a_seeded_decoy(monkeypatch):
+    """#4559 clause 5: the rail bites, in both directions, so its green is a measurement.
+
+    Each arm restores one retired surface onto the real one — the exact wording
+    `6ec7fef5` left behind — and calls the shipped node, so what fails is the check
+    #4559 adds and not a paraphrase of it. The retired sentences are assembled from
+    fragments: a ban spelled as one literal can find its own file, which is how
+    #1749's needle rule reads elsewhere in this suite.
+    """
+    mod = sys.modules[__name__]
+    doc, comment = _fitness_docstring(), _registry_comment()
+
+    # Direction 1 — the docstring's false sentence, restored in place.
+    retired_doc = ("Ships **" + "disabled** (`workers.sources.fitness"
+                   ".enabled: false`) — the noise floors are measured by hand first, "
+                   "and a delta with no floor under it reports nothing.")
+    both = retired_doc + "\n" + doc
+    findings = _arming_prose_findings(both, comment)
+    assert any("leaf value" in f for f in findings), findings
+    assert any("shipping conclusion" in f for f in findings), (
+        f"the ban answers the value but not the conclusion it came with: {findings}")
+    monkeypatch.setattr(mod, "_fitness_docstring", lambda: both)
+    with pytest.raises(AssertionError) as seeded:
+        test_the_fitness_armed_state_is_config_yamls_claim_alone()
+    assert "fitness docstring" in str(seeded.value), str(seeded.value)[:200]
+    monkeypatch.undo()
+
+    # Direction 2 — the registry comment's false sentence, which KEEPS the true
+    # reason beside it: only the conclusion can be what fails here.
+    retired_comment = ("The nightly behaviour-fitness run. Appended here so nothing "
+                       "above moves; it ships disabled in config.yaml and is "
+                       "registered anyway, because a queue row whose source is not in "
+                       "this registry is poisoned as `unknown source`.")
+    assert any("shipping conclusion" in f
+               for f in _arming_prose_findings(doc, retired_comment)), "not even biting"
+    monkeypatch.setattr(mod, "_registry_comment", lambda source="fitness": retired_comment)
+    with pytest.raises(AssertionError) as seeded:
+        test_the_fitness_armed_state_is_config_yamls_claim_alone()
+    assert "registry comment" in str(seeded.value), str(seeded.value)[:200]
+    monkeypatch.undo()
+
+    # Direction 3 — a true claim deleted rather than rewritten. Nothing false is
+    # added: this is the shape of a "fix" that passes a pure ban and loses the
+    # precondition the flag cannot own.
+    gutted = doc.replace("file_items", "the intake switch")
+    assert any("file_items" in f for f in _arming_prose_findings(gutted, comment)), (
+        "deleting a durable claim out of the docstring is invisible to the rail, so "
+        "the required-claims half is decoration")

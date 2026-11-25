@@ -5500,3 +5500,145 @@ def test_a_stale_enabled_claim_in_the_roster_sections_fails_the_rail():
     assert _enabled_claim_findings(cfg, rows, log) == [], (
         "the changelog's own `enabled: false` recounting the retired claim now reads as "
         "a live claim, so no section-scoping can save it either")
+
+
+# ── #4559: the fitness block's header states a precondition, not its armed state ─────
+#
+# `config.yaml` is the one definition of whether a source dispatches, and its own
+# fitness block contradicted that on the page: a header line reading SHIPS OFF sat 20
+# lines above `enabled: true`, contradicted in turn by the dated comment on the leaf
+# ("On since 2026-11-23…"). #4552 fenced `architecture/workers.md`'s **on** column
+# and §4's prose, which is why the doc was corrected on 2026-11-24 and neither the
+# block's header nor the two `workers/` docstrings were; those two are fenced in
+# `tests/test_workers_sources.py`. This is the third surface, and the one an operator
+# is most likely to believe.
+#
+#: The retired header sentence, and the ban's own needle, both assembled from
+#: fragments so neither can be found in this file by the thing it hunts (#4552's
+#: needle rule).
+RETIRED_FITNESS_HEADER = (
+    "SHIPS " "OFF: the noise floors are measured by hand first (`fitness noise "
+    "--repeat 5`, pool paused), and a delta with no floor under it reports nothing.")
+
+_SHIPPING = "SHIPS " "OFF"
+
+
+def _fitness_block_prose() -> tuple[str, str]:
+    """The `fitness:` block's header comment, and the comment on its `enabled` leaf.
+
+    Read from disk, for the reason `_src_cfg` gives: `CONFIG` is mutated in place by
+    other tests, so a value read off it measures whichever test ran last.
+
+    Block-anchored, deliberately, rather than a whole-file grep of `config.yaml`. The
+    file carries this phrase elsewhere and truthfully: `automod.landing.measured_close`
+    says it above a leaf that really does read `off`, with a code default of off beside
+    it. A whole-file ban would have to call that sentence a defect to stay green, which
+    is how a check earns an argument instead of obedience — and #4559 is about the
+    surface that states a state its own leaf contradicts, which is this block alone.
+    """
+    lines = (ROOT / "config.yaml").read_text(encoding="utf-8").splitlines()
+
+    def above(idx: int) -> str:
+        block: list[str] = []
+        i = idx
+        while i > 0 and lines[i - 1].lstrip().startswith("#"):
+            block.append(lines[i - 1].lstrip().lstrip("#").strip())
+            i -= 1
+        assert block, "the comment was deleted rather than corrected"
+        return " ".join(" ".join(reversed(block)).split())
+
+    hits = [i for i, ln in enumerate(lines) if ln.strip() == "fitness:"]
+    assert len(hits) == 1, (
+        f"`fitness:` matched {len(hits)} lines, so the header graded here is not the "
+        "one beside the source's own block")
+    header = above(hits[0])
+
+    end = next((j for j in range(hits[0] + 1, len(lines))
+                if lines[j].strip() and not lines[j].startswith("      ")), len(lines))
+    leaves = [j for j in range(hits[0] + 1, end)
+              if lines[j].strip().startswith("enabled:")]
+    assert len(leaves) == 1, (
+        f"the fitness block's `enabled` leaf matched {len(leaves)} lines, so the "
+        "dated arming note graded here may not be the one on it")
+    return header, above(leaves[0])
+
+
+def _fitness_block_findings(header: str, leaf_comment: str) -> list[str]:
+    """How this block can stop owning its own state, and what it must not lose.
+
+    Arguments again, so the seeded node re-runs THIS predicate (#4552's shape). The
+    header may state a precondition the flag cannot satisfy — that is what the first
+    two sentences are for — but it may not state a state, and the dated note on the
+    leaf must survive, because that sentence is the reason config.yaml can be the only
+    place the answer lives.
+    """
+    out: list[str] = []
+    if _SHIPPING in header.upper():
+        out.append("the `fitness:` block's header states a shipping state "
+                   f"({_SHIPPING!r}) while its own leaf below says otherwise — the "
+                   "self-contradiction #4559 found in the file operators trust most.")
+    value = _ENABLED_LITERAL.search(header)
+    if value:
+        out.append(f"the `fitness:` block's header carries a leaf value "
+                   f"({value.group(0)!r}); the value belongs on the leaf, where it is "
+                   "dated. Nothing writes the header's copy.")
+    for needle, why in (("noise floor", "keeps the precondition a bench needs"),
+                        ("by hand", "keeps how that precondition is met")):
+        if needle not in header.lower():
+            out.append(f"the header no longer {why} (needle {needle!r}) — the arming "
+                       "precondition is the true half of the sentence that was wrong.")
+    if "2026-11-23" not in leaf_comment:
+        out.append("the comment on `enabled` no longer dates when the source was "
+                   "armed, so the block states a state with no provenance — the leaf "
+                   "comment is what lets config.yaml be the single definition.")
+    return out
+
+
+def test_the_fitness_block_states_a_precondition_and_its_values_stay_put():
+    """#4559 clause 4: the block's header claims no state, and its values did not move.
+
+    Two halves, one per thing the item says must be true. The prose half is above. The
+    value half pins `enabled`, `file_items` and `file_lowest` at
+    `(True, False, False)`: the arming was earned by a noise-floor reading
+    (`architecture/testing.md` "Noise floors") and filing stays off until about 8
+    nightly rows per bench exist, so #4559 is comment-only and a flip of any of these
+    three is a different decision from the one taken on 2026-11-23 — it has to arrive
+    with its own measurement, and this assert is what makes it arrive loudly.
+    """
+    header, leaf_comment = _fitness_block_prose()
+    findings = _fitness_block_findings(header, leaf_comment)
+    assert not findings, "\n".join(findings)
+
+    block = _src_cfg()["fitness"]
+    got = (block["enabled"], block["file_items"], block["file_lowest"])
+    assert got == (True, False, False), (
+        f"`workers.sources.fitness` reads {got}, not the armed / not-filing / "
+        "not-filing-lowest state the noise-floor reading earned on 2026-11-23. "
+        "#4559 changed comments only, so one of these three moved somewhere else.")
+
+
+def test_the_fitness_header_rail_fails_on_a_seeded_header():
+    """#4559 clause 4 with eyes: each retired or deleted sentence trips the shipped check.
+
+    The predicate takes the header as an argument precisely so this node can hand it a
+    doctored one and call the shipped check through it, rather than trusting that a
+    green node above means the ban has ever seen the wording it exists for.
+    """
+    header, leaf_comment = _fitness_block_prose()
+
+    seeded = RETIRED_FITNESS_HEADER + " " + header
+    assert any("shipping state" in f for f in _fitness_block_findings(seeded,
+                                                                     leaf_comment)), (
+        "restoring the retired header does not fail the check, so the ban cannot see "
+        "the sentence it names")
+
+    valued = "`enabled: false` until the floors are measured. " + header
+    assert any("leaf value" in f
+               for f in _fitness_block_findings(valued, leaf_comment)), (
+        "a value copied into the header passes, which is how the header becomes the "
+        "second definition of the state again")
+
+    assert any("no longer dates" in f
+               for f in _fitness_block_findings(header, "")), (
+        "deleting the dated arming note is invisible, so the leaf's provenance is "
+        "unrailed")
