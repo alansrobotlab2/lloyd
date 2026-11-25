@@ -436,6 +436,11 @@ changes the routing of the whole signal**:
 - **`notable`** (anything is act-now) → `POST /api/sessions/{id}/inject`, a real
   ambient turn. The skill is told never to escalate to `urgent` — that is
   reserved for safety and security.
+- **Neither door, when resolution returns nothing** (what a 15-minute job meets
+  overnight) → `POST /api/next-session-note` (#1516, 2026-09-26): a file-backed
+  note the first chat turn reads, held 24 h, and **no agent turn runs** — the
+  result answers `mechanism: next-session` with `downgraded_from` naming the tier
+  that was asked for, so a `notable` ask cannot book itself as a delivery.
 
 **Which session counts as "the user's" is the whole problem.** The producer passes
 no session id, so resolution asks for the last session to receive a user turn,
@@ -473,8 +478,12 @@ because it is what the prompt states, and the skill's own last line is written
 against equality for the reason that started the whole thing: a paragraph ending
 in `[SILENT]` was delivered to Alan in full, as noise (2026-09-03).
 
-**Backlog #481 is closed, and it closed the contradiction rather than only the
-heading.** Step 2 used to tell the agent to skip a missing calendar source
+**Backlog #481 is closed by the expiry sweep, not by the fix — #1504 is the item
+that closed the contradiction rather than only the heading.** #481 went
+`draft → done` on 2026-09-15 as "expired: self-filed 7 d ago and never triaged",
+with no skill edit beside it; #1504 was filed on 2026-09-25 reading that closure
+exactly that way ("#481 expired it instead of fixing it") and landed the change
+the same day (vault commit `eb2e8019`). Step 2 used to tell the agent to skip a missing calendar source
 **silently** ("do not retry, do not treat it as an error"), which contradicted the
 degraded-run attribution guardrail at the foot of the same file — a run whose
 source died must name it. #1504 renamed that heading to "may be unavailable —
