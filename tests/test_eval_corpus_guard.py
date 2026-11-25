@@ -5116,13 +5116,19 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: it prints. Nothing was added to the scored corpus to reach it: the retrieval gold set
 #: is still 86 `- id:` rows and the arm reads its own file,
 #: `eval/skill_match_queries.yaml`, so the executable surface moved while the population
-#: the retrieval metrics divide by did not. It names `307d4fb9`, the commit carrying the
-#: arm, stamped here beside it for that same self-naming reason. Not the sha the arm was
-#: first written at upstream (`0003db69`, on the refused round's branch): that object is
-#: reachable from no ref after its rebase, so `git gc` would prune it and this node's
-#: first assertion — that the anchor RESOLVES — would go red on a tree nobody edited.
-#: `307d4fb9` is an ancestor of `main` and holds these exact bytes.
-RUN_EVAL_CODE_ANCHOR = "307d4fb9"
+#: the retrieval metrics divide by did not — `git show --stat` on the landed commit below
+#: lists no file under `eval/` but `run_eval.py`. It names `01766790`, the commit that
+#: ARRIVED ON MAIN carrying the arm, stamped one commit later for that same self-naming
+#: reason. Two shas were rejected to get here, and they failed differently:
+#: `0003db69` (the arm's first upstream writing) is reachable from no ref at all, and
+#: `307d4fb9` — the pre-squash sha #4580's round carried — was reachable from exactly one
+#: ref, `refs/automod/rounds/SM_20261125_182723`, which `_rotate_refs` prunes to the last
+#: 40. Reaching a rotating ref is the trap: `git show` succeeds and the bytes match, so
+#: every projection above passes, until the ref ages out and the whole node goes red on a
+#: tree nobody edited. `test_the_executable_surface_anchor_is_reachable_from_main` now
+#: refuses that shape, and `01766790` passes it: `git merge-base --is-ancestor 01766790
+#: HEAD` exits 0 and `git show 01766790:eval/run_eval.py` is byte-identical to this tree's.
+RUN_EVAL_CODE_ANCHOR = "01766790"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
@@ -5321,6 +5327,42 @@ def test_the_re_stamp_moved_no_executable_line_of_the_eval_harness():
         f"{moved[:3] or f'{len(after)} lines vs {len(before)}'} — a `#:` block edit leaves "
         "this projection alone and a docstring edit moves it on purpose (#3505), so if the "
         "harness genuinely changed, move RUN_EVAL_CODE_ANCHOR in the commit that changed it")
+
+
+def test_the_executable_surface_anchor_is_reachable_from_main():
+    """#4399 clause 5, the half the byte projection cannot check: the anchor SURVIVES.
+
+    Every assertion above asks a question of `git show <anchor>:eval/run_eval.py`, so all
+    of them go red together the moment the anchor stops resolving — and an anchor stamped
+    at a sha that lives only on a round's ref does stop resolving, because
+    `scripts/automod/ledger.py::_rotate_refs` prunes `refs/automod/rounds/*` to the last 40
+    and a refused round's branch is deleted outright. That is what #4580's landing did
+    here: the arm arrived on `main` squashed, which rewrote the sha its own commits had
+    carried, and the stamp was left pointing at the pre-squash object — reachable, on the
+    day it was graded, from nothing but that round's ref. So the projection passed and the
+    file it reads was byte-identical, while the sentence above the constant asserted a
+    lineage the commit did not have.
+
+    A squash therefore has to be survivable by construction, not by luck: the anchor names
+    a commit that is an ancestor of HEAD, which a rewritten sha never is and a landed one
+    always is. This is the assertion that would have made the previous round red instead of
+    quietly installing a time bomb keyed to a ref rotation.
+    """
+    shown = subprocess.run(
+        ["git", "-C", str(ROOT), "rev-parse", "--verify", f"{RUN_EVAL_CODE_ANCHOR}^{{commit}}"],
+        capture_output=True, text=True)
+    assert shown.returncode == 0, (
+        f"`{RUN_EVAL_CODE_ANCHOR}` is not a commit object in this tree at all — "
+        f"{shown.stderr.strip()}")
+
+    ancestry = subprocess.run(
+        ["git", "-C", str(ROOT), "merge-base", "--is-ancestor",
+         RUN_EVAL_CODE_ANCHOR, "HEAD"],
+        capture_output=True, text=True)
+    assert ancestry.returncode == 0, (
+        f"`{RUN_EVAL_CODE_ANCHOR}` resolves but is not an ancestor of HEAD, so it exists "
+        "only on a ref that the ledger rotates and `git gc` will eventually prune — "
+        "re-stamp RUN_EVAL_CODE_ANCHOR at the landed commit that carries these bytes")
 
 # ── #3505: `indexed_paths` prices the walk with a dated figure, not a memory ────
 #
