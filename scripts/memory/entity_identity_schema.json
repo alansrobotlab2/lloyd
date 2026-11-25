@@ -145,6 +145,14 @@
       "aliases": []
     },
     {
+      "canonical": "Claude Code",
+      "type": "system",
+      "why": "The digester (#53) files stack updates under the package slug — knowledge/stack-updates/<date>-claude-code.md — and the nightly deep-extraction pass derives an entity from the note's own text, so the slug became a fact entity beside the tool: facts/claude-code/ took a fresh EXTRACTED row on 2026-11-24 while the canonical entity held the history, and a reader asking about claude-code was served the fragment. #893 closed this on 2026-09-16 with a hand-written store alias (origin='triage-893') and the 2026-09-22/23 kg rebuild dropped it, silently: a store row is not derived from anything, so nothing restored it. Declaring the pair here is the durable route — register_schema_keys installs from this file on the first gate call of every process, so a rebuild regenerates it. WRITE path only: facts already filed under the variant are read-side work, and while facts/claude-code/ exists the read side keeps answering fact_get(entity=\"claude-code\") from the fact tree, which agent_mcp/_shared.py _resolve_entity probes before the alias table (#754 is the precedent for knowingly stranding one such sibling).",
+      "aliases": [
+        "claude-code"
+      ]
+    },
+    {
       "canonical": "Inner Voice",
       "type": "system",
       "why": "738 facts. Highest-value entity in the store — worth pinning its identity down.",

@@ -331,7 +331,15 @@ def test_a_withdrawn_declaration_is_retracted_by_the_next_register(store):
         "the truncated surface survived: the bracket half of the predicate is not running")
     assert store.aliases.resolve("Knowledge Graph (KG)") == "Knowledge Graph"
     declared = _declared_aliases()
-    assert len(declared) == 41, f"schema declares {len(declared)} aliases, expected 41"
+    # 42 as of #4561: `claude-code` -> `Claude Code`, the stack-update digester's
+    # package slug, which had become a fact entity beside the tool it names. It is the
+    # one declared alias whose TEXT is redundant — the slug folds onto its canonical's
+    # key, so the loader answers it from the canonical line whether or not a row exists
+    # — and whose ROW is indispensable, because the only previous fix was exactly such a
+    # row (#893, 2026-09-16, `origin='triage-893'`) and a store rebuild deleted it with
+    # nothing left to write it back. That asymmetry is why the declaration is a line of
+    # this file rather than a call into the store.
+    assert len(declared) == 42, f"schema declares {len(declared)} aliases, expected 42"
     for surface, canon in declared.items():
         assert store.aliases.resolve(surface) == canon, surface
 
@@ -400,8 +408,30 @@ def test_retraction_leaves_every_other_provenance_alone(store, tmp_path):
     after = store.aliases.rows()
     foreign_after = [r for r in after if r["origin"] != "schema"
                      or r["report_path"] is not None]
-    assert len(foreign_after) == len(foreign_before), "count of other-provenance rows moved"
-    assert foreign_after == foreign_before, "content of other-provenance rows moved"
+    # A population, not a count. One row in `foreign_before` is #893's
+    # `claude-code` -> `Claude Code` (`origin='triage-893'`), seeded here because the
+    # live store carries it. #4561 DECLARED that pair, so the install adopts it —
+    # re-stamped `schema`, which is precisely what a declaration is for — and it leaves
+    # this population on purpose. The invariant is therefore "nothing else moved, and
+    # anything that did is a pair the file now declares", which a single count cannot say.
+    before_keys = {(r["surface"], r["canonical"]) for r in foreign_before}
+    after_keys = {(r["surface"], r["canonical"]) for r in foreign_after}
+    assert after_keys <= before_keys, (
+        "a row with another provenance changed shape: " f"{sorted(after_keys - before_keys)}")
+    moved = before_keys - after_keys
+    assert moved <= set(_declared_aliases().items()), (
+        f"rows left the other-provenance population that the schema does not declare: "
+        f"{sorted(moved - set(_declared_aliases().items()))}")
+    # Whatever stays foreign keeps every field it had. `created_at` is excluded on
+    # purpose: the one row this round legitimately touches is #893's, and it is
+    # re-stamped rather than rewritten-elsewhere — which `moved` above already pinned as
+    # a declared pair. Comparing full dicts would also fail on the adopted row's clock.
+    fields = ("surface", "surface_lc", "canonical", "kind", "origin", "report_path")
+    stayed = before_keys & after_keys
+    shape = lambda rs: {((r["surface"], r["canonical"])): {f: r[f] for f in fields}
+                        for r in rs if (r["surface"], r["canonical"]) in stayed}
+    assert shape(foreign_after) == shape(foreign_before), (
+        "content of other-provenance rows moved")
     # Named, not just aggregated: the two rows the guards exist for.
     assert [(r["canonical"], r["kind"], r["origin"]) for r in after if r["surface"] == "task"] == [
         ("Entity Resolution Sweep", "case", "migration")], "the case-variant row moved"
@@ -455,3 +485,219 @@ def test_the_extractor_no_longer_files_task_under_the_pipeline(extractor):
     e, _ = extractor
     assert e._sanitize_entity("Task", declared_type="system") == "Task"
     assert e._sanitize_entity("Relationship Graph", enforce=True) == "Knowledge Graph"
+
+
+# ── 10. the digester's package slug must not be an entity of its own (#4561) ──
+#
+# skills/documentation-digester/SKILL.md:165 writes knowledge/stack-updates/<date>-
+# {key}.md and its own note at :168-178 warns that `{key}` is not the fact-store entity
+# name and that using it "silently creates a second entity". The warning cannot hold,
+# because the writer is not the digester run's `fact_add` — it is the nightly deep
+# extraction pass, which derives an entity from the note's own slug text and files what
+# it gets. Measured 2026-11-25 on the live store:
+# `curl -s localhost:8080/api/entity?name=claude-code` answered `factCount: 1` (stat-001
+# "The path does not exist (No such file).", provenance EXTRACTED, source_doc
+# knowledge/stack-updates/2026-11-25-claude-code.md) beside `Claude Code`'s 4,609, and
+# `facts/claude-code/` carried two files with 2026-11-24 mtimes. A reader asking about
+# the tool by the name the digester writes was served last night's fragment and none of
+# the history. #893 closed this split on 2026-09-16 with a hand-written store row
+# (`kind='punct', origin='triage-893'`) and verified `resolve('claude-code')`; that row
+# is gone, its 4,609 facts are not, and the 2026-10-02 owed-check ruled the split
+# settled. These nodes pin the correction: the declaration lives in a human-edited file
+# every process installs from, not in a store a rebuild may replace.
+CLAUDE_CANON = "Claude Code"
+CLAUDE_SLUG = "claude-code"
+STACK_NOTE = "knowledge/stack-updates/2026-11-25-claude-code.md"
+SCHEMA_PATH = ROOT / "scripts/memory/entity_identity_schema.json"
+
+
+def alias_row(st, surface: str, canonical: str):
+    """One alias row by its FULL key.
+
+    `resolve(surface)` cannot stand in for this: the schema answers the folded surface on
+    its own now, so resolution succeeds whether or not a row was ever written, and a node
+    that asked it would pass on the store's silence.
+    """
+    for r in st.aliases.rows():
+        if r["surface"] == surface and r["canonical"] == canonical:
+            return r
+    return None
+
+
+@pytest.fixture
+def fragment(store):
+    """The live defect, present BEFORE the schema is read: the slug is an entity.
+
+    The order is the mechanism, not decoration. `claude-code` self-registered in 2026-09
+    through the unclaimed-name path, and a self-registered row is what makes the split
+    feed itself: `known_entities_in_text` offers every registered name to the next pass,
+    so each cycle's note re-arms its own fragment. A nightly pass reads the schema
+    afterwards, which is the state this fixture reaches; installing first on a clean store
+    would skip the collision branch a fragment actually lands in.
+    """
+    store.entities.register(CLAUDE_SLUG, kind="system")
+    return store
+
+
+def test_the_declaration_is_accepted_and_folds_the_slug_onto_the_canonical(store):
+    """Clause 1. The file declares the pair, the loader accepts it, the fold is real.
+
+    The pair is unusual and the reason belongs in the open: `_schema_key` folds case,
+    punctuation and whitespace, so `claude-code` and `Claude Code` reduce to the same key,
+    `claude code`, and the loader's index answers the slug from the canonical line with no
+    alias row in between. The alias is declared anyway because the ROW is what a rebuild
+    needs re-installed, and it is what #893 had and lost. The fold assertion is what keeps
+    the two counts in this file honest about what the declaration actually adds: it is the
+    reason `test_the_shipped_alias_population_is_exactly_what_the_store_should_carry`
+    counts 42 rather than 41.
+    """
+    assert en._schema_key(CLAUDE_SLUG) == en._schema_key(CLAUDE_CANON) == "claude code"
+    loaded = en.load_identity_schema()
+    by_name = {e["canonical"]: e for e in loaded["entities"]}
+    assert CLAUDE_CANON in by_name, "the loader dropped the declared canonical"
+    assert CLAUDE_SLUG in (by_name[CLAUDE_CANON].get("aliases") or []), (
+        "the slug is not among the canonical's own alias lines")
+    assert en.schema_identity(CLAUDE_SLUG) == CLAUDE_CANON, (
+        "the folded key no longer answers the canonical, so the write gate cannot fold "
+        "the slug and tonight's pass files into the fragment again")
+    assert en.schema_type_of(CLAUDE_CANON) == "system", (
+        "the declared type is not drawn from the file's own types list, or has moved off "
+        "the `system` kind the store already carries for this entity")
+    assert CLAUDE_SLUG in _declared_aliases(), (
+        "the alias line is gone, so the installed row and the pinned count are stale")
+
+
+def test_the_write_gate_folds_the_slug_before_the_fragment_can_be_used(store):
+    """Clause 2 at the gate the extractor actually calls.
+
+    `fx._identity_gate` is that module's own import of `gate_entity_name`, reached by
+    `_gate_entity` at its line 530 with the model-supplied name and the note's path —
+    exactly what the nightly pass hands it for a stack-update note. The fragment entity
+    already exists here, which is the state the live store is in, and `store` is a fresh
+    tmp KGStore, so a second registered spelling means a second name that could be filed
+    under. The schema is consulted first, so the self-registered row no longer wins.
+    """
+    store.entities.register(CLAUDE_SLUG, kind="system")
+    assert store.entities.get(CLAUDE_SLUG) is not None, (
+        "fixture lost its teeth: the fragment is no longer a registered entity")
+
+    name, verdict = fx._identity_gate(CLAUDE_SLUG, declared_type=None,
+                                      source_doc=STACK_NOTE)
+    assert (name, verdict) == (CLAUDE_CANON, "schema"), (
+        f"the write gate answers {name!r} by {verdict!r}; anything but 'schema' is a "
+        f"route a rebuild can delete")
+    # The canonical keeps answering as itself — the fold redirects a variant, it does
+    # not rename the entity that holds 4,609 facts.
+    assert fx._identity_gate(CLAUDE_CANON, declared_type="system",
+                             source_doc=STACK_NOTE) == (CLAUDE_CANON, "schema")
+
+
+def test_the_gate_redirects_the_slug_without_moving_a_single_fact_row(extractor):
+    """Clause 2's second half: nothing is created under `facts/claude-code/`.
+
+    Written, not asserted away — a fact is filed under the name the gate returned, in a
+    tmp facts tree, so the assertion that no slug-named file exists is a measurement of
+    where writes go rather than of the tree being empty to begin with. And the half that
+    makes this a safe round rather than a convenient one: a declaration attaches FUTURE
+    extractions and migrates nothing. The live `facts/claude-code/` directory, and the
+    one row the owed-check now owns, are untouched by any of this; the read side still
+    serves the fragment while the directory stands, because `agent_mcp/_shared.py`'s
+    `_resolve_entity` probes the fact tree before the alias table (#754 is the precedent
+    for knowingly stranding one such sibling).
+    """
+    e, _sidecar = extractor
+    e.facts_dir.mkdir(parents=True, exist_ok=True)
+    kg_store.store().entities.register(CLAUDE_SLUG, kind="system")
+    name, _verdict = e._gate_entity(CLAUDE_SLUG, STACK_NOTE)
+    assert (name, _verdict) == (CLAUDE_CANON, "schema"), (name, _verdict)
+    e.write_fact_file(name, "state", {"facts": [
+        {"fact": "armed nightly since 2026-11-23", "confidence": 0.9,
+         "category": "state", "provenance": "EXTRACTED",
+         "source_doc": STACK_NOTE}]})
+    facts = e.facts_dir
+
+    assert (facts / CLAUDE_CANON / f"{CLAUDE_CANON}-state.md").is_file(), (
+        "the write did not land under the name the gate returned; the tree is "
+        f"{sorted(q.name for q in facts.iterdir())}")
+    assert not (facts / CLAUDE_SLUG).exists(), (
+        "the slug got a directory of its own, which is the split this declaration "
+        "exists to stop")
+    assert not any(q.name == CLAUDE_SLUG for q in facts.iterdir()), (
+        f"something was created under the slug anyway: {sorted(q.name for q in facts.iterdir())}")
+    assert en.schema_identity(CLAUDE_CANON) == CLAUDE_CANON, (
+        "the fold went the wrong way and renamed the entity holding 4,609 facts")
+
+
+def test_the_pair_installs_over_the_fragment_and_the_second_install_writes_nothing(
+        fragment):
+    """Clause 3. Installed with the two fields that matter, over the fragment, twice.
+
+    `kind='semantic'` preserves behaviour: the slug's own row carries `system`, and alias
+    kinds rank BELOW a stored type in the precedence `entity_kind` applies, so the alias
+    can never downgrade the canonical's type. `origin='schema'` preserves the row: it is
+    the origin the reconciler recognises as schema-owned, and the one #893's row lacked
+    (`triage-893`), which is why a rebuild could delete a fix with nothing left to say it
+    had been there. The collision branch is present by construction here — the surface
+    already names an entity — so asserting the row exists is also asserting the install
+    was not skipped as a collision. A second call writing 0 rows is what lets every
+    process install on its first gate call without churning `created_at`.
+    """
+    assert en.register_schema_keys() > 0, "nothing was installed at all"
+    row = alias_row(fragment, CLAUDE_SLUG, CLAUDE_CANON)
+    assert row is not None, (
+        "no row for the pair: the install skipped it as a collision against the "
+        "fragment's own entity row, which is exactly the branch a self-registered slug "
+        "lands in, and the store would keep answering the slug by itself")
+    assert row["kind"] == "semantic" and row["origin"] == "schema", row
+    assert fragment.aliases.resolve(CLAUDE_SLUG) == CLAUDE_CANON
+    assert fragment.entities.get(CLAUDE_SLUG) is not None, (
+        "the declaration deleted the entity row too, which is migration work this round "
+        "does not own")
+
+    assert en.register_schema_keys() == 0, (
+        "a second install wrote rows, so installing from the file is not the no-op the "
+        "every-process call site depends on")
+
+
+def test_a_store_replaced_from_scratch_regains_the_pair_and_keeps_the_row_it_declares(
+        tmp_path):
+    """The durability half of the acceptance, measured as a rebuild.
+
+    #893's fix was a row: `store.aliases.set('claude-code', 'Claude Code',
+    kind='punct', origin='triage-893')`, verified by `resolve()`, and gone today while
+    the entity's 4,609 facts remain. Facts are re-derived from the markdown tree by every
+    pass; an alias row is only ever data in one file. `kg_store.wipe_provenance_rows`
+    deliberately SPARES aliases ("they are declared identity, not extraction output"), so
+    the loss cannot be that DELETE either: what happened is the store being replaced whole
+    by a rebuild, which carries what can be re-derived and nothing else. So the test is a
+    second store, not a second call — and what it must show is the pair coming back from
+    the file, and the file-declared row standing in the store that the rebuild itself
+    writes.
+    """
+    before = kg_store.configure(tmp_path / "kg-before.sqlite")
+    en.reset_identity_schema_cache()
+    before.entities.register(CLAUDE_SLUG, kind="system")
+    before.aliases.set(CLAUDE_SLUG, CLAUDE_CANON, kind="punct", origin="triage-893")
+    assert before.aliases.resolve(CLAUDE_SLUG) == CLAUDE_CANON
+    kg_store.reset()
+
+    rebuilt = kg_store.configure(tmp_path / "kg-after.sqlite")   # the 2026-09-22/23 state
+    en.reset_identity_schema_cache()
+    assert rebuilt.aliases.resolve(CLAUDE_SLUG) is None, (
+        "a fresh store carries the pair already, so this node measures nothing")
+
+    assert en.register_schema_keys() > 0, (
+        "nothing came back after a rebuild, so the file is not the route being trusted")
+    row = alias_row(rebuilt, CLAUDE_SLUG, CLAUDE_CANON)
+    assert row is not None and row["kind"] == "semantic" \
+        and row["origin"] == "schema", row
+    assert rebuilt.aliases.resolve(CLAUDE_SLUG) == CLAUDE_CANON
+
+    # And it survives the reconciliation that runs inside every install: `origin
+    # = 'schema'` is the mark that says "the file owns this, keep it", so a second pass
+    # writes nothing and retracts nothing here either.
+    assert en.register_schema_keys() == 0, "a reconcile wrote rows over a settled store"
+    assert alias_row(rebuilt, CLAUDE_SLUG, CLAUDE_CANON) is not None, (
+        "reconciliation retracted the row the schema declares")
+    en.reset_identity_schema_cache()
+    kg_store.reset()
