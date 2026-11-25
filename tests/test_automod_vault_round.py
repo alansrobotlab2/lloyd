@@ -6639,13 +6639,17 @@ def test_the_tests_lock_queue_is_bounded_by_its_own_named_ceiling(
     contention still gets a slot with its full working budget, while the 476.2 s blind
     wait of 2026-10-13T18:49Z — which launched a child "given 0s" — cannot recur.
 
-    The bound applied to the wait is `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)`
-    = min(300.0, 2400.0), read through `_tests_lock` rather than restated, and it is
-    pinned where it can actually be observed: the number `acquire_wait` is asked to hold
-    out for. A shorter ask is honored, a longer one is not, and with the ceiling raised
-    past `SERIAL_MAX_WAIT` it is the gate's 2400.0 s that binds — because a land that
+    The bound applied to the wait is `probe_queue_ceiling()`, read through `_tests_lock`
+    rather than restated, and it is pinned where it can actually be observed: the number
+    `acquire_wait` is asked to hold out for. Since #4408 that figure is
+    `min(max(PROBE_QUEUE_MAX_WAIT_S, H), Gate.SERIAL_MAX_WAIT)`, H being the longest hold a
+    probe has measured on its own rows — so the 300.0 s below is the FLOOR, and this node is
+    the arm where the ledger tail holds no measurement (H = 0) and the bound is still exactly
+    min(300.0, 2400.0). A shorter ask is honored, a longer one is not, and with the floor
+    raised past `SERIAL_MAX_WAIT` it is the gate's 2400.0 s that binds — because a land that
     out-queues a gate rung is a synchronous request left hanging longer than any rung
-    that gates the code half.
+    that gates the code half. The arm where a measured hold LIFTS the queue off 300.0 s is
+    `test_the_tests_lock_queue_is_ceilied_by_the_longest_measured_hold`.
 
     And a lock still busy at the bound is the skip it already was, verbatim: `refuse`
     false, `ok` true across the ledger seam (#2036's standing rule that a probe outage
@@ -11163,3 +11167,291 @@ def test_the_eight_licensed_jobs_and_the_commit_that_licensed_them_are_the_proof
         assert widens, f"{rel}: the commit that minted eight rows now reads as no change"
         replayed += 1
     assert replayed == 8, replayed
+
+
+def _starved_row(seconds: float, *, ran: bool = False) -> dict:
+    """A `vault_land` row of the shape a queue-starved probe writes (#4408).
+
+    `guards.seconds` is the seconds the probe spent QUEUING and then giving up — the row
+    is `skipped`, `ok: true`, and it carries either no `candidate` at all or one with
+    `ran: 0`. Both are the shapes the 59 rows of 2026-11-12..2026-11-24 come in, and both
+    must be EXCLUDED from the hold derivation: a row that never held the lock measured no
+    hold, and since #3718 such a row reports `seconds` ≈ the whole ceiling it just failed
+    to reach, so counting it would raise the next probe's queue by this probe's
+    starvation.
+    """
+    guards: dict = {"state": "skipped", "refuse": False, "seconds": seconds,
+                    "reason": "the gate's tests lock stayed busy for the whole queue: "
+                              "canned: tests lock held by gate-SM_TEST"}
+    if ran:
+        guards["candidate"] = {"ran": 0, "failed": 0, "seconds": seconds, "files": 1}
+    return {"event": "vault_land", "created_at": "2026-11-20T00:00:00Z",
+            "ok": True, "guards": guards}
+
+
+def test_the_tests_lock_queue_is_ceilied_by_the_longest_measured_hold(
+        tmp_path, monkeypatch):
+    """#4408 clauses 2 and 3: the queue's ceiling is derived from the hold it must
+    outlast, floored at the 300.0 s constant, capped at the gate's own 2400.0 s.
+
+    The number being derived is the longest hold a probe has been OBSERVED to keep, and
+    the winners have been reporting it all along: the lock is taken before the vault is
+    mirrored and released in the `finally`, so a winning probe's `guards.seconds` IS the
+    hold. Measured over the merged ledger for `event == "vault_land"` with
+    `created_at[:10] >= "2026-11-12"`, the 69 rows whose probe launched a draw
+    (`guards.candidate.ran > 0`) read median 900.0 s and max 1112.6 s, 68 of the 69 above
+    the 300.0 s the queue was allowed — while the longest wait that ever ACROSS that
+    window acquired the slot is 212.5 s and no row has ever exceeded 290 s. The constant
+    was therefore never the thing that bounded a contention; it was the thing that lost
+    every one of them, and 59 lands committed `ok: true` on zero test draws as a result.
+
+    Each arm below pins the figure where it is actually used — the number handed to
+    `state.Lock.acquire_wait` — through the same `_tail_rows` reader and the same
+    `LEDGER_TAIL_BYTES` width `probe_budget` already reads, so one ledger format sizes
+    both the queue and the working budget.
+
+    The semantic change from #2743 is in the LAST leg: an explicit ask used to be
+    clamped by `PROBE_QUEUE_MAX_WAIT_S` itself, so the constant capped every queue. Now
+    the constant is only the floor, and an ask can no longer widen past the DERIVED
+    ceiling — which is the same protection in the other direction.
+    """
+    import scripts.automod.state as ST
+    from scripts.automod.gate import Gate
+
+    assert VG.PROBE_QUEUE_MAX_WAIT_S == 300.0, VG.PROBE_QUEUE_MAX_WAIT_S
+    assert Gate.SERIAL_MAX_WAIT == 2400.0, Gate.SERIAL_MAX_WAIT
+
+    applied: list[float] = []
+
+    class _RecordingLock:
+        def __init__(self, path, owner=""):
+            self.path, self.owner = path, owner
+
+        def acquire_wait(self, max_wait, poll=None):
+            applied.append(float(max_wait))
+            raise ST.LockHeld("canned: tests lock held by gate-SM_TEST")
+
+        def release(self) -> None:
+            pass
+
+    monkeypatch.setattr(ST, "Lock", _RecordingLock)
+    missing = tmp_path / "no-hold-ledger-here.jsonl"
+
+    def _ask(rows=None, ledger=None, max_wait_s=None):
+        """What `acquire_wait` is told to hold out for, over this ledger.
+
+        `max_wait_s=None` is the production call — `agreement` passes no ask — so what
+        comes back is the derived ceiling itself.
+        """
+        path = ledger if ledger is not None else _budget_ledger(
+            tmp_path, rows or [], name="hold-ledger.jsonl")
+        applied.clear()
+        pytest.raises(ST.LockHeld,
+                      lambda: VG._wait_for_tests_slot(max_wait_s, ledger=path))
+        assert len(applied) == 1, applied
+        return applied[0]
+
+    # (a) No measurement exists: the standing constant still binds, exactly as before.
+    assert VG.measured_tests_lock_hold(missing) == 0.0
+    assert _ask(ledger=missing) == 300.0, "a ledger with no rows lost the 300 s floor"
+    assert _ask(rows=[]) == 300.0
+
+    # (b) A measured hold ABOVE the constant lifts the queue to it. This is the fix: the
+    # hold is 3x the queue that has been losing to it.
+    assert _ask(rows=[_drawn_row(903.8)]) == 903.8
+    assert _ask(rows=[_drawn_row(903.8), _drawn_row(1112.6)]) == 1112.6, (
+        "the ceiling is the LONGEST measured hold, not the newest or the mean: the "
+        "collision it has to survive is the worst one on the tail")
+
+    # (c) It is the ROW's wall clock, not the inner draw's: `_drawn_row` costs both the
+    # same here, and a re-ask's `parallel_retry.seconds` is a fraction of the hold.
+    assert _ask(rows=[_drawn_row(903.8, retry_seconds=204.0)]) == 903.8
+
+    # (d) A hold SMALLER than the constant never lowers it — the floor is a floor.
+    assert _ask(rows=[_drawn_row(5.0)]) == 300.0
+
+    # (e) The two starved shapes contribute nothing, at any size. Without this filter the
+    # derivation feeds on itself: a starved row reports `seconds` ~= the ceiling it just
+    # failed, so the next probe would queue longer than the last, forever.
+    assert _ask(rows=[_starved_row(1112.6), _starved_row(900.0, ran=True),
+                      _drawn_row(60.0)]) == 300.0, (
+        "a row that never held the lock raised the queue: its `seconds` is a demand on "
+        "the lock, not a measurement of holding it")
+    # A row that is not a land, and a row with no `guards` block at all, are not holds.
+    assert _ask(rows=[{"event": "gate", "rung": "tests",
+                       "guards": {"seconds": 5000.0, "candidate": {"ran": 4000}}},
+                      {"event": "vault_land", "ok": True}]) == 300.0
+
+    # (f) The gate's own ceiling is the outer bound, so no single enormous row can turn a
+    # synchronous land into an unbounded one: the widest queue this can now state is the
+    # wait the gate's `tests` rung already tolerates for the identical lock.
+    assert _ask(rows=[_drawn_row(9000.0)]) == Gate.SERIAL_MAX_WAIT
+
+    # (g) An explicit ask still narrows, and still cannot widen — past the derived
+    # ceiling, which is what it used to be clamped by.
+    assert _ask(rows=[_drawn_row(1112.6)]) == 1112.6
+    assert _ask(rows=[_drawn_row(1112.6)], max_wait_s=12.0) == 12.0
+    assert _ask(rows=[_drawn_row(1112.6)], max_wait_s=9000.0) == 1112.6, (
+        "an explicit ask walked past the derived ceiling")
+
+    # (h) The stated total a probe may take grows by the SAME figure, so `run_budget`'s
+    # clamp and the queue cannot disagree about what the land is allowed.
+    hold_ledger = _budget_ledger(tmp_path, [_drawn_row(1112.6)], name="hold2.jsonl")
+    assert VG.probe_wall_bound(300.0, ledger=hold_ledger) == (
+        300.0 + 1112.6 + VG.GROUP_TERM_GRACE_S + VG.REAP_DRAIN_S)
+    assert VG.probe_wall_bound(300.0, ledger=missing) == (
+        300.0 + VG.PROBE_QUEUE_MAX_WAIT_S + VG.GROUP_TERM_GRACE_S + VG.REAP_DRAIN_S)
+    assert VG.probe_queue_ceiling(ledger=hold_ledger) == 1112.6
+
+    # (i) The default input is the real ledger, not a path only this test passes: a row
+    # appended where production appends its own is what the next probe will read.
+    S.append_event(_drawn_row(777.7), path=S.LEDGER_PATH)
+    assert VG.measured_tests_lock_hold() == 777.7, (
+        "`measured_tests_lock_hold` is not reading `state.LEDGER_PATH`, so production "
+        "derives its queue from a ledger nobody writes")
+
+
+def test_both_arms_of_the_tests_lock_queue_record_the_seconds_they_waited(
+        tmp_path, monkeypatch, vault, guard_tree, probed):
+    """#4408 clauses 1, 2 and 3: one land wins the tests lock after a real wait, one
+    loses it, and BOTH rows say what the queue cost them.
+
+    Before this, only the winner could say so. `report["lock_wait_s"] = waited` was
+    reached on the success path alone, the exception path returned a reason and no wait,
+    and `_guards_row` writes the key only when truthy — so the seeded 0.0 was dropped on
+    exactly the rows the queue caused. Over `event == "vault_land"` rows from 2026-11-12
+    to 2026-11-24 that launched no draw at all, 59 of 59 carry no `guards.lock_wait_s`,
+    58 of them naming `the gate's tests lock stayed busy for the whole queue` as their
+    own cause: the row blamed the queue and could not price it, and #3718's derived
+    budget, which reads measured seconds off these same rows, never saw starvation as an
+    input. The 2026-11-24 land that turned main red (#4543, vault `c73d21c9`) is one of
+    these rows, so the missing figure was the difference between a detectable outage and
+    a silent one.
+
+    The starvation arm is reproduced for real: the gate's tests lock is held by an
+    ordinary `state.Lock` (a `flock`, so a dead holder could never do this — no
+    pid-liveness check is involved), the module's own floor is patched to 2.0 s so the node
+    cannot cost minutes on a box whose probe runs long — the queue that actually binds is
+    arm 1's measured hold, which is asserted below rather than assumed — and the assertion
+    is made on the LEDGER ROW, across the seam #4408 says is missing the number. The lock
+    path is redirected into `tmp_path` so this node cannot collide with the sibling that
+    holds the real `state.GATE_TESTS_LOCK_PATH` from a timer thread under `-n 8`.
+    """
+    import threading
+
+    monkeypatch.setattr(S, "GATE_TESTS_LOCK_PATH", tmp_path / "gate-tests.lock")
+    assert S.GATE_TESTS_LOCK_PATH.parent == tmp_path
+
+    # ---- arm 1: the probe WAITS and then WINS. The wait is recorded, and a probe that
+    # reached a verdict carries no #3718 marker.
+    _prose(vault, SKILL_AT_FOUR, commit=True)
+    probed(guard_tree, vault)
+    held = S.Lock(S.GATE_TESTS_LOCK_PATH, owner="test-holding-the-gate-tests-rung")
+    held.acquire()
+    timer = threading.Timer(3.0, held.release)
+    timer.daemon = True
+    timer.start()
+    try:
+        _prose(vault, "---\nname: foo\n---\nstores: 4\n\n#4408 won the slot.\n")
+        out_win = V.land(["skills/foo/SKILL.md"], "#4408 the slot frees", item_id=None)
+    finally:
+        timer.cancel()
+        held.release()
+
+    assert out_win["ok"] is True, out_win
+    won = _events("vault_land")[-1]["guards"]
+    assert won["state"] == "checked" and won["refuse"] is False, won
+    assert won["candidate"]["ran"] == 1, won
+    assert won["lock_wait_s"] >= 1.0, (
+        f"the probe that queued behind a 3.0 s hold recorded {won.get('lock_wait_s')}: "
+        "the winner's wait is not reaching the row")
+    assert "heavy_rung_verdict" not in won, (
+        "a probe that launched its draw and reached a verdict wears the no-verdict marker")
+    assert won["seconds"] >= won["lock_wait_s"], won
+
+    # ---- arm 2: the probe queues for the whole ceiling and LOSES. The skip is what #2036
+    # ruled it must be — `skipped`, no refusal, no candidate, and the land still commits —
+    # and the ONLY thing that changes is that it now prices itself.
+    #
+    # First, for free, the derivation is observed across the land seam: arm 1's own row is
+    # now in the ledger tail, and it is a row that HELD the lock, so the queue's ceiling has
+    # risen to the hold arm 1 just measured. Read off the module the way `agreement` reads
+    # it, with the floor patched down to 2.0 s, the ceiling must be exactly arm 1's seconds.
+    monkeypatch.setattr(VG, "PROBE_QUEUE_MAX_WAIT_S", 2.0)
+    assert VG.measured_tests_lock_hold() == won["seconds"], (
+        "the hold derived from the ledger is not the seconds the winning probe reported: "
+        "arm 1 landed a real draw, so its row is the measurement arm 2 queues against")
+    assert VG.probe_queue_ceiling() == max(2.0, won["seconds"])
+    loser = S.Lock(S.GATE_TESTS_LOCK_PATH, owner="test-holding-the-gate-tests-rung")
+    loser.acquire()
+    try:
+        _prose(vault, "---\nname: foo\n---\nstores: 5\n\n#4408 lost the slot.\n")
+        out_lose = V.land(["skills/foo/SKILL.md"], "#4408 the slot stays busy",
+                          item_id=None)
+    finally:
+        loser.release()
+
+    assert out_lose["ok"] is True, (
+        f"a starved probe blocked a land: {out_lose}")   # #2036: an outage is never a veto
+    lost = _events("vault_land")[-1]["guards"]
+    assert lost["state"] == "skipped" and lost["refuse"] is False, lost
+    assert "candidate" not in lost and "unadjudicated" not in lost, lost
+    assert lost["reason"].startswith(
+        "the gate's tests lock stayed busy for the whole queue: "), lost["reason"]
+    assert lost["heavy_rung_verdict"].startswith(
+        "no heavy-rung verdict: the probe launched no test draw at all"), lost
+    # The wait must be the ceiling IT was given, and that ceiling is the derived one: arm
+    # 1 landed a real draw a moment ago, so its own reported hold is the measurement arm 2
+    # queues against — the patched 2.0 s floor is only a floor, and the first thing this
+    # node caught when it was written was arm 2 queueing 6.0 s because arm 1 had held the
+    # lock for 6.0 s. `state.Lock.acquire_wait` polls every 2.0 s and raises at the first
+    # poll past its deadline, so the recorded wait is the ceiling rounded up by < 2 s.
+    expected = max(2.0, won["seconds"])
+    assert expected - 0.2 <= lost["lock_wait_s"] <= expected + 2.5, (
+        f"a probe that queued the whole {expected} s ceiling recorded "
+        f"{lost.get('lock_wait_s')!r} on its row: either the seeded 0.0 is being dropped "
+        "again (the #4408 defect), or the figure on the row is not the queue's")
+    assert lost["seconds"] >= lost["lock_wait_s"], (
+        "`seconds` is the whole probe and `lock_wait_s` the part the queue took — "
+        f"{lost['seconds']} vs {lost['lock_wait_s']}")
+    # The two arms differ in exactly one respect besides the verdict they reached.
+    assert won["lock_wait_s"] > 0.0 and lost["lock_wait_s"] > 0.0
+    assert ("heavy_rung_verdict" in lost) and ("heavy_rung_verdict" not in won)
+
+
+def test_the_guards_row_docstring_promises_only_what_the_writer_now_writes():
+    """#4408 clause 5: `_guards_row`'s own prose about `lock_wait_s`.
+
+    The docstring told a reader that for a `skipped` row "`seconds` is the whole probe and
+    `lock_wait_s` how much of it was queueing behind the gate's `tests` rung". On the rows
+    whose cause WAS that queue it was false — the key was absent on all 59 of them — which
+    is the worst kind of stale promise, because the reader who trusts it is the reader
+    auditing starvation. The paragraph now states what the writer emits for a LockHeld
+    skip and what the key's ABSENCE means once a starved row carries it, and this node
+    pins the two halves against each other: the sentences the prose makes about a 300.0 s
+    wait and about 0.0 are executed against the writer in the same breath, so the claim
+    cannot move away from the behaviour without this node going red.
+    """
+    doc = V._guards_row.__doc__
+    assert "`seconds` is the whole probe and `lock_wait_s` how much of it" in doc
+    # The two claims the fix makes true, quoted as the docstring states them.
+    assert "a LockHeld skip carries `lock_wait_s` non-zero" in doc, (
+        "the docstring does not promise the number the starved row now carries")
+    assert ("means no wait was MEASURED" in doc
+            and 'never "the queue was free"' in doc), (
+        "the docstring still lets an absent key be read as an idle queue")
+    assert "#4408" in doc, "the paragraph does not say which round made it true"
+
+    # ...and each claim is what the writer does, executed rather than asserted about.
+    starved = V._guards_row({"state": "skipped", "refuse": False, "seconds": 302.4,
+                             "budget": 900.0, "lock_wait_s": 300.0,
+                             "reason": "the gate's tests lock stayed busy for the "
+                                       "whole queue: canned"})
+    assert starved["lock_wait_s"] == 300.0, starved
+    assert starved["state"] == "skipped" and starved["refuse"] is False, starved
+    assert "candidate" not in starved, starved
+    never_measured = V._guards_row({"state": "skipped", "refuse": False,
+                                    "seconds": 0.3, "lock_wait_s": 0.0})
+    assert "lock_wait_s" not in never_measured, (
+        "a 0.0 wait is being written, so the key's absence no longer means the narrow "
+        "thing the docstring now says it means")

@@ -125,7 +125,7 @@ PYTEST_CHILD_ENV_DROP = ("PYTEST_XDIST_WORKER", "PYTEST_XDIST_WORKER_COUNT",
 #: The fallback WORKING budget: both pytest runs together, not either run on its
 #: own (`_deadline` below). It was the whole probe — queue for the gate's tests lock
 #: included — until #2743 moved the queue onto its own ceiling
-#: (`PROBE_QUEUE_MAX_WAIT_S`, which sits ON TOP of this figure and not inside it),
+#: (`probe_queue_ceiling()`, ON TOP of this figure; #4408 made that ceiling a FLOOR),
 #: because charging the wait to the runs is what turned 25 real probes into
 #: non-answers. Restated on
 #: 2026-10-02 because the figure it was calibrated on was wrong: the comment
@@ -324,30 +324,30 @@ def _failing_files(node_ids: list[str]) -> list[str]:
     return out
 
 
-def _wait_for_tests_slot(max_wait_s: float | None = None) -> tuple:
+def _wait_for_tests_slot(max_wait_s: float | None = None,
+                         ledger: Path | None = None) -> tuple:
     """Take the gate's tests-rung lock; `(lock, seconds waited)`.
 
-    The queue is capped by `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)`, and by
-    nothing else. It used to be capped by the probe's unspent run budget as well — the
-    parameter was named `remaining` — and that one cap is what #2743 removes: charging the
-    wait to the runs made the wait itself the reason probes reached no verdict, since the
-    longer a probe queued the less each of its runs was allowed to take, until the child
-    that finally started was launched "given 0s". A long wait is now expensive to the
-    LAND (`probe_wall_bound`) and free to the RUNS. The second cap stays for its own
-    reason: a land that out-queues a gate is a synchronous request left hanging longer
-    than any rung that gates the code half.
+    The queue is capped by `probe_queue_ceiling()` — `min(max(PROBE_QUEUE_MAX_WAIT_S,
+    H), Gate.SERIAL_MAX_WAIT)`, H the longest hold a probe measured on its own rows
+    (`measured_tests_lock_hold`) — and by nothing else. It used to be capped by the
+    probe's unspent run budget too — the parameter was named `remaining` — and that
+    one cap is what #2743 removes: charging the wait to the runs made the wait the
+    reason probes reached no verdict, until the child that finally started was launched
+    "given 0s". A long wait now costs the LAND (`probe_wall_bound`) and nothing of the
+    RUNS; the gate's own ceiling stays because a land that out-queues a gate is a
+    request left hanging longer than any rung that gates the code half.
 
-    `max_wait_s` exists for a caller that wants a shorter queue than the ceiling; it can
-    narrow the bound and cannot widen it. `state.LockHeld` after the bound is the
-    caller's signal that it could not judge — never a reason to run anyway, which is the
-    contention #2042 names: three probes each spent their whole 300 s competing with a
-    gate `tests` rung that was holding this same lock.
+    `max_wait_s` exists for a caller that wants a shorter queue than the ceiling; it
+    can narrow the bound and cannot widen it. `state.LockHeld` after the bound is the
+    caller's signal that it could not judge — never a reason to run anyway, which is
+    the contention #2042 names: three probes each spent their whole 300 s competing
+    with a gate `tests` rung holding this same lock, the collision #4408 sized this
+    queue against. A caller that loses still times its own wait (see `agreement`),
+    so giving up on the queue is never recorded as a wait of zero.
     """
-    path, serial_max = _tests_lock()
-    asked = PROBE_QUEUE_MAX_WAIT_S if max_wait_s is None else float(max_wait_s)
-    # `PROBE_QUEUE_MAX_WAIT_S` appears in this min even though `asked` already defaults to
-    # it: an explicit ask may shorten the queue, and may not walk past the ceiling.
-    ceiling = min(asked, PROBE_QUEUE_MAX_WAIT_S, float(serial_max))
+    path, _serial_max = _tests_lock()
+    ceiling = probe_queue_ceiling(max_wait_s, ledger)
     lock = S.Lock(path, owner=f"vault-probe pid={os.getpid()}")
     started = time.time()
     lock.acquire_wait(max(0.0, ceiling), poll=2.0)
@@ -1030,17 +1030,53 @@ PARALLEL_ONLY_FLOOR_S = float(PROBE_TIMEOUT_SECONDS) + GROUP_TERM_GRACE_S + REAP
 #: rows that ever reached a candidate run had waited 12 / 18 / 24 / 48 / 100 / 106 / 122 /
 #: 122 s, so this sits above every historical wait that bought a verdict — real
 #: contention still gets a slot with its full working budget — while a blind multi-minute
-#: wait can no longer eat the runs. What is actually applied is
-#: `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)`, and the total a probe may spend
-#: is `probe_wall_bound()`.
+#: wait can no longer eat the runs.
+#:
+#:
+#: Since #4408 this is the FLOOR of what is applied, not its cap: `probe_queue_ceiling()`
+#: lifts the queue to the longest hold a probe measured on its own rows (median 900.0 s of
+#: the 69 drawing probes since 2026-11-12), since 300.0 s sat under every hold it had to
+#: outlast and 59 lands committed `ok: true` on zero draws. The arithmetic and why only a
+#: row that HELD the lock may size it: `measured_tests_lock_hold`.
 PROBE_QUEUE_MAX_WAIT_S = 300.0
 
 
-def probe_wall_bound(budget: float, max_wait_s: float | None = None) -> float:
+def probe_queue_ceiling(max_wait_s: float | None = None,
+                        ledger: Path | None = None) -> float:
+    """Seconds the queue for the gate's tests lock may hold out for.
+
+    `min(max(PROBE_QUEUE_MAX_WAIT_S, H), Gate.SERIAL_MAX_WAIT)`, narrowed further by an
+    explicit `max_wait_s`. H comes from `measured_tests_lock_hold()`, so the queue is
+    sized by the longest thing a probe has actually been observed to hold the lock for,
+    and the constant is what binds when the ledger tail holds no such measurement.
+
+    The constant is the FLOOR, not the cap, and `max_wait_s` is only ever a narrowing:
+    an explicit ask can shorten the queue and cannot walk past the ceiling. That is why
+    the two are not combined as one `min` the way #2743 wrote it — with the constant
+    inside that `min`, a measured 1112.6 s hold could never have lifted the queue off the
+    300.0 s that has lost every collision since it was set.
+
+    `Gate.SERIAL_MAX_WAIT` remains the outer cap for the reason `_wait_for_tests_slot`
+    gives: a land that out-queues a gate rung is a synchronous request left hanging
+    longer than any rung that gates the code half. It is also what keeps a pathological
+    H — one enormous `guards.seconds` off a single row — from becoming an open-ended
+    queue: the ceiling is bounded by a number the gate itself already tolerates waiting,
+    read from the class that owns it rather than restated.
+    """
+    _path, serial_max = _tests_lock()
+    ceiling = max(float(PROBE_QUEUE_MAX_WAIT_S), measured_tests_lock_hold(ledger))
+    if max_wait_s is not None:
+        ceiling = min(ceiling, float(max_wait_s))
+    return min(ceiling, float(serial_max))
+
+
+def probe_wall_bound(budget: float, max_wait_s: float | None = None,
+                     ledger: Path | None = None) -> float:
     """Seconds the whole probe may take: its working budget PLUS the queue's ceiling.
 
     Two additions to the working budget, both bounded, no third. The queue is
-    `min(PROBE_QUEUE_MAX_WAIT_S, Gate.SERIAL_MAX_WAIT)` (see `_wait_for_tests_slot`), and
+    `probe_queue_ceiling(max_wait_s, ledger)` — the measured hold or the 300.0 s floor,
+    capped by `Gate.SERIAL_MAX_WAIT` (see `_wait_for_tests_slot`) — and
     a child run already handed an allowance may still take `GROUP_TERM_GRACE_S` before
     `_reap_group` pulls the group down plus `REAP_DRAIN_S` to wait for it — the two
     figures `_run_selection` bounds a killed run with, so the total is a sum of numbers
@@ -1056,13 +1092,14 @@ def probe_wall_bound(budget: float, max_wait_s: float | None = None) -> float:
     `max_wait_s` is what the caller ASKED the queue for; a smaller ask narrows the bound
     and a larger one never widens it past the ceiling. `agreement` clamps the run
     allowance to this ceiling, so it is a bound and not a description:
-    `agent_mcp/automod.py:945` calls `land()` synchronously with no outer timeout, which
+    `agent_mcp/automod.py:953` calls `land()` synchronously with no outer timeout, which
     makes unbundling the queue a longer call, and that is only acceptable while the
-    longest it can be is a figure someone can read here.
+    longest it can be is a figure someone can read here. It is also why the derived hold
+    is capped by `Gate.SERIAL_MAX_WAIT` and not left to grow with the ledger: the widest
+    this can now state is 900.0 s of budget + 2400.0 s of queue + 4.0 s of reap, and a
+    longer queue than the gate's own `tests` rung tolerates is not a longer queue at all.
     """
-    _path, serial_max = _tests_lock()
-    asked = PROBE_QUEUE_MAX_WAIT_S if max_wait_s is None else float(max_wait_s)
-    ceiling = min(asked, PROBE_QUEUE_MAX_WAIT_S, float(serial_max))
+    ceiling = probe_queue_ceiling(max_wait_s, ledger)
     return float(budget) + ceiling + GROUP_TERM_GRACE_S + REAP_DRAIN_S
 
 
@@ -1107,6 +1144,51 @@ def _tail_rows(path: Path, tail_bytes: int = LEDGER_TAIL_BYTES) -> list[dict]:
         if isinstance(row, dict):
             rows.append(row)
     return rows
+
+
+def measured_tests_lock_hold(ledger: Path | None = None) -> float:
+    """H: the longest tests-lock hold a probe has measured, or 0.0 if nothing has.
+
+    A probe that WON the queue holds the lock from before it mirrors the vault until its
+    `finally`, so the wall clock it reports — the row's own `guards.seconds`, which
+    `_guards_row` writes beside the draw it launched — is the length of that hold. No
+    second instrumentation is needed to know how long the lock is held by a winner: the
+    winners have been reporting it all along, and the 300 s queue below them is what
+    #4408 is about.
+
+    Only a row that launched a draw counts (`guards.candidate.ran` truthy). A zero-draw
+    row's `guards.seconds` is the seconds it spent QUEUING, which is a demand on the lock
+    and not a measurement of holding it, and this filter is what stops the ceiling from
+    feeding on itself: since #3718 a starved row reports `seconds` ≈ the whole ceiling it
+    just failed to reach, so counting those rows would raise next probe's queue by this
+    probe's starvation, once and then again, with no measurement involved. Same rule
+    `_draw_seconds` applies to the cost side, for the same reason — a run that reported
+    nothing must not size the next one.
+
+    Read through the SAME `_tail_rows` reader and the SAME default tail
+    (`LEDGER_TAIL_BYTES`) that `probe_budget` already reads, so this is one ledger format
+    and one tail width, not a second walk of the store; the hold and the draw cost come
+    off the same rows, which is what makes the two derived figures comparable when they
+    disagree. 0.0 when the tail holds no lock-winning row — an absent, unreadable or
+    empty ledger, or one whose every probe starved — and `probe_queue_ceiling` then leaves
+    the standing constant in charge.
+    """
+    path = Path(ledger) if ledger is not None else Path(S.LEDGER_PATH)
+    hold = 0.0
+    for row in _tail_rows(path):
+        if row.get("event") != "vault_land":
+            continue
+        guards = row.get("guards")
+        if not isinstance(guards, dict):
+            continue
+        cand = guards.get("candidate")
+        if not (isinstance(cand, dict) and cand.get("ran")):
+            continue
+        seconds = guards.get("seconds")
+        if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) \
+                and seconds > hold:
+            hold = float(seconds)
+    return hold
 
 
 def _draw_seconds(row: dict) -> tuple[float | None, float | None]:
@@ -1317,10 +1399,13 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     a probe could spend 300 s queueing behind a gate `tests` rung and still be refused by
     its own next 300 s, and the row said only "timed out after 300s". Since #2743 the
     queue for the tests lock is no longer inside this figure either: it has its own
-    ceiling (`PROBE_QUEUE_MAX_WAIT_S`) and sits on top, so what a busy tests rung costs is
-    the land's wall clock and never a run's allowance. The whole probe may therefore take
-    `probe_wall_bound(budget)`, and `lock_wait_s` on the report is the part of it the queue
-    took. Because drawing a side `PROPOSED_DRAWS` or `BASELINE_DRAWS` times costs a run
+    ceiling (`probe_queue_ceiling()` — the longest measured hold, floored at
+    `PROBE_QUEUE_MAX_WAIT_S`, capped at `Gate.SERIAL_MAX_WAIT`) and sits on top, so what a
+    busy tests rung costs is the land's wall clock and never a run's allowance. The whole
+    probe may therefore take `probe_wall_bound(budget)`, and `lock_wait_s` on the report is
+    the part of it the queue took — including since #4408 when the queue is what defeated
+    the probe, which is the shape that used to report 0.0 and therefore nothing. Because
+    drawing a side `PROPOSED_DRAWS` or `BASELINE_DRAWS` times costs a run
     each, a budget too thin for the second draw answers `skipped` with "could not be
     attributed" instead of refusing: one draw cannot tell a flake from a disagreement.
 
@@ -1389,7 +1474,14 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
     # The stated total: working budget + the queue's ceiling + the reap terms a killed run
     # is already bounded by. Unbundling the queue makes a land a longer synchronous call;
     # this is the figure that keeps that a stated number, and `run_budget` clamps to it.
-    wall_cap = started + probe_wall_bound(budget)
+    # `budget_ledger` is passed through so the queue's ceiling is derived from the same
+    # tail `probe_budget` just read, rather than from the live path: the hold that sizes
+    # the queue and the draw cost that sizes the budget then come off the same rows, which
+    # is what makes the two figures comparable on the row. Each derivation does its own
+    # tail read — 34 ms per `LEDGER_TAIL_BYTES` on the live 31 MB store, against a probe
+    # bounded in the hundreds of seconds — so the sharing here is of the FORMAT and the
+    # width, not of one syscall, and no probe gets a second ledger parser to maintain.
+    wall_cap = started + probe_wall_bound(budget, ledger=budget_ledger)
     # `candidate` and `baseline` are deliberately ABSENT rather than empty: a
     # run that was never launched has no numbers, and `_guards_row`
     # (`vault_round.py:654-666`) already writes them only `if cand:`/`if base:`,
@@ -1553,11 +1645,27 @@ def agreement(*, paths: list[str], ack: list[str] | None = None,
         # `mirror_gap_s`. #2283: this comment used to promise the two copies were
         # bytes of the same instant, and that promise is how a 222 s gap between
         # them went unnoticed through four refusals of a file no test reads.
+        # The queue gets the CALLER's clock, which is #4408's whole point. Timing it here
+        # rather than reading an attribute off the exception means no give-up can quietly
+        # price itself at zero because some raiser forgot to attach a figure: whatever
+        # raises `LockHeld` inside this try, the seconds between entering and leaving it
+        # are the wait, and they go on the report. The skip itself is unchanged — `state:
+        # skipped`, `refuse: False`, no `candidate`, and the land goes ahead `ok: true`,
+        # because #2036's standing ruling is that a probe outage is never a veto. What
+        # changes is that it is no longer a skip that cannot say what it cost: 59 rows
+        # since 2026-11-12 ended exactly this way carrying the seeded `lock_wait_s: 0.0`,
+        # which the projection's truthy test dropped, so on the very rows the queue caused
+        # its own cost was unrecordable and "the probe ran and found nothing" read the same
+        # as "the probe never ran" — including vault `c73d21c9`, the zero-draw land that
+        # turned main red as #4543. A ceiling of zero still yields 0.0 and no key, which
+        # then means "no wait was measured", never "the queue was free".
+        queue_started = time.time()
         try:
-            slot, waited = _wait_for_tests_slot()
+            slot, waited = _wait_for_tests_slot(ledger=budget_ledger)
         except S.LockHeld as exc:
             return done(reason=(f"the gate's tests lock stayed busy for the whole "
-                                f"queue: {exc}"))
+                                f"queue: {exc}"),
+                        lock_wait_s=round(time.time() - queue_started, 1))
         report["lock_wait_s"] = waited
         # The wait is the LAND's cost, not the runs': the working deadline moves forward
         # by exactly what the queue took, so every allowance below is measured against the

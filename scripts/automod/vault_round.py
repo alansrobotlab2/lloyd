@@ -1456,12 +1456,12 @@ def _guards_row(guards: dict) -> dict:
 
     The cost keys are what #2042 added, and they are the row's answer to its own
     `skipped`: `seconds` is the whole probe and `lock_wait_s` how much of it was
-    queueing behind the gate's `tests` rung, while each run carries the seconds it
-    actually ran and how many vault-reading files it ran over. Before this the
-    projection dropped both, and a `timed out after 300s` row could not be told
-    apart from a hang: three lands (#2040, #2027, #2038) recorded `ran=0` with an
-    empty reason and no witness of the run at all. `excerpt` is the pytest tail the
-    pipe held when the child was killed.
+    queueing behind the gate's `tests` rung, each run its seconds and file count,
+    `excerpt` the pytest tail the pipe held on a kill. Those keys are what made
+    #2042's three `ran=0` lands (#2040, #2027, #2038) readable; #4408 made the queue
+    cost true for the skip the queue CAUSED, whose seeded 0.0 used to be dropped
+    right here, so a LockHeld skip carries `lock_wait_s` non-zero and an absent key
+    means no wait was MEASURED — never "the queue was free", the old misreading.
 
     The three parallelism keys are #2046. Since #2044 the probe decides its own
     worker count and re-asks a parallel failure serially before it may refuse
