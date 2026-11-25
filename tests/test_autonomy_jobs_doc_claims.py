@@ -742,8 +742,9 @@ def test_the_no_consumer_paragraph_names_exactly_the_jobs_its_counts_claim():
 FILING_ROUTE_CLAIMS: tuple[tuple[re.Pattern[str], str], ...] = (
     (re.compile(r"filing exactly one backlog item on board `?lloyd`?", re.I),
      "one item per run, onto which board it lands"),
-    (re.compile(r"#78 when any of its three counts is non-?zero", re.I),
-     "#78's trigger: any of its three counts non-zero"),
+    (re.compile(r"#78 files when its canonical count moves more than 5", re.I),
+     "#78's trigger: its canonical count moving more than 5% w/w, or Step 3's "
+     "missing-skill / first-seen class (#4341 re-keyed this off #3449's counts)"),
     (re.compile(r"VIOLATIONS : N", re.I),
      "#80's trigger, keyed to `validate_okf.py`'s own number and not to its warnings"),
     (re.compile(r"okf_stranded_known\.txt", re.I),
@@ -877,11 +878,15 @@ def test_the_two_skills_state_the_filing_rule_the_doc_points_at():
             tests/test_autonomy_jobs_doc_claims.py::test_the_two_skills_state_the_filing_rule_the_doc_points_at -q
 
     Graded per skill, because the two rules differ on exactly one axis and that axis
-    is what clause 2 is about: #78 keys to the three counts IT computed, #80 to
-    `validate_okf.py`'s own `VIOLATIONS : N` line and never to its `warnings` count,
-    which `--strict` exits 2 on while the census only reports it. A check that read
-    only the shared shape would pass a #80 skill keyed to warnings — the mis-keying
-    that would make the weekly detector file on long-standing vocabulary noise.
+    is what clause 2 is about: #78 keys to the MOVE in its own canonical count (more
+    than 5% w/w) and to the breakage class Step 3 first saw, since #4341 re-keyed
+    #3449's raw counts away on 2026-11-24 — the skill now says outright that a
+    non-zero count is not a trigger, the counts finding being CLOSED (#4062) and the
+    write path refusing it permanently — while #80 keys to `validate_okf.py`'s own
+    `VIOLATIONS : N` line and never to its `warnings` count, which `--strict` exits 2
+    on while the census only reports it. A check that read only the shared shape would
+    pass a #80 skill keyed to warnings — the mis-keying that would make the weekly
+    detector file on long-standing vocabulary noise.
 
     The tags are the process boundary: an item is filed by the MCP backlog write
     path, and that path only judges a create against the open board when the create
@@ -893,24 +898,36 @@ def test_the_two_skills_state_the_filing_rule_the_doc_points_at():
     """
     from app.backlog_tags import SPAWN_TAG_PREFIX
 
+    # Each job's own trigger, as #/skill-name states it. #78 has TWO because #4341
+    # keyed it on a trend plus the class a trend cannot see, and the second half is
+    # the load-bearing one: "This one files whatever the trend does: it is how a
+    # shape invisible to a count gets seen."
     per_skill = (
-        (SKILL_78_FILE, re.compile(r"any of the three counts non-?zero", re.I),
+        (SKILL_78_FILE,
+         (("its canonical count moving more than 5% w/w (#4341)",
+           re.compile(r"canonical count moves more than 5\s?%", re.I)),
+          ("a class Step 3 first saw, which files whatever the trend says",
+           re.compile(r"missing-skill count is above zero.{0,80}no earlier report"
+                      r" measured", re.I | re.S))),
          re.compile(r"all three counts zero.{0,40}file nothing", re.I | re.S),
          "spawned-by-orphaned-refs"),
-        (SKILL_80_FILE, re.compile(r"VIOLATIONS : N`? with N > 0", re.I),
+        (SKILL_80_FILE,
+         (("validate_okf.py's own `VIOLATIONS : N` line with N > 0",
+           re.compile(r"VIOLATIONS : N`? with N > 0", re.I)),),
          re.compile(r"VIOLATIONS : 0.{0,40}file nothing", re.I | re.S),
          "spawned-by-okf-census"),
     )
-    for path, trigger, zero_case, tag in per_skill:
+    for path, triggers, zero_case, tag in per_skill:
         assert path.exists(), f"{path} is gone; the skill that carries the rule is not on disk"
         text = _flat(path.read_text())
         for claim, what in _FILING_RULE_CLAIMS:
             assert claim.search(text), (
                 f"{path.parent.name}/SKILL.md no longer states {what} "
                 f"(/{claim.pattern}/)")
-        assert trigger.search(text), (
-            f"{path.parent.name}/SKILL.md does not state its own non-empty trigger, "
-            "so the shared shape is there and the keying clause is not")
+        for what, trigger in triggers:
+            assert trigger.search(text), (
+                f"{path.parent.name}/SKILL.md does not state its own non-empty trigger "
+                f"({what}), so the shared shape is there and the keying clause is not")
         assert zero_case.search(text), (
             f"{path.parent.name}/SKILL.md does not say its zero case files nothing")
         named = set(re.findall(r"spawned-by-[a-z0-9-]+", text))
@@ -925,6 +942,22 @@ def test_the_two_skills_state_the_filing_rule_the_doc_points_at():
         assert tag in named, (
             f"{path.parent.name}/SKILL.md files under {sorted(named)}, not the "
             f"{tag!r} the doc and this node expect")
+
+    # The keying axis itself, pinned crosswise instead of by hope: a trigger that
+    # matches both skills keys nothing at all. Each job's own patterns are asserted
+    # ABSENT from the other's flattened text, which is the only way this node can see
+    # the two ways a skill fails the loop above — stating the shared filing shape with
+    # no trigger of its own, or stating the OTHER job's trigger and reading as keyed.
+    (path78, trig78, _, _), (path80, trig80, _, _) = per_skill
+    for own_path, own_trigs, other_path in (
+            (path78, trig78, path80), (path80, trig80, path78)):
+        other = _flat(other_path.read_text())
+        for what, trigger in own_trigs:
+            assert not trigger.search(other), (
+                f"{own_path.parent.name}'s trigger ({what}) also matches "
+                f"{other_path.parent.name}/SKILL.md, so it keys nothing: a skill "
+                "stating the shared filing shape with no trigger of its own, or keyed "
+                "to the other job's number, would still pass the assertion above")
 
     # Clause 2's second half: #80's item has to carry the one action its 2026-10-21
     # run left in a run record #79 deletes at 30 days.
@@ -952,10 +985,20 @@ def test_the_two_task_descriptions_state_the_filing_rule_their_runs_follow():
     "produces a cleanup report" and stops. Parsed through the real loader
     (`app.autonomy._parse_task_file`, the call the scheduler makes) — a description
     the parser cannot reach never reaches a run, whatever the bytes on disk say.
+
+    #78's key is #4341's trigger, checked in both of its halves: the trend on the
+    canonical count AND the class no trend can see, because the second is the one that
+    files when the first says the count is flat. #80's key stays `violations`, its own
+    count, which #4341 never touched.
     """
     from app import autonomy
 
-    for path, key in ((TASK_78_FILE, "non-zero"), (TASK_80_FILE, "violations")):
+    per_task = (
+        (TASK_78_FILE, ("canonical count moves more than 5%",
+                        "no earlier report measured")),
+        (TASK_80_FILE, ("violations",)),
+    )
+    for path, keys in per_task:
         task = autonomy._parse_task_file(path)
         assert task, f"{path} does not parse as an autonomy task"
         desc = _flat(task.get("description") or "")
@@ -963,9 +1006,11 @@ def test_the_two_task_descriptions_state_the_filing_rule_their_runs_follow():
         assert "exactly one backlog item on board lloyd" in desc.lower(), (
             f"{path.name}'s description still stops at the report, so the run is "
             "handed a prompt that never mentions filing (#3449 clause 5)")
-        assert key in desc.lower(), (
-            f"{path.name}'s description states filing but not its own trigger "
-            f"({key!r}), which is the half a reader needs to know when it does not fire")
+        for key in keys:
+            assert key in desc.lower(), (
+                f"{path.name}'s description states filing but not its own trigger "
+                f"({key!r}), which is the half a reader needs to know when it does "
+                "not fire")
         assert re.search(r"files nothing|file nothing", desc.lower()), (
             f"{path.name}'s description does not say the empty run files nothing, "
             "leaving a zero reading like a rule the run skipped")

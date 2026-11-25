@@ -1186,9 +1186,12 @@ deleted with #1012 (§#36) on 2026-09-23.
 report-only by design: neither has ever been asked to fix what it names. What
 changed on 2026-10-30 is the reading of them (#3449): each report now has a
 consumer, because a non-empty run ends by **filing exactly one backlog item on
-board `lloyd`** — #78 when any of its three counts is non-zero, the item's body
-carrying the counts and the report's own path under
-`~/obsidian/memory/vault-maintenance/`, and #80 when
+board `lloyd`** — #78 files when its canonical count moves more than 5% against the
+previous report's canonical figure, or when Step 3 reports a missing skill or a
+breakage class no earlier report measured (#4341 re-keyed this off #3449's raw
+counts: a non-zero count is not a trigger, and the counts finding is CLOSED as
+#4062), the item's body carrying the three counts, the measured move and the
+report's own path under `~/obsidian/memory/vault-maintenance/`, and #80 when
 `validate_okf.py` prints `VIOLATIONS : N` with N > 0, or when the stranded
 allow-list holds files that are no longer stranded, which is where #80's standing
 `scripts/vault/okf_stranded_known.txt` regeneration used to sit: inside a run
