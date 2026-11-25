@@ -45,6 +45,15 @@ letting it move.
 Style follows `tests/test_stale_mtls_comment_claims.py`: name the corpus, assert it
 is present and non-empty before anything is searched, and put a positive control
 beside every zero-hit ban so an empty result can only mean clean prose.
+
+The ban is not only the arch-review block any more. #4394 found a second comment in
+this file — the block over `prefetch.followup.focus_legs` — telling a reader to run
+`eval/run_prefetch_followup_eval.py --arms raw,focus` when that runner declares the
+singular `--arm`, so the copy-paste returns an argparse exit 2 and no numbers. The
+file's subject is the same one widened: `config.yaml` is read before a knob is turned,
+and a command line in it that cannot run is the same defect as a rail description that
+is no longer true, so `STALE_PHRASES` carries both kinds and `BROKEN_COMMAND_PHRASES`
+says why the command half is a literal rather than the token `--arms`.
 """
 
 from __future__ import annotations
@@ -62,10 +71,25 @@ MODULE = REPO / "workers" / "sources" / "arch_review.py"
 #: The two clauses the sentence carried that the code no longer honours. Banned
 #: across the whole raw file, not just this block: the fix is not a rewrite of one
 #: paragraph, it is that config.yaml must not contain either claim anywhere.
-STALE_PHRASES = (
+RAIL_CLAIM_PHRASES = (
     "skills/ and autonomy/",
     "throws away a diff",
 )
+
+#: #4394's entry, and it is banned as ONE LITERAL COMMAND rather than as the bare
+#: token `--arms`, which is the difference between fixing this and breaking something.
+#: config.yaml carries two commands that use that token and only one is wrong:
+#: `eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull` is correct,
+#: because that runner declares the plural (`ap.add_argument("--arms", ...)` at
+#: eval/run_prefetch_cost_eval.py:875). The follow-up runner declares the singular at
+#: eval/run_prefetch_followup_eval.py:384, so the plural there is an argparse exit 2
+#: and no numbers — pinned by a real parser call in tests/test_prefetch_followup_eval.py.
+#: A token ban would have broken the working line to fix the broken one.
+BROKEN_COMMAND_PHRASES = (
+    "--arms raw,focus",
+)
+
+STALE_PHRASES = RAIL_CLAIM_PHRASES + BROKEN_COMMAND_PHRASES
 
 #: What the ban fires on, kept here so the positive control and the ban are the
 #: same code path — a control that searches differently than the ban proves nothing.
@@ -141,34 +165,119 @@ def _sentence_naming(token: str) -> str:
     return hits[0]
 
 
-# --- clause 1: the two stale clauses are gone from the whole file -------------
+# --- clause 1: every stale claim is gone from the whole file ------------------
 
-def test_the_two_stale_rail_claims_are_gone_from_config():
-    """`skills/ and autonomy/` and `throws away a diff` appear nowhere in the raw
-    file. The first is the pre-#709 allow-list; the second is pre-#3338. Both are
-    banned file-wide rather than pinned out of one block, because the rot this
-    found was a comment that drifted away from the code it tunes and nothing
-    noticed: a re-wording that keeps the claim in another sentence is the same bug.
+def test_the_stale_claims_are_gone_from_config():
+    """Nothing in `STALE_PHRASES` appears anywhere in the raw file: the two rail
+    claims and #4394's command. The first is the pre-#709 allow-list; the second is
+    pre-#3338; the third is `--arms raw,focus`, a command line the runner cannot
+    parse. All three are banned file-wide rather than pinned out of one block,
+    because the rot this file exists for is a comment that drifted away from the code
+    it names and nothing noticed: a re-wording that keeps the claim in another
+    sentence is the same bug, and a command that moved blocks is still a command a
+    reader will copy.
     """
     assert _stale_hits(_raw()) == [], (
         "config.yaml still claims the rail reverts the vault's skills/ and autonomy/ "
-        "list, or that a bound throws a diff away — see the module docstring for which "
-        "code moved and when")
+        "list, or that a bound throws a diff away, or still prints the follow-up A/B "
+        "with a flag its runner does not take — see the module docstring and "
+        "BROKEN_COMMAND_PHRASES for which code moved and when")
 
 
-def test_the_ban_is_not_vacuous():
+def test_the_rail_claim_ban_is_not_vacuous():
     """The positive control #1823 asks for: the same `_stale_hits` call that
     returns `[]` above must fire on the sentence it is meant to catch, verbatim.
     Without this, a renamed constant or a typo in `STALE_PHRASES` turns clause 1
     into a permanent pass, which is exactly how the comment came to be trusted.
+
+    The expected list is the two rail phrases, not all of `STALE_PHRASES`: this is
+    the sentence that carried the RAIL claims, and naming the full tuple would make
+    the assert pass only if the command literal also turned up in a sentence about
+    vault sweeps, which would be a coincidence rather than a control.
     """
     old_sentence = (
         "The source reverts every other write in this repo and in the vault's "
         "skills/ and autonomy/, throws away a diff that breaks its bounds, and "
         "commits the doc to main itself — the model never runs git.")
-    assert _stale_hits(old_sentence) == list(STALE_PHRASES), (
+    assert _stale_hits(old_sentence) == list(RAIL_CLAIM_PHRASES), (
         "the banned phrases no longer match the sentence they were written to ban, "
         "so clause 1 has stopped meaning anything")
+
+
+def test_the_broken_command_ban_is_not_vacuous():
+    """#4394 clause 2, and the same instrument as the control above — `_stale_hits`,
+    the ban's own search function, so this cannot report a hit the ban would miss.
+
+    The text is the line config.yaml actually carried, quoted verbatim off the line
+    as shipped, and the expectation is ONE hit naming the command: `--arm` singular
+    must not fire, and the correct cost-eval line must not either. That second half
+    is why the ban is a phrase and not the token — feeding the ban the line that has
+    to survive is the only way to show it survives.
+    """
+    broken_line = (
+        "  # --arms raw,focus` over `eval/prefetch_followup_queries.yaml` decides, "
+        "and those")
+    assert _stale_hits(broken_line) == ["--arms raw,focus"], (
+        "the command ban no longer fires on the line it was written to catch, so "
+        "clause 1 would pass over a config that still tells a reader to run a command "
+        "that exits 2")
+    surviving_line = (
+        "  # eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull.")
+    assert _stale_hits(surviving_line) == [], (
+        "the ban now fires on the correct plural too, which means it is banning the "
+        "token and would have broken a working command line to fix a broken one")
+
+
+# --- clause 1's positive half: the block over followup.focus_legs --------------
+
+def _followup_block() -> str:
+    """The comment block above the `followup:` key that holds `focus_legs`, joined.
+
+    Same reason `_block()` exists for the arch-review knobs: a `raw_text contains`
+    assertion would be satisfied by the command appearing in any comment in a
+    1,860-line file, while the block over the key — the one a person reads before
+    flipping the switch — stayed broken. Walking back from the key over contiguous
+    comment lines grades the prose where it is read.
+    """
+    lines = _raw().splitlines()
+    try:
+        parent = next(i for i, l in enumerate(lines) if l == "  followup:")
+    except StopIteration:
+        raise AssertionError("no `  followup:` key line in config.yaml") from None
+    assert any(l.startswith("    focus_legs:") for l in lines[parent + 1:parent + 4]), (
+        "`followup:` no longer holds `focus_legs:` as its key, so the block above it is "
+        "not the block over the switch this node grades")
+    start = parent
+    while start > 0 and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    body = [l.lstrip()[1:].lstrip() for l in lines[start:parent]]
+    assert len(body) >= 8, (
+        f"the comment above `followup:` is {len(body)} lines; #4032 left 8, so the "
+        "block has been cut down or detached from its key and a reader of the switch "
+        "would not see the experiment's terms")
+    joined = " ".join(body)
+    assert "#4032" in joined, (
+        "the block above the key is not the #4032 follow-up prose this node is about — "
+        "the assertions below would be grading some other comment")
+    return joined
+
+
+def test_the_followup_block_names_the_command_the_runner_accepts():
+    """#4394 clause 1, positive half: the block over `focus_legs: false` prints the
+    command that actually runs.
+
+    Banning the wrong string is only half of it — the reader of this block is being
+    told what to run to decide an off-by-default retrieval experiment, so the block
+    must carry `eval/run_prefetch_followup_eval.py --arm raw,focus` contiguously, the
+    way it can be copied, and must not carry the plural form of it. The flag itself is
+    the runner's to own; tests/test_prefetch_followup_eval.py asks its parser, and
+    `app/prefetch.py`'s copy of the same command is pinned there.
+    """
+    block = _followup_block()
+    assert "eval/run_prefetch_followup_eval.py --arm raw,focus" in block, (
+        "the block over `focus_legs:` no longer prints the command that decides the "
+        f"arm: {block[:200]}…")
+    assert "--arms raw,focus" not in block, block[:200] + "…"
 
 
 # --- clause 2: owners, not a directory list ----------------------------------

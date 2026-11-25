@@ -841,3 +841,51 @@ def test_main_calls_only_helpers_defined_above_the_entrypoint() -> None:
         f"{late} sit below the `if __name__ == \"__main__\"` guard, so script mode has "
         f"not bound them when main() runs — a run under `--arms desc_frontload` dies at "
         f"the line that prints its verdict, after the artifact is already on disk")
+
+
+# ── #4394: this runner's plural `--arms` is the correct one ──────────────────
+
+def test_config_yaml_still_prints_this_runners_plural_arms():
+    """#4394 clause 4: the fix that re-pointed a config comment at `--arm` must leave
+    THIS command line alone.
+
+    `config.yaml` carries two prefetch A/B command lines and they disagree on purpose.
+    The follow-up runner declares `ap.add_argument("--arm", dest="arms", ...)`; this one
+    declares the plural, so `--arms injected,desc_push,desc_pull` is not a typo and a
+    reader who sweep-replaced the token would have broken a working command line while
+    fixing a broken one. That is the trap this item named, so the surviving line is
+    pinned from the config's bytes and from this runner's own parser surface, read off
+    its AST rather than from a grep of its text: the claim being graded is that the flag
+    the comment prints is the flag the script accepts, and only the declaration says so.
+
+    `--arms raw,focus` may not appear in config.yaml at all — that is
+    `tests/test_arch_review_config_comment_claims.py`'s file-wide ban — but the count
+    assertion belongs here, because "exactly one `--arms` is left in the file" is a
+    claim about this line being the one that survived.
+    """
+    import ast
+
+    cfg = (REPO / "config.yaml").read_text(encoding="utf-8")
+    assert "eval/run_prefetch_cost_eval.py --arms injected,desc_push,desc_pull" in cfg, (
+        "config.yaml no longer prints the cost-eval command line: #4394's fix was aimed "
+        "at a different runner's flag")
+    assert cfg.count("--arms") == 1, (
+        f"{cfg.count('--arms')} `--arms` tokens are left in config.yaml; exactly this "
+        "runner's line should survive #4394's change, so a second one means the wrong "
+        "string was edited or a new one was written")
+    assert "--arms raw,focus" not in cfg
+
+    tree = ast.parse((REPO / "eval" / "run_prefetch_cost_eval.py").read_text(
+        encoding="utf-8"))
+    flags = {a.value for node in ast.walk(tree)
+             if isinstance(node, ast.Call)
+             and isinstance(node.func, ast.Attribute)
+             and node.func.attr == "add_argument"
+             for a in node.args
+             if isinstance(a, ast.Constant) and isinstance(a.value, str)}
+    assert "--arms" in flags, (
+        "this runner no longer declares the plural this config line prints, so the line "
+        "above has become the bug #4394 fixed somewhere else")
+    assert "--arm" not in flags, (
+        "this runner now declares both `--arm` and `--arms`, so the config line's flag is "
+        "no longer unambiguous and the pin above means nothing")

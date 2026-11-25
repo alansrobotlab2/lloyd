@@ -291,12 +291,12 @@ facts@6ms vault@140ms` shows when each one arrived.
   what about the other one?" reduces the skills query to the token `other` while
   the fuzzy entity matcher answers `one` with `Checkmate-in-One` and `Capital One`.
   It is **off** in `config.yaml` (`followup.focus_legs: false`) and its A/B is
-  unrecorded as of 2026-11-20 — the decision sits with #4296, and the command the
-  `followup.focus_legs` comment block in `config.yaml` names for it (`--arms`) is
-  not the flag the runner takes (`--arm`, #4394):
-  `eval/run_prefetch_followup_eval.py --arm raw,focus`
-  over `eval/prefetch_followup_queries.yaml` decides, and nothing has written the
-  promised `eval/measurements/prefetch-followup-<date>.md`. `_search_recent_sessions`
+  unrecorded as of 2026-11-20 — the decision sits with #4296, and what decides it is
+  `eval/run_prefetch_followup_eval.py --arm raw,focus` over
+  `eval/prefetch_followup_queries.yaml`; nothing has written the promised
+  `eval/measurements/prefetch-followup-<date>.md` yet. The runner declares the
+  singular `--arm` (`dest="arms"`), so a plural there exits 2 and buys no numbers —
+  both prose cites of this command said the plural until #4394. `_search_recent_sessions`
   and `_search_backlog_refs` never take the enriched query — a temporal regex and a
   `#NNN` extraction are not topic searches.
 - **No LLM:** pure regex + file reads

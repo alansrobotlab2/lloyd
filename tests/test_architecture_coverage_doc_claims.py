@@ -16110,3 +16110,87 @@ def test_the_guard_s_line_cited_anchors_survive_the_count_being_stripped():
             f"{label} is no longer comment-only after the re-word: {code[:2]} — a round that "
             "re-words placement prose must not move a line of the guard's code")
         assert block, f"{label} sliced empty, so the assertion above was vacuous"
+
+
+# ── #4394: the follow-up A/B sentence must not claim a flag the config got wrong ──
+
+#: The block of `subliminal.md` that decides `prefetch.followup.focus_legs`, anchored on
+#: the line that states the switch's shipped value. One block carries it, and the
+#: uniqueness assert below is what keeps this node grading one decision rather than
+#: whichever sentence happens to mention the arm.
+_FOCUS_LEGS_ANCHOR = "followup.focus_legs: false"
+
+#: What the page used to assert about the deciding command: that `config.yaml` names the
+#: plural and the runner takes the singular. Both halves were true when written — #4394
+#: fixed the two prose cites, `7ec93dd1` wrote this sentence — and both are false now, so
+#: the page would be reporting a mismatch that no longer exists and pointing a reader at a
+#: config line they cannot break. Listed as the two fragments that carry the claim, because
+#: the sentence is long and one of its halves could survive a rewrite on its own.
+_FOCUS_LEGS_FLAG_MISSTATEMENTS = (
+    "is not the flag the runner takes",
+    "names for it (`--arms`)",
+)
+
+
+def _focus_legs_ab_claim(text: str) -> str:
+    """The one blank-line block of a doc stating what decides the follow-up arm.
+
+    A block, not a `## ` section: the passage sits inside the Worker 2 bullet list, and
+    grading the section would grade the bullets this node never chose. Exactly one block
+    may carry the anchor — two would mean the extractor is grading a claim nobody decided
+    to grade, which is #2606's reason for wanting one `Re-measured` paragraph.
+    """
+    units = [re.sub(r"\s+", " ", u).strip() for u in re.split(r"\n\s*\n", text)]
+    hits = [u for u in units if _FOCUS_LEGS_ANCHOR in u]
+    assert len(hits) == 1, (
+        f"{len(hits)} blocks carry {_FOCUS_LEGS_ANCHOR!r}; the node below grades one, and "
+        "an arm whose shipped value is stated twice in one page is a page whose reader "
+        "cannot tell which one is current")
+    return hits[0]
+
+
+def _stale_flag_claims(claim: str) -> list[str]:
+    """Which retired claims about the flag a block carries. Kept out of the node so the
+    control in it can show the check fires on text, not on nothing — the same reason
+    `_stale_read_claims` exists beside the prefetch read rule.
+    """
+    return [s for s in _FOCUS_LEGS_FLAG_MISSTATEMENTS if s in claim]
+
+
+def test_the_subliminal_page_names_the_command_that_decides_the_followup_arm():
+    """#4394 clause 5: the page's `focus_legs` bullet states the deciding command and
+    stops reporting a mismatch that has been fixed.
+
+    `7ec93dd1` landed this bullet saying the command `config.yaml` names for the A/B
+    (`--arms`) is not the flag the runner takes (`--arm`). That was the true state of the
+    tree when it was written and is the state #4394 removed: `config.yaml`'s
+    `followup.focus_legs` block and `app/prefetch.py`'s OFF-ships comment now both print
+    `--arm`, so the sentence had to go or the page would be documenting a broken command
+    line nobody can now find. What stays is the part that is still a decision rather than
+    a bug report: the command that decides, and #4296 as the item that owns the ruling.
+
+    Graded the way this file's header asks. The extracted block is unique and non-empty;
+    it still names the command, so the fix cannot be done by deleting the passage; the
+    retired claims are checked by the same helper the control below feeds the OLD sentence
+    to, so the ban and its witness are one code path.
+    """
+    claim = _focus_legs_ab_claim(_text("subliminal.md"))
+
+    assert "eval/run_prefetch_followup_eval.py --arm raw,focus" in claim, (
+        "the page no longer states the command that decides the follow-up arm, so the "
+        "arm has no recorded way to be measured: " + claim[:220] + "…")
+    assert "#4296" in claim, (
+        "the bullet no longer points at the item that owns the A/B ruling, so a reader "
+        "who runs the numbers has nowhere to put them")
+    assert _stale_flag_claims(claim) == [], (
+        f"the page re-published a retired claim about this flag: "
+        f"{_stale_flag_claims(claim)}")
+
+    old_sentence = (
+        "It is off in config.yaml (followup.focus_legs: false) and its A/B is unrecorded "
+        "as of 2026-11-20 — the decision sits with #4296, and the command the "
+        "followup.focus_legs comment block in config.yaml names for it (`--arms`) is not "
+        "the flag the runner takes (`--arm`, #4394)")
+    assert _stale_flag_claims(old_sentence) == list(_FOCUS_LEGS_FLAG_MISSTATEMENTS), (
+        "the banned fragments no longer match the sentence they were written to catch, so "
+        "this node would pass over the very wording it exists to retire")

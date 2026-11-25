@@ -422,3 +422,95 @@ def test_dry_run_never_touches_a_store(monkeypatch):
     rc = fu.main(["--dry-run", "--gold", str(GOLD), "--arm", "raw,focus",
                   "--ids", "qmd-daemon-other-one"])
     assert rc == 0
+
+
+# ── #4394: the command printed beside the switch must be one the runner parses ──
+
+#: The comment above the switch prints a command line. This is the item that found it
+#: naming a flag the runner does not take, so both spellings live here as constants: the
+#: ban below, the comment pin and the real parser call all read the same two strings, and
+#: a control that searched a different string than the ban would prove nothing.
+PLURAL_COMMAND = "eval/run_prefetch_followup_eval.py --arms raw,focus"
+SINGULAR_COMMAND = "eval/run_prefetch_followup_eval.py --arm raw,focus"
+
+
+def _off_ships_comment() -> str:
+    """The comment block above `followup_focus_legs_enabled`, joined into one string.
+
+    `app/prefetch.py` owns the switch, and its block is the prose a person editing the
+    code reads: it says the arm ships OFF until this A/B is recorded and prints the
+    deciding command in parentheses. Grading the whole file would let any other comment
+    that mentions the runner satisfy a `contains` assert while that block stayed broken,
+    so the unit is the block — walked back from the `def` over the two blank lines it
+    owns and then over contiguous comment lines, the way
+    `tests/test_arch_review_config_comment_claims.py` walks a config block.
+    """
+    src = (ROOT / "app" / "prefetch.py").read_text(encoding="utf-8")
+    lines = src.splitlines()
+    try:
+        key = next(i for i, l in enumerate(lines)
+                   if l.startswith("def followup_focus_legs_enabled"))
+    except StopIteration:
+        raise AssertionError(
+            "app/prefetch.py no longer defines followup_focus_legs_enabled, so this "
+            "pin is grading a file that moved rather than a comment that was fixed"
+        ) from None
+    start = key
+    while start > 0 and not lines[start - 1].strip():
+        start -= 1        # the two blank lines before a top-level `def`
+    while start > 0 and lines[start - 1].startswith("#"):
+        start -= 1
+    body = [l[1:].lstrip() for l in lines[start:key]]
+    assert len(body) >= 20, (
+        f"the comment above the switch is {len(body)} lines; #4032 left 20, so the block "
+        "has been cut down or detached from its function and the reader of the switch is "
+        "no longer the one this node grades")
+    joined = " ".join(body)
+    assert "ships OFF" in joined, (
+        "the block above the switch is not the OFF-ships explanation this node is about — "
+        "the asserts below would be grading some other comment")
+    return joined
+
+
+def test_the_off_ships_comment_prints_a_command_its_own_runner_accepts(monkeypatch):
+    """#4394 clause 3: the file that owns the switch must not print a command line that
+    exits 2.
+
+    The block above `followup_focus_legs_enabled` told a reader to run
+    `eval/run_prefetch_followup_eval.py --arms raw,focus`. The runner declares the
+    singular (`ap.add_argument("--arm", dest="arms", ...)`), so that copy-paste is an
+    argparse exit 2 and no numbers — which is the whole cost of the bug: not a wrong
+    number, no number, on the one measurement standing between an off-by-default
+    retrieval arm and a decision about it.
+
+    The flag is checked at the boundary that decides it, not by grepping the declaration:
+    `fu.main` is called with both spellings, so the plural must be refused with exit code
+    2 and the singular the comment now prints must run to completion. The singular runs in
+    `--dry-run` over one gold case with `_search_facts` stubbed to raise, which is this
+    file's standing guarantee that a runner call in a test touches no fact store.
+    """
+    src = (ROOT / "app" / "prefetch.py").read_text(encoding="utf-8")
+    assert PLURAL_COMMAND not in src, (
+        "app/prefetch.py prints a follow-up A/B command its runner cannot parse")
+    assert PLURAL_COMMAND.split()[1] not in src, (
+        "the bare plural flag is back in the file that owns the switch")
+
+    block = _off_ships_comment()
+    assert SINGULAR_COMMAND in block, (
+        f"the OFF-ships block no longer prints the command that decides the arm: "
+        f"{block[-220:]}…")
+
+    with pytest.raises(SystemExit) as plural:
+        fu.main(["--arms", "raw,focus"])
+    assert plural.value.code == 2, (
+        f"the runner answered the plural with exit {plural.value.code}, not argparse's 2 "
+        "— the flag may have been renamed, and then the comment pin above is grading a "
+        "spelling nobody accepts")
+
+    def _boom(*a, **k):
+        raise AssertionError("the accepted spelling reached the fact store")
+
+    monkeypatch.setattr(prefetch, "_search_facts", _boom)
+    rc = fu.main(["--arm", "raw,focus", "--dry-run", "--gold", str(GOLD),
+                  "--ids", "qmd-daemon-other-one"])
+    assert rc == 0, "the exact command the comment prints did not run clean"

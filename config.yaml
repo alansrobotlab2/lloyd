@@ -1854,8 +1854,9 @@ prefetch:
   # focus-enriched query the two vault legs have always searched, so "and what
   # about the other one?" is searched with the previous turns' keywords instead of
   # the token `other`. The recent-sessions and backlog legs keep the raw message
-  # either way. OFF: the A/B is not run yet. `eval/run_prefetch_followup_eval.py
-  # --arms raw,focus` over `eval/prefetch_followup_queries.yaml` decides, and those
+  # either way. OFF: the A/B is not run yet. The command that decides is
+  # `eval/run_prefetch_followup_eval.py --arm raw,focus` (the runner's flag is the
+  # singular `--arm`, #4394) over `eval/prefetch_followup_queries.yaml`, and those
   # numbers land in eval/measurements/prefetch-followup-<date>.md. With this false
   # a turn queries both legs with its own text, byte-identical to before.
   followup:

@@ -586,7 +586,7 @@ def _get_session_focus(session_id: str | None) -> SessionFocus | None:
 #
 # The switch below is the experiment, and it ships OFF: until the A/B over
 # `eval/prefetch_followup_queries.yaml` is recorded
-# (`eval/run_prefetch_followup_eval.py --arms raw,focus`), a turn sends exactly
+# (`eval/run_prefetch_followup_eval.py --arm raw,focus`), a turn sends exactly
 # the query strings it sends today.
 
 
