@@ -56,6 +56,16 @@ key is present (#811) — three classes the scheduler only objects to at dispatc
     `104` row read `never_run=True runs_in_window=5` while the armed sync that had
     produced those five runs appeared nowhere in the report. Both are warnings, so
     they only bite a caller that passes `--strict` — nothing arms itself from here.
+  * `UPSTREAM_NO_ARTIFACT` (#4564) — a live producer that another live task's
+    `depends_on` names, whose own file declares no `output_artifact`. The field is
+    opt-in per task file, and `app.autonomy._cap_out_gap` returns early without it, so
+    a run that stops at its turn cap in such a task is still recorded `success` on any
+    non-empty terminal text with `failure_count` left at 0 — no cooldown, no auto-disable,
+    and (via `_consumer_redrive`) no re-drive for the consumer that was handed nothing.
+    Only 4 of 53 numbered files declared one as of 2026-11-25, and the gap was invisible
+    per-group rather than per-graph, so this reads the `depends_on` edges: 24, 48, 57, 58
+    and 81 remain named once #56 declares the dated file it already writes. A warning,
+    never an exit rule — the five named producers are rulings still owed, not defects.
 
 Usage:
     python scripts/autonomy/validate_tasks.py [--autonomy-dir DIR] [--strict]
@@ -348,6 +358,84 @@ def skill_resolves(value: str, skills_dirs: list[Path]) -> bool:
         if (d / expanded / "SKILL.md").is_file():
             return True
     return False
+
+
+def upstream_no_artifact_warnings(by_file: list[tuple[Path, dict]]) -> list[str]:
+    """UPSTREAM_NO_ARTIFACT — a live producer that hands its dependents nothing to weigh.
+
+    The cap-out verdict and the recovery machinery are both opt-in per task file.
+    `app.autonomy._cap_out_gap` opens with `if not task.get("output_artifact"): return
+    None, {}` — `# nothing to weigh: untouched` — so a run that stops at its turn cap in a
+    task declaring nothing is recorded `success` on any non-empty terminal text. That is
+    the defect `run_39_20261030_080034` was filed for (91 turns, neither declared section
+    landed, `status: success`, `failure_count: 0`, which is also why no cooldown could
+    arm), and the same missing declaration bails out of `_consumer_redrive` and
+    `_upstream_artifact_on_disk`: "A producer that declares no artifact hands its consumer
+    nothing to re-consume". One empty field therefore costs the failure verdict AND the
+    retry, and nothing asks for the declaration structurally.
+
+    Keyed on the `depends_on` graph rather than on a section of
+    `architecture/autonomy-jobs.md`, because the graph is what says whose gap matters:
+    measured 2026-11-25, only 4 of the 53 numbered task files declare an artifact, and the
+    ten §Distil members the item was filed against are only six of the ten producers a
+    live `depends_on` actually names — #24, #48 and #81 are named by dependents from
+    outside that group. A leaf's gap mislabels its own run and certifies nothing; a
+    producer's gap certifies a day for the jobs waiting on it. Keying on the graph is also
+    bounded (ten producers today) where keying on the doc group is a list somebody has to
+    maintain, which is how the coverage went missing in the first place.
+
+    Live on both ends, on this file's existing `DEPENDABLE_STATUSES`: a parked producer is
+    already named by the `depends_on … is status=` warning in the loop above, and a parked
+    dependent certifies nothing downstream today. A file with no `id:` cannot be keyed at
+    all — `ID_FILENAME_MISMATCH` and the depends_on `not found` line are its classes.
+
+    On the live board this fires five times once #56 declares the dated trajectory file it
+    already writes: 24, 48, 57, 58, 81. Like every class here it joins `warnings` and
+    touches no exit rule short of `--strict`, for the DOC_MEMBERSHIP reason in `main`.
+    """
+    status_of: dict[str, str] = {}
+    name_of: dict[str, str] = {}
+    declares_artifact: dict[str, bool] = {}
+    for p, fm in by_file:
+        tid = _clean(fm.get("id"))
+        if not tid:
+            continue
+        status_of[tid] = _clean(fm.get("status"))
+        name_of[tid] = p.name
+        declares_artifact[tid] = not _is_nullish(_clean(fm.get("output_artifact")))
+
+    #: producer id -> the live dependent files that name it. One line per PRODUCER, not
+    #: per edge, so the count of warnings is the count of undeclared producers — #56 alone
+    #: is named by both #51 and #57 and is one gap, not two.
+    named_by: dict[str, list[str]] = {}
+    for p, fm in by_file:
+        if _clean(fm.get("status")) not in DEPENDABLE_STATUSES:
+            continue
+        dep_id = _clean(fm.get("depends_on"))
+        if not dep_id or _is_nullish(dep_id) or dep_id not in status_of:
+            continue
+        named_by.setdefault(dep_id, []).append(p.name)
+
+    out: list[str] = []
+    for pid in sorted(named_by, key=lambda k: int(k) if k.isdigit() else 0):
+        if declares_artifact.get(pid):
+            continue
+        if status_of.get(pid) not in DEPENDABLE_STATUSES:
+            continue
+        dependents = sorted(named_by[pid])
+        out.append(
+            f"{name_of[pid]}: UPSTREAM_NO_ARTIFACT: #{pid} declares no `output_artifact` "
+            f"while {', '.join(dependents)} "
+            f"{'name' if len(dependents) > 1 else 'names'} it in `depends_on`. "
+            "`app.autonomy._cap_out_gap` returns early for a task that declares none, so "
+            f"a run of #{pid} that hits its turn cap is recorded `success` on any "
+            "non-empty terminal text, and `_consumer_redrive` / "
+            "`_upstream_artifact_on_disk` bail on the same missing declaration: the jobs "
+            f"waiting on #{pid} get a certified day with nothing on disk to certify it. "
+            "Declare the dated file this task already writes, `{date}`-templated the way "
+            "`42-nightly-reflection-knowledge-analysis.md` declares its handoff note, or "
+            "write the exemption down next to the grant the task holds.")
+    return out
 
 
 #: The drift journal's default location, for the one run in which `jobs_membership` did not
@@ -812,6 +900,21 @@ def main(argv: list[str] | None = None) -> int:
                         f"{p.name}: depends_on {dep_id} but #{dep_id} is "
                         f"status={dep_status or 'unset'}"
                     )
+
+    # UPSTREAM_NO_ARTIFACT (#4564) — does every live producer another live task's
+    # `depends_on` names declare an `output_artifact` for the cap-out verdict and the
+    # dependency gate to weigh? Built from `by_file`, so there is no allowlist: the ids in
+    # the directory and the `depends_on:` lines in them ARE the graph.
+    #
+    # The same rule as DOC_MEMBERSHIP below, and for the same reason: this joins `warnings`
+    # and never an exit rule. A missing declaration is a task file that has not been ruled
+    # on yet — five of the live producers are in that state today and each is an open
+    # question about what its per-run artifact even is — and a warning that reddened a
+    # nightly the day it landed would be an enforcement wearing a linter's clothes, which
+    # is the dormant-kill failure mode this file's docstring exists to prevent. `--strict`
+    # still turns it into exit 2, because that flag's whole meaning is "treat structural
+    # warnings as failures".
+    warnings.extend(upstream_no_artifact_warnings(by_file))
 
     # DOC_MEMBERSHIP (#2895) — is every live task file named by BOTH membership tables of
     # `architecture/autonomy-jobs.md`? Ids come from the directory and both tables are

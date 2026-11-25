@@ -102,10 +102,21 @@ def test_a_parked_upstream_fails_the_strict_rung(tmp_path):
 
 @pytest.mark.parametrize("upstream_status", ["up_next", "in_progress"])
 def test_a_healthy_chain_exits_clean_with_no_dependency_warning(tmp_path, upstream_status):
-    """The check must not fire on a chain that can run, or it is just noise."""
+    """The check must not fire on a chain that can run, or it is just noise.
+
+    The producer declares an `output_artifact` because #4564 clause 1 makes a live producer
+    that declares none a warning, and this node's subject is a chain that is healthy in every
+    class: it asserts `"structural warning" not in strict_out`, which held over this fixture
+    until the day the linter grew a rule about the very field this file lacks. Leaving the
+    declaration out would not have pinned a healthy chain, it would have pinned a chain that
+    is healthy for one class and warned for another — and the assertion it failed on is the
+    whole of what the node is for (`"depends_on" not in plain_out`: the parked-upstream
+    warning stays silent when the upstream runs).
+    """
     lint = Linter(tmp_path)
     lint.add("1-x.md", id=1, name="x", status=upstream_status, frequency="daily",
-             skill_name="heartbeat")
+             skill_name="heartbeat",
+             output_artifact="/tmp/x-{date}.md")
     lint.add("2-y.md", id=2, name="y", status="up_next", frequency="daily",
              depends_on=1, skill_name="heartbeat")
 
@@ -952,7 +963,8 @@ def test_task_105_declares_primary_the_one_model_value_this_board_can_run():
 
 @live_vault
 def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_path):
-    """Clause 3's real-directory leg: 0 warnings, exit 0, over `~/obsidian/autonomy`.
+    """Clause 3's real-directory leg: no model/slot warning and no unchecked verdict, over
+    `~/obsidian/autonomy`.
 
     The grid above proves the rule on fixtures; this proves the fleet satisfies it,
     which is the half that could only be true after the vault half of #2632 landed
@@ -960,6 +972,17 @@ def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_pa
     commit c467ed53). Before that flip this node was the whole point: the one file
     naming the retired slot was #68, and the new check would have failed the strict
     rung over a task nobody runs.
+
+    "Clean" is now scoped to the classes this node is about, and the scoping is #4564's
+    doing, not a softening: its acceptance check states outright that after landing the
+    linter "still names 24, 48, 57, 58, 81, which is the point of a warning". A node that
+    asserted an empty warning block over the live board would therefore be asserting that
+    the class it now tolerates did not fire — green only while the check was broken. So the
+    block is read, every line in it is witnessed (a numbered task file that exists, naming
+    a real dependent, drawn from the five producers whose declaration is an open ruling),
+    and `#56` is named absent: that half is the item's acceptance check, and it can only be
+    taken over the real vault. The exit code follows the flag's meaning rather than a
+    number: `--strict` exits 2 because a warning printed, and 0 if none had.
 
     `@live_vault` for the standing reason (`pytest.ini:10-13`): the vault is written
     by nightly jobs and by `autonomy_write_task`, so the automod gate deselects this
@@ -978,10 +1001,46 @@ def test_the_real_board_lints_clean_now_that_the_model_slot_check_is_live(tmp_pa
     )
     out = proc.stdout + proc.stderr
 
-    assert "structural warning" not in out, out
     assert "unchecked" not in out, out
-    assert "✅ all task files parse and pass structural checks" in out, out
-    assert proc.returncode == 0, out
+    assert "UNPARSEABLE: 0" in out, out
+
+    lines = out.splitlines()
+    header = next((i for i, ln in enumerate(lines)
+                   if "structural warning(s):" in ln), None)
+    # The block is the INDENTED lines the script prints under its own header; the slice cannot
+    # just take "everything after it", because stderr's app.paths worktree note is concatenated
+    # onto this same string and starts at column 0.
+    warned = ([ln.strip() for ln in lines[header + 1:] if ln.startswith("   ")]
+              if header is not None else [])
+    assert not [w for w in warned if "model" in w or "requires_slot" in w], (
+        f"the model-slot class #2632 closed is warning again: {warned}\n{out}")
+    assert all("UPSTREAM_NO_ARTIFACT" in w for w in warned), (
+        f"the live board gained a warning class with no node explaining it: {warned}\n{out}")
+
+    # Each UPSTREAM_NO_ARTIFACT line is witnessed, not waved through: the blamed file must
+    # be a numbered task file that exists, and its id must be one of the five producers whose
+    # per-run artifact is still an open ruling (#4564's owed list). A sixth id appearing here
+    # is a new producer nobody has ruled on, and a line naming a file the directory does not
+    # hold is the linter lying.
+    owed = {"24", "48", "57", "58", "81"}
+    blamed = {w.split(":", 1)[0].strip().split("-", 1)[0] for w in warned}
+    assert blamed <= owed, f"an undeclared producer nobody has ruled on: {sorted(blamed)}"
+    for w in warned:
+        subject = w.split(":", 1)[0].strip()
+        assert (Path.home() / "obsidian" / "autonomy" / subject).is_file(), (
+            f"{w}\nblames {subject}, which is not a task file under ~/obsidian/autonomy")
+        # One dependent reads "…md names it in `depends_on`", two read "…, …md name it in
+        # `depends_on`", so the witness is that a task FILE stands in front of that verb — not
+        # which verb the line picked.
+        assert ".md name" in w, (
+            f"{w}\ndoes not name the dependent that points at the producer")
+    assert "56-nightly-trajectory-extraction.md" not in out, (
+        "#56 is the producer this item closed: #51 and #57 depend on it, and it now "
+        "declares the dated trajectory file it writes")
+    assert proc.returncode == (2 if warned else 0), (
+        "the flag's meaning is unchanged: any warning is exit 2 under --strict, none is 0")
+    if not warned:
+        assert "✅ all task files parse and pass structural checks" in out, out
 
     # §#68 of architecture/autonomy-jobs.md FLOORS this census in prose, so the expected
     # minimum is read out of that sentence and never typed here: the doc-claims suite cannot
@@ -2345,3 +2404,272 @@ def test_the_live_board_prints_no_line_naming_108_while_counting_the_whole_fleet
     assert hits == [], (
         "#108 is still missing from a membership table, or its filing drift is still open "
         "after #3746 rowed it:\n" + "\n".join(hits))
+
+
+# ── #4564: UPSTREAM_NO_ARTIFACT — a live producer that declares nothing to weigh ──
+#
+# `app.autonomy._cap_out_gap` opens with `if not task.get("output_artifact"): return None, {}`
+# — its own comment is `# nothing to weigh: untouched` — so a run that stops at its turn cap in
+# a task declaring no artifact is recorded `success` on any non-empty terminal text. That is
+# `run_39_20261030_080034`: 91 turns, neither declared section landed, `status: success`,
+# `failure_count: 0`, which is also why no cooldown armed. `_consumer_redrive` and
+# `_upstream_artifact_on_disk` bail on the same missing declaration ("A producer that declares
+# no artifact hands its consumer nothing to re-consume"), so one empty field costs the failure
+# verdict AND the retry.
+#
+# The check keys on `depends_on` edges, not on a group in `architecture/autonomy-jobs.md`.
+# Measured 2026-11-25: 4 of the 53 numbered task files declare the field (38, 39, 40, 42), and
+# the ids a live `depends_on` names are 24, 38, 39, 40, 42, 48, 56, 57, 58, 81 — so three
+# producers the item's §Distil framing never named (#24, #48, #81) were unbound all along,
+# while three it did name (#47, #54, #83) are leaves whose gap certifies nothing downstream.
+
+#: Every chain member below is a `daily` job with a skill the dispatcher can load, so no node
+#: here is ever red for a class other than the one it names. `skill_name` is passed at each
+#: call, not from here, so a reader sees the field the scheduler demands on the line itself.
+CHAIN = {"frequency": "daily"}
+
+
+def test_a_live_producer_with_no_declared_artifact_names_itself_and_its_dependent(tmp_path):
+    """Clause 1: one line, naming the producer's id and the dependent that points at it.
+
+    The live shape is #24 → #48: `48-entity-resolution-sweep.md:5` and
+    `98-retag-untagged-facts.md:6` both declare `depends_on: 24` while #24 declares no
+    `output_artifact`.
+
+    The hole is walked, just not by this item's own group. #24's run of 2026-11-24 stopped
+    at its turn cap at 76 iterations and was still recorded `success`, so both jobs waiting
+    on it had their day certified by a run that finished nothing. #24 is written here the way
+    it really is (`in_progress`, `6x-daily` + `runs_per_day: 6`) so the warning block carries
+    this class and nothing else.
+    """
+    lint = Linter(tmp_path)
+    lint.add("24-data-pipeline.md", id=24, name="Data Pipeline", status="in_progress",
+             frequency="6x-daily", runs_per_day=6, skill_name="heartbeat")
+    lint.add("48-entity-resolution-sweep.md", id=48, name="Entity Resolution Sweep",
+             status="up_next", skill_name="heartbeat", depends_on=24, **CHAIN)
+
+    code, out = lint.run()
+
+    assert code == 0, "a missing declaration is an advisory; the default exit code must not move"
+    lines = [ln for ln in out.splitlines() if "UPSTREAM_NO_ARTIFACT" in ln]
+    assert len(lines) == 1, out
+    assert ("24-data-pipeline.md: UPSTREAM_NO_ARTIFACT: #24 declares no `output_artifact`"
+            in lines[0]), lines[0]
+    assert "48-entity-resolution-sweep.md names it in `depends_on`" in lines[0], lines[0]
+    assert "_cap_out_gap" in lines[0], (
+        f"the line must say which guard is disabled, not just that a field is empty: {lines[0]}")
+
+
+def test_one_producer_named_by_two_dependents_earns_one_line_naming_both(tmp_path):
+    """#56's real shape: two dependents, one gap. The count is producers, not edges.
+
+    `51-conversation-relation-linking.md:5` and `57-nightly-trajectory-mining.md:5` both say
+    `depends_on: 56`, so an edge-per-line report would print #56 twice and make the fleet look
+    worse than it is; clause 2's bound ("the warning's count is the number of real producers")
+    is what this pins. Both dependents are named so a reader can see which two jobs a capped
+    run of #56 certified for free.
+    """
+    lint = Linter(tmp_path)
+    lint.add("56-nightly-trajectory-extraction.md", id=56, name="Trajectory Extraction",
+             status="up_next", skill_name="heartbeat", **CHAIN)
+    lint.add("51-conversation-relation-linking.md", id=51, name="Relation Linking",
+             status="up_next", skill_name="heartbeat", depends_on=56, **CHAIN)
+    lint.add("57-nightly-trajectory-mining.md", id=57, name="Trajectory Mining",
+             status="up_next", skill_name="heartbeat", depends_on=56, **CHAIN)
+
+    out = lint.run()[1]
+    lines = [ln for ln in out.splitlines() if "UPSTREAM_NO_ARTIFACT" in ln]
+
+    assert len(lines) == 1, f"one gap printed twice: {lines}"
+    assert "51-conversation-relation-linking.md" in lines[0], lines[0]
+    assert "57-nightly-trajectory-mining.md" in lines[0], lines[0]
+    assert "name it in `depends_on`" in lines[0], (
+        f"two dependents take a plural verb, one takes a singular — the line has to read "
+        f"true either way: {lines[0]}")
+
+
+def test_a_producer_that_declares_an_output_artifact_earns_no_warning(tmp_path):
+    """Clause 2's first half: the declaration is the fix, so a declared producer is clean.
+
+    This is the #56 half of the item landed as a fixture: the dated trajectory file
+    `_pipeline/trajectories/{date}.jsonl` already exists one-per-run, so declaring it is the
+    whole repair. Nothing else about the chain changes between this node and the two above,
+    which is what makes the assertion a test rather than a tautology.
+    """
+    lint = Linter(tmp_path)
+    lint.add("56-nightly-trajectory-extraction.md", id=56, name="Trajectory Extraction",
+             status="up_next", skill_name="heartbeat",
+             output_artifact="/home/alansrobotlab/lloyd-data/_pipeline/trajectories/{date}.jsonl",
+             **CHAIN)
+    lint.add("51-conversation-relation-linking.md", id=51, name="Relation Linking",
+             status="up_next", skill_name="heartbeat", depends_on=56, **CHAIN)
+    lint.add("57-nightly-trajectory-mining.md", id=57, name="Trajectory Mining",
+             status="up_next", skill_name="heartbeat", depends_on=56, **CHAIN)
+
+    plain_code, plain_out = lint.run()
+    strict_code, strict_out = lint.run("--strict")
+
+    assert "UPSTREAM_NO_ARTIFACT" not in plain_out, plain_out
+    assert "structural warning" not in plain_out, plain_out
+    assert plain_code == 0
+    assert strict_code == 0, strict_out
+
+
+def test_an_empty_output_artifact_declaration_counts_as_no_declaration(tmp_path):
+    """`output_artifact: ""` is the same hole as no key, because the guard reads it the same way.
+
+    `_cap_out_gap` tests `if not task.get("output_artifact")` and `_consumer_redrive` tests
+    `not str(... or "").strip()`, so an empty or `null` value takes the same early return as a
+    missing key. A linter that only asked whether the KEY was present would wave through a file
+    that opted out in the one syntax a hand-edit produces.
+    """
+    for arm, value in enumerate(('""', "null")):
+        root = tmp_path / f"arm{arm}"
+        root.mkdir()
+        lint = Linter(root)
+        lint.add("24-data-pipeline.md", id=24, name="Data Pipeline", status="in_progress",
+                 frequency="6x-daily", runs_per_day=6, skill_name="heartbeat",
+                 output_artifact=value)
+        lint.add("48-entity-resolution-sweep.md", id=48, name="Entity Resolution Sweep",
+                 status="up_next", skill_name="heartbeat", depends_on=24, **CHAIN)
+
+        out = lint.run()[1]
+        assert "UPSTREAM_NO_ARTIFACT" in out, f"output_artifact: {value} read as a declaration"
+        assert "#24 declares no `output_artifact`" in out, out
+
+
+def test_a_leaf_that_nobody_depends_on_stays_quiet_however_empty_its_fields(tmp_path):
+    """Clause 2's second half: the graph, not the field, is what makes a gap worth printing.
+
+    Three live leaf jobs with no `output_artifact` at all: a leaf's capped run mislabels only
+    its own outcome and holds no dependent, so warning here is the noise that would get this
+    class muted. #47, #54 and #83 are the live trio of this item's six that are upstream of
+    nothing — #47's declarations are the memory files it rewrites every run, which is exactly
+    why its ruling is a design answer and is owed rather than guessed here.
+    """
+    lint = Linter(tmp_path)
+    lint.add("40-producer.md", id=40, name="Config Application", status="up_next",
+             skill_name="heartbeat", output_artifact="/tmp/learnings-{date}.md", **CHAIN)
+    lint.add("47-dream-consolidation.md", id=47, name="Dream Consolidation",
+             status="up_next", skill_name="heartbeat", depends_on=40, **CHAIN)
+    lint.add("54-cross-domain-synthesis.md", id=54, name="Cross-Domain Synthesis",
+             status="up_next", skill_name="heartbeat", **CHAIN)
+    lint.add("83-nightly-skills-management.md", id=83, name="Skills Management",
+             status="up_next", skill_name="heartbeat", **CHAIN)
+
+    plain_code, plain_out = lint.run()
+    strict_code, strict_out = lint.run("--strict")
+
+    assert "UPSTREAM_NO_ARTIFACT" not in plain_out, plain_out
+    for leaf in ("47-", "54-", "83-"):
+        assert f"{leaf}" not in plain_out.split("structural warning")[-1], (
+            f"a leaf was named in the warning block: {plain_out}")
+    assert plain_code == 0
+    assert strict_code == 0, strict_out
+
+
+def test_the_warning_count_is_the_number_of_undeclared_producers(tmp_path):
+    """The count is the bound clause 2 states: two undeclared producers, two lines, seven files.
+
+    A per-file or per-edge count would make the fleet look bigger than it is and get this class
+    ignored; today's real number is five (24, 48, 57, 58, 81) out of ten producers, which is
+    only legible if one line means one gap. The three that stay quiet are each quiet for a
+    different reason: #38 declares its artifact, #39 and #90 are named by nobody.
+    """
+    lint = Linter(tmp_path)
+    lint.add("24-data-pipeline.md", id=24, name="Data Pipeline", status="up_next",
+             skill_name="heartbeat", **CHAIN)
+    lint.add("98-retag-untagged-facts.md", id=98, name="Retag Untagged Facts",
+             status="up_next", skill_name="heartbeat", depends_on=24, **CHAIN)
+    lint.add("38-signals.md", id=38, name="Signals", status="up_next",
+             skill_name="heartbeat", output_artifact="/tmp/signals-latest.md", **CHAIN)
+    lint.add("39-write.md", id=39, name="Knowledge Write", status="up_next",
+             skill_name="heartbeat", depends_on=38, **CHAIN)
+    lint.add("48-sweep.md", id=48, name="Entity Resolution Sweep", status="up_next",
+             skill_name="heartbeat", **CHAIN)
+    lint.add("74-classifier.md", id=74, name="KG Mention Classifier", status="up_next",
+             skill_name="heartbeat", depends_on=48, **CHAIN)
+    lint.add("90-leaf.md", id=90, name="Corpus Shape Trend", status="up_next",
+             skill_name="heartbeat", **CHAIN)
+
+    out = lint.run()[1]
+    lines = [ln for ln in out.splitlines() if "UPSTREAM_NO_ARTIFACT" in ln]
+
+    assert len(lines) == 2, f"expected #24 and #48, got: {lines}"
+    assert any("#24 declares" in ln for ln in lines), lines
+    assert any("#48 declares" in ln for ln in lines), lines
+    assert "39-write.md" not in "".join(lines), (
+        "#39 is a leaf; its own missing declaration is nobody's business")
+    assert "38-signals.md" not in "".join(lines), "a declared producer is clean"
+
+
+def test_a_parked_producer_and_a_parked_dependent_each_earn_no_line(tmp_path):
+    """Live on both ends, because the two parked halves are already reported, or inert.
+
+    Parked producer: `depends_on 1 but #1 is status=paused` (#870) already names that file, and
+    a producer that does not dispatch cannot certify a capped day for anybody. Parked
+    dependent: the edge holds nothing up today, and re-arming it re-arms this warning. A check
+    that warned on both would fire on every parked chain on the board, which is how a warning
+    class earns a `grep -v`.
+    """
+    lint = Linter(tmp_path)
+    lint.add("1-parked-producer.md", id=1, name="Parked Producer", status="paused",
+             skill_name="heartbeat", **CHAIN)
+    lint.add("2-dependent.md", id=2, name="Dependent", status="up_next",
+             skill_name="heartbeat", depends_on=1, **CHAIN)
+    lint.add("56-live-producer.md", id=56, name="Live Producer", status="up_next",
+             skill_name="heartbeat", **CHAIN)
+    lint.add("57-draft-dependent.md", id=57, name="Draft Dependent", status="draft",
+             skill_name="heartbeat", depends_on=56, **CHAIN)
+
+    out = lint.run()[1]
+
+    assert "1-parked-producer.md: UPSTREAM_NO_ARTIFACT" not in out, out
+    assert "56-live-producer.md: UPSTREAM_NO_ARTIFACT" not in out, out
+    assert "2-dependent.md: depends_on 1 but #1 is status=paused" in out, (
+        f"the pre-existing parked-upstream class must still fire beside the new one: {out}")
+
+
+def test_the_new_class_joins_warnings_and_moves_no_exit_code_without_strict(tmp_path):
+    """Clause 3, on the DOC_MEMBERSHIP precedent: one fixture, both flags, the declaration as
+    the only variable.
+
+    Undeclared producer + dependent: default run exits 0 and prints the line; `--strict` exits
+    2, because that flag's whole meaning is "treat structural warnings as failures". Declared
+    producer: both exit 0. A check that failed the default run would be the dormant-kill failure
+    mode this file's docstring exists to prevent — the 2026-05-28 bulk edit that
+    dormant-killed ~85% of the autonomy system is the reason a warning class may never become
+    an exit rule on its own say-so, and `validate_tasks.py`'s own DOC_MEMBERSHIP note spells out
+    that a structural advisory "joins `warnings`, never the exit rules".
+    """
+    def board(declares: bool):
+        root = tmp_path / ("declared" if declares else "undeclared")
+        root.mkdir()
+        lint = Linter(root)
+        lint.add("24-data-pipeline.md", id=24, name="Data Pipeline", status="up_next",
+                 skill_name="heartbeat", **CHAIN)
+        lint.add("48-entity-resolution-sweep.md", id=48, name="Entity Resolution Sweep",
+                 status="up_next", skill_name="heartbeat", depends_on=24, **CHAIN)
+        if declares:
+            (lint.autonomy_dir / "24-data-pipeline.md").write_text(
+                (lint.autonomy_dir / "24-data-pipeline.md").read_text(encoding="utf-8")
+                .replace("skill_name: heartbeat",
+                         "skill_name: heartbeat\n"
+                         "output_artifact: /tmp/pipeline-{date}.md"),
+                encoding="utf-8")
+        return lint
+
+    undeclared = board(False)
+    declared = board(True)
+
+    plain_code, plain_out = undeclared.run()
+    assert plain_code == 0, f"the class moved the default exit code: {plain_out}"
+    assert "UPSTREAM_NO_ARTIFACT" in plain_out, plain_out
+    assert "1 structural warning" in plain_out, plain_out
+    assert undeclared.run("--strict")[0] == 2, "--strict does not cover the new class"
+
+    declared_code, declared_out = declared.run()
+    assert declared_code == 0, declared_out
+    assert "UPSTREAM_NO_ARTIFACT" not in declared_out, declared_out
+    assert declared.run("--strict")[0] == 0, (
+        "a board whose producers declare their artifacts must be clean under --strict too")

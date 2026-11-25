@@ -630,7 +630,15 @@ def _id_lines(out: str) -> list[str]:
 #: reaches the directory before its two rows do, and the rows come later from a human or a
 #: nightly. Any other code the linter can print is a defect in the tree, which is the thing
 #: the live-tree node below exists to catch.
-TOLERATED_LIVE_CODES = frozenset({"DOC_MEMBERSHIP", "DRIFT_UNCLOSED"})
+#: #4564 adds `UPSTREAM_NO_ARTIFACT` here, and the item's own acceptance check is why: it
+#: states that after landing the live list "still names 24, 48, 57, 58, 81, which is the point
+#: of a warning". Those five are producers a live `depends_on` points at whose per-run artifact
+#: is an open ruling — owed on #4564 — not a defect in the tree, and the class joins `warnings`
+#: for exactly that reason: a task file nobody has ruled on yet must not redden the suite that
+#: dispatches jobs. What this node keeps catching is a code nobody has ruled on: a sixth
+#: producer appearing there, or an id collision, still lands outside this set.
+TOLERATED_LIVE_CODES = frozenset(
+    {"DOC_MEMBERSHIP", "DRIFT_UNCLOSED", "UPSTREAM_NO_ARTIFACT"})
 
 
 def _structural_warnings(out: str) -> list[str]:
@@ -835,8 +843,14 @@ def test_the_live_tree_declares_every_id_exactly_once():
 
 
 def test_the_strict_run_over_the_live_tree_is_quiet_apart_from_membership():
-    """What `--strict` may exit 2 on over the live tree: the membership tables' lag, and
-    NOTHING else — which is the same sentence as the node's name, now asserted on shape.
+    """What `--strict` may exit 2 on over the live tree: the codes in `TOLERATED_LIVE_CODES`
+    (the membership tables' lag and its drift journal, plus #4564's undeclared-producer
+    advisory), and NOTHING else.
+
+    The name says "apart from membership" and was true of a two-code world; since #4564 the
+    tolerated set also carries `UPSTREAM_NO_ARTIFACT`, whose live membership is stated by that
+    item's acceptance check and is explained at the set. The shape this node guards is unchanged
+    — a code outside the set is a red suite.
 
     Four things, none of which is a size. The scheduler can read every task file
     (`UNPARSEABLE: 0`). The id checks are silent — `_id_lines` empty, so no
