@@ -4173,6 +4173,20 @@ def test_index_md_sends_a_reader_to_history_rather_than_the_absent_archive():
     directory is absent, and must still name git history as where a retirement
     lives. The control runs the same predicate over the pre-fix page from git, so
     the node is shown to catch the sentence it exists for.
+
+    The rule's *number* is pinned in this node too, below the two `check-ignore`
+    calls. Those calls read only the return code and discard the line number
+    `check-ignore -v` prints, so a hand commit inserting a line anywhere above the
+    rule moved `.gitignore:192` — the number this node cites twice — and left the
+    suite green. `328783f9` (#2115) inserted 7 lines into `.gitignore` above this
+    rule, which is why the pin reads the file's bytes instead of trusting the
+    citation. It pins that one line and nothing else: `architecture/index.md`'s
+    Review log names a range ending at 192, and the other lines of that range
+    belong to the `DENIED_GLOBS[0]` block this node must not assert on, so no pin
+    here can cover them. To re-check that the pin bites: from a throwaway worktree
+    (`conftest.py` refuses the production tree) prepend one blank line to
+    `.gitignore` and run this file with `-k index_md_sends_a_reader` — it fails
+    naming `.gitignore:192`, and exits 0 again once the file is restored.
     """
     text = _text("index.md")
     pre = _live_preamble(text)
@@ -4203,6 +4217,33 @@ def test_index_md_sends_a_reader_to_history_rather_than_the_absent_archive():
     assert slashed.returncode == 0, (
         "the trailing-slash spelling stopped matching a .gitignore pattern, so the "
         "word \"gitignored\" is now false in a different way — see .gitignore:192")
+
+    # The rule's NUMBER, pinned to the file's own bytes. `check-ignore -v` prints
+    # that number to stdout and the two asserts above throw it away, so until this
+    # assertion the two `.gitignore:192` citations above — the docstring bullet and
+    # the trailing-slash message — were unverifiable claims: an insertion anywhere
+    # above the rule moved the number and left them both mis-pointing with the
+    # suite green. .gitignore is DENIED_GLOBS[0] (scripts/automod/spec.py), so no
+    # round can repair a red run here — the hand commit that moves the rule
+    # re-points this index and those two citations with it.
+    gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+    assert len(gitignore.splitlines()) >= 192, (
+        f"{ROOT / '.gitignore'} has {len(gitignore.splitlines())} lines, so "
+        ".gitignore:192 — the line the two citations above name — is past the end "
+        "of the file. Re-point them and this assertion in the hand commit that "
+        "shortened the file.")
+    assert gitignore.splitlines()[191] == "/architecture/.archive/", (
+        ".gitignore:192 is no longer '/architecture/.archive/': line 192 of "
+        f"{len(gitignore.splitlines())} reads {gitignore.splitlines()[191]!r}, so "
+        "the rule has moved and the two citations in this node moved with it — the "
+        "docstring bullet reading \".gitignore:192 carries "
+        "`/architecture/.archive/`\", and the trailing-slash assert just above, "
+        "whose message ends \"see .gitignore:192\". `git check-ignore -v` prints "
+        "the real number and those asserts read only the return code, so this is "
+        "the only rail over the live file's numbering. Re-point this assertion and "
+        "both citations in the same hand commit that inserted the lines — "
+        ".gitignore is DENIED_GLOBS[0] (scripts/automod/spec.py), so a round cannot "
+        "fix it here.")
 
     before = subprocess.run(["git", "-C", str(ROOT), "show",
                             f"{PRE_FIX_INDEX}:architecture/index.md"],
