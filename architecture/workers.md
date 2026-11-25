@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers]
 type: reference
 status: implemented
-date: 2026-10-25
+date: 2026-11-25
 ---
 
 # The worker pool and the unified work queue
@@ -106,8 +106,11 @@ runs: `pause_journal` and `hold_journal` are the pool's own state
 rather than a unit of work — and what bounds each differs, because `pause_journal`'s
 horizon is enforced by the groundskeeper's sweep (`PAUSE_JOURNAL_MAX_AGE_DAYS`) while
 `hold_journal`'s is enforced by its own writer (`HOLD_JOURNAL_MAX_AGE_DAYS`, applied
-by `WorkQueue.hold_journal_append` on every row), so the sweep's 24-store list names
-`pause_journal` and does not need to name `hold_journal`.
+by `WorkQueue.hold_journal_append` on every row), so the groundskeeper's store list
+names `pause_journal` and does not need to name `hold_journal`. How many stores that
+list holds is read off the sweep's own report and is not restated here: the count this
+sentence carried at the last review of this page stopped being true within the month
+without any reader noticing, which is #3288's rule applied to this page's own prose.
 
 An item walks one path:
 
@@ -179,9 +182,13 @@ tracked config (a gate the loop must not be able to disarm); "The primary
 reachability hold" below is the long form (#1465). All three report beside
 `pool.kv_gate` in `/api/workers/status`, and `WorkerPool._claim_holds` is
 the one call site that unions them into the claim query's `NOT IN`.
-**`data_trip_hold`** is the fourth gate, armed by default since #4359 with the class
-in code (`DEFAULT_DATA_TRIP_DELETER_TASKS`), and the only one that is not about the
-engine: while the guardian's `data-tripped.json` stands it holds *task ids*, not
+**`data_trip_hold`** is the fourth gate, armed by default since #4359. The class in
+force since #4383 is `workers.data_trip_hold.deleter_tasks` in `config.yaml`, which
+REPLACES rather than extends the code's `DEFAULT_DATA_TRIP_DELETER_TASKS`, so a reader
+who learns the class from the constant reads the wrong list — and because the key
+replaces, dropping `79` from it disarms the gate for the one sweep it was built for,
+which is #1101's lesson that absence must not read as off. It is the only gate that is
+not about the engine: while the guardian's `data-tripped.json` stands it holds *task ids*, not
 sources, because the retention sweep dispatches under `scheduled-task` — the name of
 every autonomy task — so a source hold for one bulk deleter would freeze the whole
 scheduled lane (2026-11-19: a pause release started that sweep 331.8 ms later and it
@@ -599,8 +606,8 @@ what it reads, what it writes, and the measured state of it.
 | `board-steward` | 68 | one board pass: proposed moves and the next item for `autocode`, recorded beside the state machine's | session (primary), IV off |
 | `owed-check` | 72 | one item's `owed` list settled: evidence, a recheck date, a ruling, a follow-up item, a reopen or a close (`architecture/automod.md` §3.2k) | session (primary), IV off |
 | `automod-regression` | 70 | paired A/B eval after a promotion | none (subprocess on a thread) |
-| `frontend-probe-canary` | 80 | once a day, `python -m scripts.automod.frontend_probe_canary --seeds 12` against the default state dir; a run that did not measure or measured below the bar is recorded failed, and the measured fields ride the run's `meta` (#1981) | none (subprocess) |
-| `fitness` | 85 | **off by default.** Once a night in a quiet window, `python -m scripts.automod.fitness run --once --pool-job`: the behaviour benches of `eval/fitness/manifest.yaml`, one at a time behind `regression.lock`, rows appended to `app.paths.FITNESS_SERIES` (`fitness.jsonl` in the data root's eval directory) ([[testing]] "Behaviour benches") | none (subprocess), KV-gated |
+| `frontend-probe-canary` | 80 | once a day, `python -m scripts.automod.frontend_probe_canary --seeds 16` (the whole must-detect table, `SEEDS`, raised from 12 on #2130; [[workers-jobs]] already states 16) against the default state dir; a run that did not measure or measured below the bar is recorded failed, and the measured fields ride the run's `meta` (#1981) | none (subprocess) |
+| `fitness` | 85 | **armed in `config.yaml` since 2026-11-23** (`229337f6`, once every bench's noise floor read `ok`; the code default stays disabled and `file_items` is still false until ~8 nightly rows per bench exist). Once a night inside `window_start_hour`..`window_end_hour` (01–04 local) and no more often than `min_interval_seconds` (72000), `python -m scripts.automod.fitness run --once --pool-job`: the behaviour benches of `eval/fitness/manifest.yaml`, one at a time behind `regression.lock`, rows appended to `app.paths.FITNESS_SERIES` (`fitness.jsonl` in the data root's eval directory) ([[testing]] "Behaviour benches") | none (subprocess), KV-gated |
 | `autoresearch` | 60 | one prompt-optimisation round | its own |
 | `deep-research` | 70 | one registry topic, through the deep-dive-research skill | session, IV off |
 | `youtube-digest` | 45 | one tracked-channel video: transcript → vault note → Lloyd eval → backlog draft | session, IV off |
@@ -808,9 +815,12 @@ such turn. Follow-up, not done: a schema for `autocode.parse_spawned_line`.
 
 `workers.slots` is the one number a reader is most likely to find stale in a
 doc like this one. The authoritative value lives only in `config.yaml`; it is
-pinned by `tests/test_loop_depth.py` to `rounds + triages + 1` (the number of
+**floored** by `tests/test_loop_depth.py` at `rounds + triages + 1` — `slots >= rounds
++ triages + 1`, read off the two sources' own `max_inflight`, not an equality: with
+`autocode` and `autotriage` both at `max_inflight: 2` the floor is 5 and this box sits
+at 6, so the extra slot is spare capacity rather than a debt. The rule is the number of
 autocode rounds plus the number of autotriage turns, plus one slot so a
-scheduled task is never queued behind them). The copy in the block below is a
+scheduled task is never queued behind them. The copy in the block below is a
 sample of the shape, not the live number — `tests/test_doc_worker_slots_parity.py`
 fails if it ever contradicts `config.yaml`.
 
@@ -1075,8 +1085,11 @@ is the known self-grading failure mode, and this is where it is stopped.
   failures are 21 `ConnectError` (engine-side) and 3 wall-clock
   `TimeoutError`s. Exclude those two buckets from any before/after count on the
   ceiling: they are different mechanisms, and mixing them moves the number
-  without moving anything. `session-distill` runs `iterations_per_step=15`
-  (`workers/sources/session_distill.py`) against `bench-mine`'s then-literal
+  without moving anything. `session-distill` runs `max_turns=15`
+  (`DEFAULT_MAX_TURNS` in `workers/sources/session_distill.py`, overridden through
+  `workers.sources.session-distill.max_turns`; the key this page named,
+  `iterations_per_step`, is `run_prompt_with_run_state`'s per-segment cap and nothing in
+  this source reads it) against `bench-mine`'s then-literal
   `max_turns=8` (`workers/sources/bench_mine.py`; since #896 on 2026-09-24 it is
   `workers.sources.bench-mine.max_turns`, 12, carried in the payload, default 8)
   and dies identically — it reads a whole
@@ -1140,3 +1153,20 @@ is the known self-grading failure mode, and this is where it is stopped.
   which `fbbca754` closed — the merge refuses to introduce the key and the
   stray key is gone; §7's "the unconfigured row an operator finds today",
   which a 7-day window shows no longer at all. Filed #3286–#3288.
+- 2026-11-25: **stale** — the mechanisms held again (the five seats the loop awaits
+  ahead of its pass, all nine declared tables and their two different retention
+  writers, the aging trio at 6 h / 15 / 10, `max_inflight` excluded in the SQL,
+  `LONG_LIVED` on exactly the six sources named, `DEFAULT_ROUND_HOLD_EXEMPT_BOUND`
+  at `scheduled-task` / 0.60, the probe's 10 s cache and 2 s timeout, the 60 s tick,
+  the 900 s sweep, the seven-task evidence pilot, and every per-source priority
+  against `config.yaml`). Six statements had moved under it: §2 said the sweep's
+  store count and the data-trip class was the code's constant, when #4383 moved the
+  class to `workers.data_trip_hold.deleter_tasks`, which replaces it; §5 called
+  `fitness` "off by default" while `config.yaml` has had it enabled since
+  `229337f6` (2026-11-23), and named the canary's seed floor 12 where `SEEDS` went to
+  16 on #2130 and the sibling doc already said so; §6 called the slots pin an
+  equality where `test_loop_depth.py` asserts a floor; §8 named
+  `iterations_per_step` as `session-distill`'s ceiling, a key that source has never
+  read — its budget is `max_turns`, `DEFAULT_MAX_TURNS` = 15. Filed #4559 (the same
+  disabled-is-false claim sitting in the fitness source's own docstring and in the
+  registry comment, which no test pins).
