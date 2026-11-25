@@ -2003,37 +2003,80 @@ def test_losing_one_settled_rounds_last_live_row_is_named_as_a_loss(tmp_path):
     `test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round`);
     the truncation node above is built so it cannot.
 
-    Built on the real fold pair so the population is the live store's, with one
-    deletion. A round whose newest row is outside the window keeps exactly 1 live row
-    there and one still inside it keeps many (#4153), so the victim is taken from the
-    singletons: deleting its rows makes exactly one round missing and touches nothing
-    else — which is what lets this node assert ONE problem, from ONE leg, naming ONE
-    round. The in-window leg is asserted alive precisely so the red here cannot be that
-    one.
+    Built from hand-written rows on a fixed clock, through the fold's own
+    `_archive_plan`, for the reason #4153 states and this node used to be the
+    counter-example to. It took its victim out of the LIVE store's fold pair, on the
+    theory that a settled round keeps exactly 1 live row there and so is deletable
+    without touching anything else. Both halves of that theory are facts about the hour.
+    The sweep folds daily, so re-folding the live file only ever finds the rows that
+    aged past the boundary since the last run: measured on 2026-11-25 that was ONE
+    round, `SM_20261111_063848`, whose newest row sat INSIDE the window, which left it
+    27 live rows and the singleton set empty — the red this node is now built not to
+    have. A settled round is a singleton only between the hour its newest row passes the
+    boundary and the next fold that moves its old rows out, so waiting for the live
+    store to offer the shape is what made the node red at an arbitrary hour. Constructing
+    it is what makes the red here mean the witness or the keep rule broke.
+
+    Three rounds, and the assertions BEFORE the deletion are what make the one after it
+    say something. `SM_SETTLED` (3 rows, all pre-boundary) is the victim, and it is
+    asserted to hold exactly 1 live row — that is #2043's keep rule pinned, so breaking
+    `_archive_plan`'s newest-of-round rule reddens this node here rather than quietly
+    removing its subject. `SM_OTHER_SETTLED` is the control: a second settled round that
+    keeps its 1 row and is asserted NOT missing, so the single deficit below belongs to
+    the deletion and not to the fold. `SM_ACTIVE` straddles the boundary and keeps the
+    in-window leg alive (#4153), so the red can only ever come from the `missing_rounds`
+    leg, and the node still asserts ONE problem from ONE leg naming ONE round.
     """
-    now = time.time()
-    live, archive = _folded_store_pair(tmp_path, now)
-    rows = _ledger_lines(live)
+    mod = _sweep_module()
+    now = 1_800_000_000.0
+    horizon = mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    day = 86400.0
+    rows = [
+        {"ts": now - (horizon + 3 * day), "round_id": "SM_SETTLED"},
+        {"ts": now - (horizon + 2 * day), "round_id": "SM_SETTLED"},
+        {"ts": now - (horizon + 1 * day), "round_id": "SM_SETTLED"},
+        {"ts": now - (horizon + 5 * day), "round_id": "SM_OTHER_SETTLED"},
+        {"ts": now - (horizon + 4 * day), "round_id": "SM_OTHER_SETTLED"},
+        {"ts": now - (horizon + 2 * day), "round_id": "SM_ACTIVE"},
+        {"ts": now - (horizon - 1 * day), "round_id": "SM_ACTIVE"},
+        {"ts": now - (horizon - 2 * day), "round_id": "SM_ACTIVE"},
+    ]
+    pairs = [(json.dumps(row).encode("utf-8") + b"\n", row) for row in rows]
+    archive_idx, kept_idx = mod._archive_plan(pairs, now)
+    live = tmp_path / "promotions.jsonl"
+    live.write_bytes(b"".join(pairs[i][0] for i in sorted(kept_idx)))
+    archive = tmp_path / "promotions-archive-202610.jsonl.gz"
+    with gzip.open(archive, "wb") as handle:
+        handle.write(b"".join(pairs[i][0] for i in sorted(archive_idx)))
+
+    live_lines = _ledger_lines(live)
     live_rounds = {}
-    for _line, row in rows:
+    for _line, row in live_lines:
         if row and (rid := row.get("round_id")):
             live_rounds[str(rid)] = live_rounds.get(str(rid), 0) + 1
     archived_rounds = {str(row["round_id"]) for _line, row in _ledger_lines(archive)
                        if row and row.get("round_id")}
-    assert archived_rounds, "the fixture rotation holds no rounds at all"
-    singletons = sorted(r for r in archived_rounds if live_rounds.get(r) == 1)
-    assert singletons, (f"no archived round holds exactly one live row, so deleting "
-                        f"one cannot make a round missing; counts: "
-                        f"{ {r: live_rounds.get(r, 0) for r in sorted(archived_rounds)} }")
-    victim = singletons[0]
+    victim = "SM_SETTLED"
+    assert live_rounds == {victim: 1, "SM_OTHER_SETTLED": 1, "SM_ACTIVE": 2}, (
+        f"the fold's keep rule left this population, so the deletion below is not the "
+        f"one-sided loss this node is about: {live_rounds}")
+    assert archived_rounds == {victim, "SM_OTHER_SETTLED", "SM_ACTIVE"}, archived_rounds
+
+    before = ledger_fold_witness(live, now, archives=[archive])
+    assert before.missing_rounds == (), before.describe()
+    assert before.protected_rows == 2, before.describe()
+    assert before.in_window_rows == 2, before.describe()
 
     pruned = tmp_path / "pruned.jsonl"
-    pruned.write_bytes(b"".join(line for line, row in rows
+    pruned.write_bytes(b"".join(line for line, row in live_lines
                                 if not (row and row.get("round_id") == victim)))
     fold = ledger_fold_witness(pruned, now, archives=[archive])
 
     assert fold.missing_rounds == (victim,), fold.describe()
-    assert fold.in_window_rows > 0, fold.describe()
+    assert fold.in_window_rows == 2, fold.describe()
+    assert fold.protected_rows == 1, (
+        f"{fold.describe()} — the deletion must take the victim's ONE keep-rule row and "
+        f"no other round's, so `SM_OTHER_SETTLED`'s row is the only one left standing")
     low, _high = ledger_drift_band()
     assert fold.live_bytes < low, fold.describe()
     problems = fold.deficit_problems(of_bytes=fold.live_bytes)
