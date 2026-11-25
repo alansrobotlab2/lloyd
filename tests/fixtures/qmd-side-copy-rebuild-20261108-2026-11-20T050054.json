@@ -1,0 +1,76 @@
+{
+  "route": "rebuild-side-copy",
+  "name": "rebuild-20261108",
+  "side_index": "/home/alansrobotlab/.cache/qmd/rebuild-20261108.sqlite",
+  "actions": [
+    "config: /home/alansrobotlab/.config/qmd/index.yml -> /home/alansrobotlab/.config/qmd/rebuild-20261108.yml",
+    "update rc=0 in 4s :: Run 'qmd embed' to update embeddings (422 unique hashes need vectors)",
+    "embed #1 rc=0 in 197s :: \u001b[?25l\u001b[?25h",
+    "cleanup rc=0 in 10s :: \u2713 FTS compacted, database vacuumed"
+  ],
+  "live_before": {
+    "index_bytes": 3071345496,
+    "footprint": {
+      "total": 3071345496,
+      "main": 1529704448,
+      "wal": 1538626392,
+      "shm": 3014656
+    },
+    "vectors_total": 89277,
+    "vectors_orphaned": 63,
+    "documents": 11118,
+    "vec0": {
+      "chunks": 255,
+      "allocated_slots": 261120,
+      "live_rows": 89277,
+      "occupancy": 0.3419,
+      "allocated_mib": 1020.0,
+      "dead_mib": 671.3
+    },
+    "vectors_live": 89214,
+    "orphan_ratio": 0.0007
+  },
+  "side_after": {
+    "index_bytes": 944271360,
+    "footprint": {
+      "total": 944271360,
+      "main": 944271360,
+      "wal": 0,
+      "shm": 0
+    },
+    "vectors_total": 89216,
+    "vectors_orphaned": 0,
+    "documents": 11119,
+    "vec0": {
+      "chunks": 116,
+      "allocated_slots": 118784,
+      "live_rows": 89216,
+      "occupancy": 0.7511,
+      "allocated_mib": 464.0,
+      "dead_mib": 115.5
+    },
+    "vectors_live": 89216,
+    "orphan_ratio": 0.0
+  },
+  "verification": {
+    "passed": true,
+    "name": "rebuild-20261108",
+    "side_live_rows": 89216,
+    "side_vec0_live_rows": 89216,
+    "floor_vectors_live": 89214,
+    "live_vec0_live_rows": 89277,
+    "pending_embeddings": 0,
+    "vsearch_hits": 5,
+    "side_orphan_rows": 0,
+    "side_orphan_ratio": 0.0,
+    "orphan_bar": {
+      "ratio": 0.2,
+      "rows": 2000
+    },
+    "failed": []
+  },
+  "side_bytes": 944271360,
+  "side_occupancy": 0.7511,
+  "live_occupancy": 0.3419,
+  "elapsed_s": 218.7
+}

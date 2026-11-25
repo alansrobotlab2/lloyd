@@ -375,13 +375,27 @@ CAPACITY_APPROACHING_OCCUPANCY = 0.50
 #: (#3978, Alan's 2026-11-08 ruling on #3119). Three numbers set it, all measured:
 #: `CAPACITY_APPROACHING_OCCUPANCY` (0.50) is the night the BUILD starts, so the ceiling
 #: must sit below it or there would be no copy to take; `CAPACITY_OCCUPANCY_TRIGGER`
-#: (0.25) is the red night; and the decay between them is ~0.036 occupancy/night (the six
-#: nightly reports to 2026-11-08 read 0.7032 → 0.4889, ~+34 MiB/day of dead against a
-#: ~632 MiB allocation). 0.35 is therefore ~3 nights of slack before that trigger fires:
-#: a nightly that skips, or whose swap its own check sent back, still leaves two more
-#: in-band nights in which a person can act, which is what makes it safe to hand an
-#: unattended caller a daemon restart. Whether 0.35 is the right number is owed to at least two observed threshold
-#: nights after landing, and is recorded as owed on #3978 rather than asserted here.
+#: (0.25) is the red night AND this function's own floor, because its one production
+#: caller sits under `if report["capacity_approaching"]`, which is False below the trigger
+#: — so the band a nightly can actually hand it is [0.25, 0.35), and a fired night reaches
+#: neither this SWAP nor the scheduled BUILD beside it.
+#: Whether 0.35 is the right number is RULED, not owed: #3978's 2026-11-16 owed-check run
+#: said keep 0.35, do not raise or lower it, and retired the two-observed-threshold-nights
+#: precondition — a guard against a fired red night arriving before the nightly could swap,
+#: which that same caller bounds, since a fired night attempts no swap at all.
+#: No occupancy/night rate is quoted here, deliberately: an occupancy/night figure is a
+#: function of the allocation it is measured against, and a swap rewrites that denominator
+#: — reclaiming dead slots shrinks `allocated_mib` far faster than it moves the live row
+#: count, so occupancy RISES while the footprint falls. Measured across the 2026-11-20
+#: swap: `qmd-side-copy-rebuild-20261108-2026-11-20T050054.json` puts `side_after.vec0` at
+#: occupancy 0.7511 over 464.0 MiB with 89216 live rows where the live index it replaced
+#: stood at 0.3419 over 1020.0 MiB with 89277 rows, and
+#: `qmd-index-maintenance-2026-11-21.json` reads 0.6691 over 528.0 MiB with 90436 live rows
+#: the next morning — -0.0820 in the one night since, on a 464 MiB base. Slack in nights is
+#: therefore a property of the allocation and of whichever copy is standing, not of this
+#: constant, and one post-swap threshold night is far too thin a sample to re-derive a
+#: ruled number from. Both reports are committed under `tests/fixtures/`, and
+#: `tests/test_qmd_doc_claims.py` re-derives every figure above out of them on every run.
 #: Read only by `scheduled_side_copy_swap`; `--swap` from a command line never consults it.
 SWAP_OCCUPANCY_CEILING = 0.35
 VEC0_REBUILD_RULED_OUT = (
@@ -1639,8 +1653,10 @@ CAPACITY_WHAT_TO_DO = (
     "SWAP has one unattended caller, and it is not a command line: since #3978 the nightly "
     "run takes the swap in-process for the copy IT built or topped up minutes earlier, but "
     "only while its measured occupancy is in the band below 0.35 and at or above the 0.25 "
-    "red trigger — a fired verdict like this one is below the ceiling too, so a nightly "
-    "with nothing waiting tries the build and the swap here as well. Read the run's "
+    "red trigger. A fired verdict like this one sits UNDER that trigger rather than inside "
+    "the band, so the nightly tries neither half on a night like this one: it starts no "
+    "build, attempts no swap and records no `side_copy_swap` block at all. On the night the "
+    "index is actually out of room the whole route is this terminal's job. Read the run's "
     "`side_copy_swap` block before concluding anything is owed to you: a nightly that took "
     "it says `swapped: true` there, and only a `skipped` or a `failed` line leaves the "
     "terminal route below. The BUILD is scheduled as of "

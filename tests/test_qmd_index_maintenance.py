@@ -9234,3 +9234,58 @@ def test_the_task_81_body_states_the_ceiling_the_pool_clamp_actually_gives():
     assert declared and int(declared.group(1)) <= ceiling, (
         f"the body explains a clamp while the front matter climbed back above it: "
         f"timeout_seconds={declared and declared.group(1)}, ceiling {ceiling}")
+
+
+# --- #4484: what a FIRED night is told about the scheduled route ---------------------
+#
+# `CAPACITY_WHAT_TO_DO` is the instruction the run prints the moment its capacity verdict
+# fires, and since #3314 it has carried one clause about the nightly's own reach that is
+# false in exactly the direction a person acts on: "a fired verdict like this one is below
+# the ceiling too, so a nightly with nothing waiting tries the build and the swap here as
+# well." It does not. Both scheduled blocks hang off `report["capacity_approaching"]`, and
+# that key is False on every night `capacity_verdict` fires: the two predicates read the
+# same three constants, and `capacity_approaching` takes the trigger as a LOWER bound, so
+# `capacity_verdict` owns every reading under it — "disjoint by construction" in the doc-
+# string's own words. A fired night therefore starts no build, attempts no swap, and
+# records neither block. The text has to say that because it is what the reader can do
+# next: on the night the index is actually out of room, the route is theirs.
+
+def test_a_fired_night_is_told_the_scheduled_route_will_not_run_for_it(monkeypatch,
+                                                                       tmp_path, capsys):
+    """Clause 5: the fired night's own run is the witness for the sentence it is shown.
+
+    Driven through `main()` over `FIRED_SHAPE` (occupancy 0.2379 under the 0.25 trigger,
+    275.4 MiB dead over the 256 floor) rather than read off the constant, because the claim
+    is about what THIS run does. The swap and verify entry points are instrumented, so a
+    run that reached either fails this node rather than merely not being mentioned by it.
+    The four phrases `test_a_fired_verdict_reports_what_is_owed_and_on_what_numbers` reads
+    out of the same string are re-asserted here: the sentence being replaced lives inside
+    it, and a fix that kept the clause but lost a phrase would be a fix that broke a reader.
+    """
+    reached: list = []
+    monkeypatch.setattr(m, "swap_side_copy", lambda *a, **k: reached.append(("swap", a)))
+    monkeypatch.setattr(m, "verify_side_copy",
+                        lambda name: reached.append(("verify", name)) or {"ok": True})
+    rc, report, _ = _run_over_shape(monkeypatch, tmp_path, FIRED_SHAPE, capsys,
+                                    tag="fired-false-clause")
+
+    # The night really is a fired one, and really is outside the scheduled band.
+    owed = report["capacity_owed_to_a_person"]
+    assert owed["occupancy"] == 0.2379 and owed["dead_mib"] == 275.4, owed
+    assert report["capacity_approaching"] is False, (
+        "this shape is approaching rather than fired, so it witnesses nothing")
+    assert reached == [], f"a fired night reached the swap machinery: {reached}"
+    assert "side_copy_swap" not in report and "side_copy_build" not in report, (
+        "a fired night recorded a scheduled block after all: "
+        f"{ {k: report[k] for k in ('side_copy_swap', 'side_copy_build') if k in report} }")
+
+    text = owed["what_to_do"]
+    assert "tries the build and the swap here as well" not in text, (
+        "the instruction still tells a person on a fired night that the nightly tried the "
+        "route too, which is the false half #4484 exists to take out")
+    assert "below the ceiling too" not in text, text
+    assert "starts no build" in text, text
+    assert "attempts no swap" in text, text
+    assert "records no `side_copy_swap` block" in text, text
+    for phrase in ("side copy", "BY HAND", "swap", "Never in place"):
+        assert phrase in text, f"{phrase!r} is a phrase another node's reader depends on"

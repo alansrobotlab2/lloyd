@@ -1,0 +1,206 @@
+{
+  "ran_at": "2026-11-21T05:01:31.829124-08:00",
+  "actions": [
+    "stray files: 1 file(s), 1.53 GB beside the live index; kept newest index.sqlite.bak-20261120-130439; deleted 0 (0.00 GB), 0 planned on an acting run, 0 .bak held on measured evidence + 0 .bak held by the keep-list + 0 live side-index file(s) with a measured open handle + 0 outside the series"
+  ],
+  "before": {
+    "index_bytes": 1018720256,
+    "footprint": {
+      "total": 1018720256,
+      "main": 1016721408,
+      "wal": 0,
+      "shm": 1998848
+    },
+    "vectors_total": 90436,
+    "vectors_orphaned": 304,
+    "documents": 11180,
+    "vec0": {
+      "chunks": 132,
+      "allocated_slots": 135168,
+      "live_rows": 90436,
+      "occupancy": 0.6691,
+      "allocated_mib": 528.0,
+      "dead_mib": 174.7
+    },
+    "vectors_live": 90132,
+    "orphan_ratio": 0.0034
+  },
+  "stray": [
+    {
+      "name": "index.sqlite.bak-20261120-130439",
+      "bytes": 1529704448,
+      "mtime": "2026-11-20T05:04:40"
+    }
+  ],
+  "stray_bytes": 1529704448,
+  "stray_retention": {
+    "bak_series": [
+      "index.sqlite.bak-20261120-130439"
+    ],
+    "kept": [
+      "index.sqlite.bak-20261120-130439"
+    ],
+    "planned": [],
+    "deleted": [],
+    "deleted_bytes": 0,
+    "held": [],
+    "held_for_person": [],
+    "live_side_indexes": [],
+    "errors": [],
+    "keep_list": {
+      "path": "/home/alansrobotlab/lloyd-data/_pipeline/reflection/qmd-stray-keep-list.json",
+      "entries": 0,
+      "held": [],
+      "files": [],
+      "error": null
+    },
+    "release": {
+      "path": "/home/alansrobotlab/lloyd-data/_pipeline/reflection/qmd-stray-release-list.json",
+      "entries": 2,
+      "released": [],
+      "blocked": [],
+      "configs": [],
+      "shadowed": [],
+      "error": null
+    },
+    "dry_run": false
+  },
+  "pending_embeddings": 0,
+  "config_drift": {
+    "template": "/home/alansrobotlab/lloyd/agent-services/conf/qmd-index.yml",
+    "live": "/home/alansrobotlab/.config/qmd/index.yml",
+    "pin": "/home/alansrobotlab/.config/qmd/evalpin.yml",
+    "drift": [],
+    "drift_count": 0,
+    "resync_command": "cp ~/.config/qmd/index.yml agent-services/conf/qmd-index.yml",
+    "resync_direction": "live -> template (the file the daemon reads is the truth)",
+    "retake_pin_command": ".venvs/lloyd/bin/python -c 'from scripts.automod.evalpin import sync_pin_config; print(sync_pin_config())'   # regenerates ~/.config/qmd/evalpin.yml from ~/.config/qmd/index.yml",
+    "retake_pin_direction": "live -> pin config (`evalpin.sync_pin_config` regenerates it on the next pin; retaking a pin is what reconciles this)",
+    "comparable": true,
+    "pin_comparable": true,
+    "in_sync": true
+  },
+  "collection_overlap": {
+    "live_config": "/home/alansrobotlab/.config/qmd/index.yml",
+    "index": "/home/alansrobotlab/.cache/qmd/index.sqlite",
+    "pairs": [
+      {
+        "containing": "subliminal",
+        "contained": "architecture",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/architecture",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "autonomy",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/autonomy",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "backlog",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/backlog",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "knowledge",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/knowledge",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "lloyd",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/lloyd",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "memory",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/memory",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "people",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/people",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "personal",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/personal",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "projects",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/projects",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "skills",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/skills",
+        "shared_documents": 0
+      },
+      {
+        "containing": "subliminal",
+        "contained": "work",
+        "containing_root": "/home/alansrobotlab/obsidian",
+        "contained_root": "/home/alansrobotlab/obsidian/work",
+        "shared_documents": 0
+      }
+    ],
+    "overlap_count": 11,
+    "by_containing": {
+      "subliminal": 0
+    },
+    "shared_documents": 0,
+    "documents": 11180,
+    "distinct_hashes": 11144,
+    "redundant_rows": 36,
+    "duplication_ratio": 1.0032
+  },
+  "embed_guard": {
+    "pending_embeddings": 0,
+    "denominator": "documents (rows in the `documents` table, from inspect_index)",
+    "denominator_value": 11180,
+    "ratio": 0.0,
+    "threshold_fraction": 0.25,
+    "max_pending": 2795,
+    "configured_embed_model": "hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    "tripped": false
+  },
+  "need_prune": false,
+  "need_embed": false,
+  "need_capacity": false,
+  "capacity_approaching": false,
+  "vec0_rebuild": "ruled out as an unattended action: the one measured rebuild (2026-09-21 model switch) was a side copy re-embedded in full and swapped in, 1.25 GB -> 481 MB, 56% occupancy after; an in-place drop would leave the serving daemon with no vector leg for the whole re-embed. A fired need_capacity means a side copy has to be built and then swapped in: the BUILD is this script's own `--rebuild-side-copy NAME`, needs no terminal and may run unattended, and the SWAP is the half a person does from a terminal (#3314). Since #3460 the nightly run whose report reads `capacity_approaching` is what launches that BUILD, and since #3978 the same nightly run takes that SWAP itself when its own measured occupancy is below 0.35 \u2014 for the copy it built or topped up in that same run, with the backup put back automatically if the check after the swap fails. A command-line `--swap` still needs a terminal.",
+  "wal_checkpoint": {
+    "attempted": false,
+    "trigger": 0.5,
+    "min_bytes": 16777216,
+    "busy_timeout_s": 5.0,
+    "ratio": 0.0,
+    "main_bytes": 1016721408,
+    "wal_before_bytes": 0,
+    "wal_after_bytes": null,
+    "busy": null,
+    "log": null,
+    "checkpointed": null,
+    "holders": null,
+    "reason": "WAL is 0 B, under the 16777216 B reclaim floor - the write lock on a serving daemon is not worth that"
+  },
+  "daemon_healthy": true
+}

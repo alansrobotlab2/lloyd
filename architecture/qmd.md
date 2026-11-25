@@ -303,13 +303,25 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   service or renames anything, and no flag, environment variable or marker file lifts it.
   Exactly one unattended swap exists as of #3978 — Alan's ruling on #3119 — and it is not
   a command line: `scheduled_side_copy_swap` is called in-process by the nightly run, for
-  the copy that same run built or topped up, only while its measured occupancy is below
-  `SWAP_OCCUPANCY_CEILING` (**0.35**) — the ceiling is the only occupancy bound the
-  gate applies: `scheduled_side_copy_swap` tests an interactive terminal, `occ is
-  None`, that ceiling, and whether this run built or reused a copy, and never tests a
-  lower bound, so a night already past the red 0.25 trigger still swaps if it holds a
-  verified copy, which is what a red night wants (#4475; the prose used to claim a
-  lower bound the code does not have) — and a post-swap
+  the copy that same run built or topped up. The condition that reaches it is the
+  intersection of two gates, and conflating them is what #4475's rewrite of this passage
+  got wrong. The caller's gate is `capacity_approaching`: `CAPACITY_OCCUPANCY_TRIGGER`
+  (**0.25**) ≤ occupancy < `CAPACITY_APPROACHING_OCCUPANCY` (**0.50**), with dead at or
+  above `CAPACITY_DEAD_MIB_FLOOR` (**256 MiB**) — the run-up to the red trigger, disjoint
+  from a fired verdict by construction. Inside that band the callee then applies
+  `SWAP_OCCUPANCY_CEILING` (**0.35**) as a strict upper bound. Both bounds together leave
+  the occupancy a nightly can hand the swap as the interval **[0.25, 0.35)**, so a fired or
+  red night runs neither the scheduled build nor the scheduled swap, records neither
+  `side_copy_build` nor `side_copy_swap`, and leaves the whole route to whoever reads
+  `capacity_owed_to_a_person`; a night reading at or above **0.50** sits outside the band
+  the other way and enters neither block either. (#4484, correcting #4475: read on its own
+  the function tests no lower bound — a test can and does hand it occupancy 0.20, a value
+  `main()` can never pass — and from that the rewrite concluded a red night swaps too. The
+  lower bound is real; it belongs to the caller. The doc is rewritten from the code here,
+  not from `skills/qmd-index-maintenance/SKILL.md`, whose own formula for
+  `capacity_approaching` still omits both the 0.25 floor and the dead-MiB floor.) The swap
+  keeps its own checks — an interactive caller, a known occupancy, the ceiling, and that
+  this run built or reused the copy — and a post-swap
   check that fails puts the backup back by itself and exits 1 (see
   `scheduled_side_copy_swap`). The BUILD is scheduled as of #3460 — the
   nightly run whose report reads `capacity_approaching` and finds no copy on disk

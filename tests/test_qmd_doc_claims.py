@@ -645,11 +645,11 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
     is admission — root `.gitignore` ends `*.json`, and `git add` of a name no negation
     rescues exits 0 having staged nothing, which is the silent failure #2282 spent two
     review attempts on. So each new name goes through `_ignore_rule` with the control
-    sibling beside it, and the whole tracked family is counted, because "7" is the number
+    sibling beside it, and the whole tracked family is counted, because "9" is the number
     `git ls-files tests/fixtures | grep -c qmd` prints once the four #2302 witnesses,
-    #2119's nightly, #2539's loss report and #3508's walk-stamp extract are all in the
-    index — a family count, so a round that commits an eighth witness widens this number
-    and its own clause together.
+    #2119's nightly, #2539's loss report, #3508's walk-stamp extract and #4484's two
+    post-swap witnesses are all in the index — a family count, so a round that commits
+    another witness widens this number and its own clause together.
     """
     exact = {  # name -> (lines, bytes), as `wc -l -c` of the runtime report prints them
         REHEARSAL_REPORT: (68, 1783),
@@ -691,11 +691,15 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
         ["git", "-C", str(ROOT), "ls-files", "tests/fixtures"],
         capture_output=True, text=True)
     qmd = sorted(ln for ln in listed.stdout.split("\n") if "qmd" in ln)
-    assert len(qmd) == 7, (
-        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 7: "
+    # 9 as of #4484, which committed the two reports the `SWAP_OCCUPANCY_CEILING` comment
+    # cites: this is the widening the paragraph above sanctions, done in the same change
+    # that added the witnesses rather than left for the next round to discover.
+    assert len(qmd) == 9, (
+        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 9: "
         "four cited reports plus #2119's nightly witness plus #2539's loss report plus "
-        "#3508's walk-stamp extract is the whole committed family, and one fewer means a "
-        "figure some paragraph quotes is in no repository")
+        "#3508's walk-stamp extract plus #4484's two post-swap witnesses is the whole "
+        "committed family, and one fewer means a figure some paragraph quotes is in no "
+        "repository")
 
     spec = (ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
     # Slice from the DECLARATION, not from the first mention of the name. Those were the
@@ -1557,3 +1561,338 @@ def test_a_citation_with_no_witness_fails_the_family_scan_naming_the_missing_fil
         "an ordinary .json under tests/fixtures is no longer ignored, so the line above is "
         "proving nothing: it is the family negation, not a missing rule, that admits a "
         "witness")
+
+
+# --- #4484: the reachable swap band, and the two claims inside the ceiling's comment ---
+#
+# architecture/qmd.md's account of the one unattended swap was rewritten on 2026-11-21 by
+# the review that filed #4475, and the rewrite is false in exactly the way its own method
+# produced: it read `scheduled_side_copy_swap`'s four tests, found no lower occupancy bound
+# among them, and concluded from that that a night already past the red 0.25 trigger still
+# swaps. The lower bound is real — it belongs to the CALLER. The function has exactly one
+# production call site, inside `if report["capacity_approaching"] and not args.dry_run:`,
+# and it is handed the same `before.get("vec0")` the gate was evaluated on;
+# `capacity_approaching` owns the run-up to the trigger (`TRIGGER <= occ < APPROACHING`
+# with the dead-MiB floor cleared) and `capacity_verdict` owns every reading below it, so
+# the two are "disjoint by construction" in that function's own words. The intersection is
+# [0.25, 0.35): a fired night reaches neither the scheduled build nor the scheduled swap,
+# and its report carries neither key. The same review left `SWAP_OCCUPANCY_CEILING`'s
+# comment pointing a reader at a question #3978's 2026-11-16 owed-check had already ruled,
+# and quoting a decay rate measured against an allocation the next swap halves. All three
+# are prose claims, so all three are pinned as prose: read out of the two files, against
+# the four constants, from the committed witnesses.
+
+#: The four constants the band is made of. Read from the source text the way
+#: `_script_constant` reads the embed cap, so no node here depends on the module's
+#: import-time behaviour.
+BAND_CONSTANTS = ("CAPACITY_OCCUPANCY_TRIGGER", "CAPACITY_APPROACHING_OCCUPANCY",
+                  "CAPACITY_DEAD_MIB_FLOOR", "SWAP_OCCUPANCY_CEILING")
+
+#: The invocation that swapped the 2026-11-08 copy in, and the nightly the next morning:
+#: the two dated reports the ceiling's comment now cites, committed because that comment
+#: quotes six figures out of them and #2396's rule is that a figure with no witness is
+#: re-derivable only on the box that ran the job. Both names are admitted past the root
+#: `*.json` rule by the two family negations already in `tests/fixtures/.gitignore`, which
+#: `test_the_two_post_swap_witnesses_are_tracked_and_admissible` re-asks of
+#: `git check-ignore` instead of trusting — #2282 spent a round learning that an ignored
+#: witness reads as a green suite whose nodes never ran.
+SWAP_IN_REPORT = "qmd-side-copy-rebuild-20261108-2026-11-20T050054.json"
+NEXT_MORNING_REPORT = "qmd-index-maintenance-2026-11-21.json"
+
+#: The three shapes the retired pre-swap decay took in that comment. Each describes an
+#: allocation the 2026-11-20 swap halved (1020.0 MiB -> 464.0), which is why the comment
+#: stops quoting any of them.
+STALE_DECAY_FIGURES = ("~0.036 occupancy/night", "~632 MiB allocation", "~3 nights of slack")
+
+#: The pointer #3978's 2026-11-16 owed-check ruled, in the spellings the comment used.
+RETIRED_POINTER_RE = re.compile(
+    r"owed to at least two observed threshold nights|owed to [^.]*threshold nights"
+    r"|recorded as owed on #3978")
+
+#: The two sentences #4475's review wrote into the doc, both false of reachable behaviour.
+BANNED_DOC_PHRASES = ("the only occupancy bound",
+                      "already past the red 0.25 trigger still swaps")
+
+#: The passage's opening and closing sentences: anchors chosen to survive a rewrite of
+#: the prose between them, which is the prose this item rewrote. Asserted present rather
+#: than assumed, so a doc that reworded an anchor fails with a reason, not at an `index`.
+SWAP_PASSAGE_START = "Exactly one unattended swap exists"
+SWAP_PASSAGE_END = "The BUILD is scheduled as of"
+
+#: Words that make the two bounds ONE condition rather than two facts in a list. The
+#: passage may phrase the conjunction either way; it may not omit it.
+CONJUNCTION_MARKERS = ("intersection", "conjoined", "both bounds", "both gates")
+
+# Every assertion below is over `_flat(...)` of a file, the helper this module has used
+# since #4476 for exactly this: the doc and the script hard-wrap their prose, so a
+# sentence checked against the raw text is an assertion about where a file was broken.
+
+
+def _script_constants(text: str | None = None) -> dict[str, float]:
+    """The four band constants, exactly as the source writes them.
+
+    `text` is a parameter for the reason `_fixture` is a function: the falsification node
+    has to watch this comparison fail against edited source, and a value read once at
+    import cannot be shown failing.
+    """
+    src = SCRIPT.read_text(encoding="utf-8") if text is None else text
+    out: dict[str, float] = {}
+    for name in BAND_CONSTANTS:
+        hits = re.findall(rf"^{name} = ([0-9.]+)$", src, re.M)
+        assert len(hits) == 1, (
+            f"{SCRIPT.name}: expected exactly one {name} assignment, got {hits}")
+        out[name] = float(hits[0])
+    return out
+
+
+def _comment_block(name: str, text: str | None = None) -> str:
+    """The `#:` block sitting directly above one module constant, flattened to one line.
+
+    The comment is the surface under review, so it is read as the block attached to the
+    constant rather than as a line range: an insertion above it shifts no assertion.
+    """
+    src = SCRIPT.read_text(encoding="utf-8") if text is None else text
+    lines = src.split("\n")
+    hits = [i for i, ln in enumerate(lines) if ln.startswith(f"{name} =")]
+    assert len(hits) == 1, f"{SCRIPT.name}: expected exactly one {name} assignment, got {hits}"
+    start = hits[0]
+    while start > 0 and lines[start - 1].startswith("#:"):
+        start -= 1
+    block = _flat(" ".join(ln.lstrip("#").strip() for ln in lines[start:hits[0]]))
+    assert block, f"{SCRIPT.name}: no `#:` comment block above {name}"
+    return block
+
+
+def _unattended_swap_passage() -> str:
+    """The doc's account of the one unattended swap, from its own first sentence to the BUILD's."""
+    text = _flat(_doc())
+    assert SWAP_PASSAGE_START in text, (
+        f"the doc no longer contains {SWAP_PASSAGE_START!r}, the sentence this pin opens at")
+    assert SWAP_PASSAGE_END in text, (
+        f"the doc no longer contains {SWAP_PASSAGE_END!r}, the sentence this pin closes at")
+    i = text.index(SWAP_PASSAGE_START)
+    j = text.index(SWAP_PASSAGE_END, i)
+    assert j > i, "the passage's closing sentence now precedes its opening one"
+    return text[i:j]
+
+
+def _vec0(report_name: str, key: str) -> dict:
+    """One `vec0` block out of one committed witness, read at call time."""
+    payload = _report(report_name)
+    assert key in payload, f"{report_name} carries no {key!r} block: {sorted(payload)}"
+    vec0 = payload[key].get("vec0")
+    assert isinstance(vec0, dict), f"{report_name}[{key!r}] holds no vec0 dict: {vec0!r}"
+    return vec0
+
+
+# --- clause 1: the reachable band is both gates, and a fired night is outside it -----
+
+def test_the_doc_states_the_swap_band_as_two_conjoined_gates():
+    """Clause 1: the nightly swaps only where the caller's band AND the ceiling hold.
+
+    Read as prose, because what is being pinned is the sentence a later architecture
+    review re-files an item from. The passage has to name both bounds, conjoin them, and
+    say which nights are excluded — an account that states the in-band case without the
+    excluded case is what let #4475's rewrite read a missing lower bound in the callee and
+    conclude that a red night swaps.
+    """
+    p = _unattended_swap_passage()
+    assert "capacity_approaching" in p, (
+        f"the passage never names the caller's gate, so it cannot be stating both: {p}")
+    assert any(m in p for m in CONJUNCTION_MARKERS), (
+        f"the two bounds appear but are not conjoined — no {CONJUNCTION_MARKERS} wording: {p}")
+    for needle in ("0.25", "0.50", "256", "0.35"):
+        assert needle in p, f"the passage never states {needle}: {p}"
+    assert "dead" in p, "the dead-MiB floor is not part of the stated band"
+    assert "runs neither" in p, "a fired night is not said to run neither scheduled block"
+    assert "scheduled build" in p and "scheduled swap" in p, p
+
+
+def test_no_line_of_the_doc_still_credits_a_red_night_with_a_swap():
+    """Clause 1's negation half, over the whole file including its review log.
+
+    Checked over every line, the way `test_the_doc_no_longer_describes_the_backfill_
+    as_having_no_ceiling` checks "no ceiling": a dated log entry that still says either
+    phrase is the sentence the next review re-files this from, and the review log is read
+    as a description of the job as often as it is read as history.
+    """
+    flat = _flat(_doc())
+    for phrase in BANNED_DOC_PHRASES:
+        assert phrase not in flat, (
+            f"the doc still says {phrase!r}, which is false of every night main() can "
+            "reach: the swap's only caller sits under the capacity_approaching gate")
+
+
+# --- clause 2: the prose and the constants are one number ---------------------------
+
+def test_the_docs_band_numbers_are_the_ones_the_code_carries():
+    """Clause 2: every figure in that sentence is a constant, and the interval is derived.
+
+    The band is re-computed from the script's own `CAPACITY_OCCUPANCY_TRIGGER` and
+    `SWAP_OCCUPANCY_CEILING` and looked for in the doc as an interval, so prose and
+    constants cannot part company again: a retune of either leaves the sentence
+    describing a band nobody implemented, and this node is what says so.
+    """
+    p = _unattended_swap_passage()
+    code = _script_constants()
+    assert code == {"CAPACITY_OCCUPANCY_TRIGGER": 0.25,
+                    "CAPACITY_APPROACHING_OCCUPANCY": 0.50,
+                    "CAPACITY_DEAD_MIB_FLOOR": 256.0,
+                    "SWAP_OCCUPANCY_CEILING": 0.35}, (
+        f"{SCRIPT.name} retuned the capacity band; restate the doc's sentence in the same change")
+    assert code["CAPACITY_OCCUPANCY_TRIGGER"] < code["SWAP_OCCUPANCY_CEILING"] \
+        < code["CAPACITY_APPROACHING_OCCUPANCY"], code
+    interval = f"[{code['CAPACITY_OCCUPANCY_TRIGGER']:g}, {code['SWAP_OCCUPANCY_CEILING']:g})"
+    assert interval in p, f"the doc does not state the reachable band as {interval}: {p}"
+    for name, value in code.items():
+        assert name in p, f"the passage omits the constant name {name} ({value})"
+        assert f"{value:g}" in p, f"{name} = {value} is not stated in the passage"
+
+
+def test_the_band_pin_fires_on_a_retuned_constant():
+    """This section can fail, and on the number rather than on the sentence.
+
+    The edited source goes through the same `_script_constants` the green node calls, with
+    the ceiling moved by 0.05: the interval that node derives stops being the one the doc
+    prints. Without this the comparison could be a match no constant change disturbs.
+    """
+    src = SCRIPT.read_text(encoding="utf-8")
+    tampered = src.replace("SWAP_OCCUPANCY_CEILING = 0.35", "SWAP_OCCUPANCY_CEILING = 0.40")
+    assert tampered != src, (
+        f"{SCRIPT.name} no longer spells the ceiling's assignment the way this node edits it")
+    code = _script_constants(tampered)
+    assert code["SWAP_OCCUPANCY_CEILING"] == 0.40
+    interval = f"[{code['CAPACITY_OCCUPANCY_TRIGGER']:g}, {code['SWAP_OCCUPANCY_CEILING']:g})"
+    assert interval not in _unattended_swap_passage(), (
+        f"the doc already states {interval}, so the pin above is comparing nothing")
+
+
+# --- clause 3: the ceiling's comment records the ruling, and the number is unmoved --
+
+def test_the_swap_ceiling_comment_records_the_ruling_instead_of_the_pointer():
+    """Clause 3: #3978's 2026-11-16 owed-check ruled the number; the comment says so.
+
+    Sentence by sentence, because the retired pointer is one sentence and a whole-block
+    substring test would pass on a comment that kept it in a later one. The value is
+    asserted here as well as in the module's own node: retiring the pointer is not a
+    licence to move the constant, which is exactly what the ruling said.
+    """
+    assert _script_constants()["SWAP_OCCUPANCY_CEILING"] == 0.35, (
+        "the ceiling moved, and nothing in this round was licensed to move it")
+    block = _comment_block("SWAP_OCCUPANCY_CEILING")
+    sentences = re.split(r"(?<=[.!?]) ", block)
+    for sentence in sentences:
+        assert not RETIRED_POINTER_RE.search(sentence), (
+            f"the comment still points a reader at a question that has been ruled: {sentence}")
+    ruled = [s for s in sentences if "2026-11-16" in s]
+    assert ruled, (
+        f"the comment does not record the 2026-11-16 owed-check ruling, so the next reader of "
+        f"{SCRIPT.name} still has to go and ask: {block}")
+    assert any("keep 0.35" in s.lower() and "#3978" in s for s in sentences), (
+        "the comment does not name the ruling's substance (keep 0.35) or its item (#3978)")
+
+
+# --- clause 4: the rate is a property of the allocation, and the swap halves that ---
+
+def test_the_swap_ceiling_comment_states_the_halving_mechanism_behind_its_rate():
+    """Clause 4: no occupancy/night rate outlives the denominator that produced it.
+
+    The figures are re-derived from the two committed witnesses rather than quoted, and the
+    mechanism is asserted as arithmetic over those bytes: the swapped-in copy has HIGHER
+    occupancy on a SMALLER allocation with almost the same live row count, because the swap
+    reclaims dead slots. That is why the comment states the mechanism and stops stating a
+    rate — the sentence that read "~3 nights of slack" was true of an allocation the next
+    swap removed.
+    """
+    script = SCRIPT.read_text(encoding="utf-8")
+    for stale in STALE_DECAY_FIGURES:
+        assert stale not in script, (
+            f"{SCRIPT.name} still quotes {stale!r}, measured against the pre-swap allocation")
+    block = _comment_block("SWAP_OCCUPANCY_CEILING")
+    for name in (SWAP_IN_REPORT, NEXT_MORNING_REPORT):
+        assert name in block, f"the comment does not cite its own witness {name}"
+    assert "allocated_mib" in block, "the rate is not tied to the allocation it measures"
+    assert "live row" in block, "the mechanism is named without the count it moves"
+    assert "RISES" in block, "the comment does not say occupancy rises as the footprint falls"
+    assert "denominator" in block, "the halved denominator is not named"
+    assert "function of the allocation" in block or "property of the allocation" in block, (
+        "the rate is not stated as a function of the allocation")
+
+    side_after = _vec0(SWAP_IN_REPORT, "side_after")
+    live_before = _vec0(SWAP_IN_REPORT, "live_before")
+    morning = _vec0(NEXT_MORNING_REPORT, "before")
+    assert (live_before["occupancy"], live_before["allocated_mib"]) == (0.3419, 1020.0)
+    assert (side_after["occupancy"], side_after["allocated_mib"]) == (0.7511, 464.0)
+    assert (morning["occupancy"], morning["allocated_mib"]) == (0.6691, 528.0)
+    assert side_after["occupancy"] > live_before["occupancy"] \
+        and side_after["allocated_mib"] < live_before["allocated_mib"], (
+        "the witness no longer shows occupancy rising on a smaller allocation, so the "
+        "mechanism the comment states is not the one the swap performed")
+    assert side_after["live_rows"] > live_before["live_rows"] * 0.99, (
+        "the live row count moved materially, so the halved allocation is not the dead-slot "
+        "reclamation the comment claims")
+    one_night = round(morning["occupancy"] - side_after["occupancy"], 4)
+    for vec0 in (live_before, side_after, morning):
+        assert f"{vec0['occupancy']:.4f}" in block, f"{vec0['occupancy']} is not quoted"
+        assert f"{vec0['allocated_mib']:g}" in block, f"{vec0['allocated_mib']} is not quoted"
+        assert str(vec0["live_rows"]) in block, f"{vec0['live_rows']} rows are not quoted"
+    assert f"{one_night:+.4f}" in block or f"{one_night:.4f}" in block, (
+        f"the comment does not quote the one-night delta the two witnesses give: {one_night}")
+
+
+def test_the_out_of_band_witness_records_neither_scheduled_block():
+    """The excluded case, measured rather than asserted: the report of a night outside the band.
+
+    `qmd-index-maintenance-2026-11-21.json` is the nightly the morning after the swap:
+    occupancy 0.6691, above `CAPACITY_APPROACHING_OCCUPANCY`, so `capacity_approaching` is
+    False and the run that wrote it entered neither scheduled block. That is the same
+    key-absence a fired night produces from below the band, read off bytes rather than
+    inferred from an `if`, and it is what clause 1's "runs neither" rests on.
+    """
+    payload = _report(NEXT_MORNING_REPORT)
+    assert payload["capacity_approaching"] is False, payload.get("capacity_approaching")
+    assert payload["need_capacity"] is False, payload.get("need_capacity")
+    # Key absence, not a null value: the report only ever gains a `side_copy_swap` key
+    # inside the gate, so the witness that a night outside the band ran neither block is
+    # that neither key was written at all. Asserted as absence so a later writer that
+    # initialises both keys to `None` outside the gate is caught rather than endorsed.
+    assert "side_copy_swap" not in payload, (
+        "a night outside the band recorded a scheduled swap block after all: "
+        f"{payload['side_copy_swap']!r}")
+    assert "side_copy_build" not in payload, (
+        "a night outside the band started a scheduled build after all")
+    assert _vec0(NEXT_MORNING_REPORT, "before")["occupancy"] \
+        > _script_constants()["CAPACITY_APPROACHING_OCCUPANCY"], (
+        "this report is no longer an out-of-band night, so it witnesses nothing")
+
+
+def test_the_two_post_swap_witnesses_are_tracked_and_admissible():
+    """The two new witnesses are in the index, admissible, and identical to the live copies.
+
+    `git add` of a name no negation rescues exits 0 while staging nothing (#2282), so the
+    admissibility question is asked of `git check-ignore` on every run rather than assumed
+    from the two family rules that happen to already exist. `_assert_matches_runtime` is
+    the provenance control: quiet where `_pipeline/reflection/` is unreachable, a hard
+    disagreement where the committed bytes and the report have drifted apart.
+    """
+    for name, negation in ((SWAP_IN_REPORT, "!qmd-side-copy-rebuild-*.json"),
+                           (NEXT_MORNING_REPORT, "!qmd-index-maintenance-*.json")):
+        fixture = _fixture(name)
+        assert fixture.is_file(), (
+            f"no committed witness at {fixture}; every figure the ceiling's comment quotes "
+            "from this report would then live only on the box that ran the job")
+        rel = fixture.relative_to(ROOT).as_posix()
+        rc, source, pattern = _ignore_rule(rel)
+        assert rc == 0 and pattern == negation, (
+            f"{rel} is resolved by {source!r} with pattern {pattern!r}, not {negation!r}; the "
+            "family negation in tests/fixtures/.gitignore is what admits a witness past the "
+            "root `*.json` rule, and that file is a denied path for a round")
+        assert subprocess.run(["git", "-C", str(ROOT), "check-ignore", "--no-index", rel],
+                              capture_output=True).returncode != 0, (
+            f"git check-ignore reports {rel} as ignored, so the `git add` that put it there "
+            "staged nothing and the pins above would be reading a file no clone has")
+        tracked = subprocess.run(
+            ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel], capture_output=True)
+        assert tracked.returncode == 0, (
+            f"{rel} is on disk but not in the index, so a fresh clone has nothing to read")
+        _assert_matches_runtime(name, fixture)
