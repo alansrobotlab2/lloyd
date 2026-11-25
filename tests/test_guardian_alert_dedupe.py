@@ -10,7 +10,15 @@ outcomes a filing can have and that each leaves a different record on disk:
   * an OPEN exact-name row on an answering board → nothing is POSTed, the skip is counted;
   * a board that answers with no open match → the item is POSTed, no record is written;
   * a board that cannot be read → the item is still POSTed (silence is the one failure
-    the guard must never produce), and the failed read is recorded with its reason.
+    the guard must never produce), and the failed read is recorded with its reason;
+  * a CLOSED exact-name row plus a filing THIS guardian posted within
+    `BACKLOG_FILING_COOLDOWN_SECONDS` whose bytes match → nothing is POSTed, the skip is
+    counted (#4428, the nodes below).
+
+The fourth outcome is the same harm seen one tick later. The three above stop at the row
+being OPEN; four incidents (#3227→#3231 at 42m37s, #3551→#3558 at 23m19s, #1346→#1350 at
+1h09m, #4239→#4244 at 23m16s) refired the identical alert minutes after the row was
+CLOSED, when nothing on the board was open to suppress on.
 
 The file also owns the other half of that guard's life cycle (#3757). An OPEN row is
 what silences the next filing (`_open_duplicate_on_board`, and `voiceloss.py:123` puts
@@ -28,9 +36,11 @@ assertion is about the bytes that cross it.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import threading
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -67,6 +77,15 @@ LEVEL = "error"
 BODY = "lloyd-mc:lloyd-backend: FATAL: can't find command (repeated 24 times)"
 #: The retraction note the recovery branch itself builds (`guardian.py:2773`).
 NOTE = "liveness read came back healthy: lloyd-mc:lloyd-backend."
+#: Two firings of the hourly data-root check an hour apart. The measured shadow set is
+#: part of the body, so the TITLE is identical and the BYTES are not — which is exactly
+#: what #4428's guard has to tell apart: the same finding re-printed, and a finding whose
+#: measured paths moved. `#4239` closed at 22:23:51Z and `#4244` filed at 22:47:07Z under
+#: one title, so a cooldown keyed on the title alone would have silenced a real change.
+SHADOW_A = ("Content-empty databases under the data root. New this hour: "
+            "/home/alansrobotlab/lloyd-data/kg.sqlite is 0 bytes")
+SHADOW_B = ("Content-empty databases under the data root. New this hour: "
+            "/home/alansrobotlab/lloyd-data/research.db is 0 bytes")
 
 
 class _Board:
@@ -204,6 +223,263 @@ def test_an_unreadable_board_still_files_and_records_why(tmp_path, board_factory
     assert rec["unread"][NAME]["count"] == 1
     assert "500" in rec["unread"][NAME]["last_reason"]
     assert NAME not in rec.get("suppressed", {})
+
+
+# ── #4428: a CLOSED row still must not be re-filed with the same bytes ─────────
+#
+# The three nodes above stop at the row being OPEN, and the corpus shows the harm did not
+# stop there: four times a guardian alert filed the identical item again minutes after the
+# previous copy CLOSED — #3227→#3231 (42m37s), #3551→#3558 (23m19s), #1346→#1350 (1h09m),
+# and the pair that made this item, #4239 (`completed: '2026-11-17T22:23:51.975570'`,
+# automod `19717ab3`) → #4244 (`created: '2026-11-17T22:47:07.968284'`, 23m16s later).
+# A closed row cannot suppress on its own, and must not: #3757 takes the row out of the
+# OPEN set on an all-clear precisely so the next real outage files. So the cooldown is
+# keyed on the guardian's OWN record of the filing it made — the exact name, the sha256 of
+# the exact `description` bytes it posted, and a `gstate.now_iso()` stamp — and never on a
+# close instant, which no route exposes (`_row_from` ships `completed` as a bool;
+# `?done_since=` is day-granular) and whose obvious proxy moves on every activity append.
+
+
+def _filed_record(state_dir: Path) -> dict:
+    path = state_dir / notify.BACKLOG_FILING_STATE_NAME
+    return json.loads(path.read_text()) if path.exists() else {}
+
+
+def _note_filing(state_dir: Path, name: str, text: str, *, age_seconds: float) -> None:
+    """Write the record `_backlog_task` leaves after a delivered filing, aged by hand.
+
+    The shape is the guardian's own — `filed[<name>]` carrying `hash`, `filed_at` and
+    `count`, with `filed_at` a `gstate.now_iso()` UTC second — written here so a node can
+    stand a filing a fixed number of seconds in the past instead of waiting for them.
+
+    `hash` is recomputed with `hashlib` rather than with the module's own helper on
+    purpose: a node that called that helper would pass whatever it returned, including a
+    digest of the wrong input, and every cooldown node below would still be green.
+    """
+    stamp = (datetime.now(timezone.utc)
+             - timedelta(seconds=age_seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = {"schema": 1, "board": notify.BACKLOG_ITEM_BOARD,
+               "filed": {name: {
+                   "hash": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                   "filed_at": stamp, "count": 1}}}
+    path = state_dir / notify.BACKLOG_FILING_STATE_NAME
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_the_cooldown_constant_is_one_day():
+    # Clause 1's named number. Inlined at the call site it stops being a policy a reader
+    # can find, and the 24 h figure is a judgement, not a measurement: the four measured
+    # close→refiling gaps are 23m16s, 23m19s, 42m37s and 1h09m, while a fifth
+    # (#4072→#4091) sits at 25h03m — just outside this window.
+    assert notify.BACKLOG_FILING_COOLDOWN_SECONDS == 24 * 3600.0
+
+
+def test_a_closed_copy_refiles_nothing_when_this_guardian_filed_those_bytes_minutes_ago(
+        tmp_path, board_factory):
+    """Clause 1: the delivered filing is recorded, and an identical refiring is suppressed.
+
+    The filing happens for real first — an empty board, one POST, the board's own id — and
+    only then is the row moved to `done`, which is the state a landed fix or a human close
+    leaves it in. Nothing here hand-writes a hash, so the pair
+    (bytes this guardian posted, bytes this guardian compared) is the production pair and
+    the assertion on the stored digest is about WHAT was digested, not about a helper
+    agreeing with itself: it must be sha256 over the exact `description` the POST carried.
+    """
+    board = board_factory(rows=[])
+    n = _notifier(tmp_path, board.url)
+
+    assert n._backlog_task(TITLE, SHADOW_A, "", "") is True
+    assert len(board.posts) == 1, "the first firing has to be a real filing"
+    posted = board.posts[0]["description"]
+    stored = _filed_record(tmp_path)["filed"][NAME]
+    assert stored["hash"] == hashlib.sha256(posted.encode("utf-8")).hexdigest(), (
+        "the cooldown record is not a digest of the bytes this filing posted, so the "
+        "guard below is comparing something else")
+    assert stored["filed_at"].endswith("Z"), (
+        f"`{stored['filed_at']}` is not the `gstate.now_iso()` UTC shape the age is "
+        "computed from; a naive or offset stamp is a second clock in one file")
+
+    board.rows = [{"id": 9001, "name": NAME, "status": "done"}]
+    assert n._backlog_task(TITLE, SHADOW_A, "", "") is False
+
+    assert len(board.posts) == 1, "the identical refiling must not reach task-create"
+    assert len(board.gets) == 2, "the cooldown is decided AFTER the board is asked"
+    rec = _record(tmp_path)
+    assert rec["suppressed"][NAME]["count"] == 1
+    assert {"first_seen", "last_seen"} <= set(rec["suppressed"][NAME]), (
+        "a cooldown suppression has to be countable in the same shape an open-row "
+        f"suppression is: {rec['suppressed'][NAME]}")
+    assert NAME not in rec.get("unread", {})
+
+
+def test_a_closed_copy_files_again_when_the_recorded_filing_is_past_the_cooldown(
+        tmp_path, board_factory):
+    """Clause 2, first half: a filing older than the constant is no reason to stay silent.
+
+    25 h against a 24 h window — the shape #4072→#4091 actually measured (25h03m), which
+    is the case the constant is chosen to let through.
+    """
+    board = board_factory(rows=[{"id": 4091, "name": NAME, "status": "done"}])
+    n = _notifier(tmp_path, board.url)
+    _note_filing(tmp_path, NAME, SHADOW_A,
+                 age_seconds=notify.BACKLOG_FILING_COOLDOWN_SECONDS + 3600)
+
+    assert n._backlog_task(TITLE, SHADOW_A, "", "") is True
+
+    assert len(board.posts) == 1 and board.posts[0]["name"] == NAME
+    assert NAME not in _record(tmp_path).get("suppressed", {})
+
+
+def test_a_closed_copy_files_again_when_this_guardian_never_filed_that_name(
+        tmp_path, board_factory):
+    """Clause 2, second half — and the half the existing node cannot carry.
+
+    `test_a_board_with_only_a_closed_copy_files_and_records_nothing` files because its
+    state dir is empty. Here the filing record EXISTS and is fresh and inside the window,
+    and only its key is another alert's name: an item some other family closed, or a row a
+    human closed by hand, is not a filing this guardian owes silence to.
+    """
+    board = board_factory(rows=[{"id": 3558, "name": NAME, "status": "done"}])
+    n = _notifier(tmp_path, board.url)
+    _note_filing(tmp_path, SERVICE_DOWN_NAME, BODY, age_seconds=60)
+
+    assert n._backlog_task(TITLE, SHADOW_A, "", "") is True
+
+    assert len(board.posts) == 1 and board.posts[0]["name"] == NAME
+    assert NAME not in _record(tmp_path).get("suppressed", {})
+
+
+def test_a_closed_copy_files_at_once_when_the_measured_paths_moved(
+        tmp_path, board_factory):
+    """Clause 3: the same title with different bytes is a different finding, so it files.
+
+    Both halves of one hour-to-hour pair in a single node, because the case is the
+    difference between them: `#4239` and `#4244` share a title and differ by the shadow
+    paths each measured, and a cooldown that keyed on the title alone would have silenced
+    the second. First a hand-written record for `SHADOW_A` against a firing of `SHADOW_B`;
+    then the same thing end to end, filing `SHADOW_A`, closing it, and refiring `SHADOW_B`.
+    """
+    board = board_factory(rows=[{"id": 4244, "name": NAME, "status": "done"}])
+    n = _notifier(tmp_path, board.url)
+    _note_filing(tmp_path, NAME, SHADOW_A, age_seconds=3600)
+
+    assert n._backlog_task(TITLE, SHADOW_B, "", "") is True
+    assert len(board.posts) == 1
+
+    board.rows = []
+    assert n._backlog_task(TITLE, SHADOW_A, "", "") is True
+    board.rows = [{"id": 4245, "name": NAME, "status": "done"}]
+    assert n._backlog_task(TITLE, SHADOW_B, "", "") is True
+
+    assert len(board.posts) == 3, (
+        "a changed body inside the cooldown is a new finding, and suppressing it is the "
+        "one failure this guard must not produce")
+    assert NAME not in _record(tmp_path).get("suppressed", {})
+
+
+def test_a_missing_or_unreadable_filing_record_never_suppresses(tmp_path, board_factory):
+    """Clause 4's state half: the cooldown can only ever be decided from bytes it can read.
+
+    Four states of one file, each against the same closed row and a fresh record shape: no
+    file, bytes that are not JSON, JSON of the wrong shape, and a well-shaped record whose
+    stamp cannot be parsed. Every one of them means `file`, for the reason the open-row
+    guard already gives: the worst outcome of this guard is a duplicate, and the one it
+    must never produce is silence. A state dir per state, because a record written by one
+    round would answer the next.
+    """
+    states = ("absent", "not json at all", "[]", "an unparseable stamp")
+    for i, state in enumerate(states):
+        state_dir = tmp_path / f"s{i}"
+        board = board_factory(rows=[{"id": 3231, "name": NAME, "status": "done"}])
+        n = _notifier(state_dir, board.url)
+        path = state_dir / notify.BACKLOG_FILING_STATE_NAME
+        if state == "absent":
+            pass
+        elif state == "not json at all":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("not json at all")
+        elif state == "[]":
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("[]")
+        else:
+            _note_filing(state_dir, NAME, SHADOW_A, age_seconds=60)
+            data = json.loads(path.read_text())
+            data["filed"][NAME]["filed_at"] = "the day before yesterday"
+            path.write_text(json.dumps(data))
+
+        assert n._backlog_task(TITLE, SHADOW_A, "", "") is True, (
+            f"a filing record in state {state!r} silenced a filing")
+        assert len(board.posts) == 1, state
+
+
+def test_an_unimportable_status_vocabulary_still_files(tmp_path, board_factory,
+                                                       monkeypatch):
+    """Clause 4's vocabulary half, with the cooldown armed rather than idle.
+
+    `sys.modules["voiceloss"] = None` is the interpreter's own way to make
+    `import voiceloss` raise. The row is `done` AND a matching filing is recorded, so this
+    node fails if either suppression input is consulted before the vocabulary is loaded:
+    a guard that decided the cooldown first would suppress here and file nothing.
+    """
+    board = board_factory(rows=[{"id": 1350, "name": NAME, "status": "done"}])
+    n = _notifier(tmp_path, board.url)
+    _note_filing(tmp_path, NAME, SHADOW_A, age_seconds=60)
+    monkeypatch.setitem(sys.modules, "voiceloss", None)
+
+    assert n._backlog_task(TITLE, SHADOW_A, "", "") is True
+
+    assert len(board.posts) == 1
+    assert NAME not in _record(tmp_path).get("suppressed", {})
+
+
+def test_a_cooldown_suppression_changes_the_backlog_channel_only(tmp_path, board_factory):
+    """Clause 5: nothing on this path may widen into silence.
+
+    Two state dirs, one closed row on each board, and ONE difference between them: the
+    first has the filing record, the second does not. So every channel value that differs
+    is a channel this guard touched, and the assert below names the only one allowed to.
+    The alert goes through `alert()` rather than `_backlog_task` because the clause is
+    about the fan-out: the ledger row, ALERT.md, the journal, the toast, the voice and the
+    daily note all still have to happen for an alert whose item was suppressed.
+    """
+    filed_text = f"{TITLE}\n\n{SHADOW_A}"
+    res = {}
+    dirs = {}
+    for key, seed in (("suppressed", True), ("filed", False)):
+        state_dir = tmp_path / key
+        (state_dir / "vault" / "memory").mkdir(parents=True)
+        board = board_factory(rows=[{"id": 4244, "name": NAME, "status": "done"}])
+        n = _resolving_notifier(state_dir, board.url)
+        if seed:
+            _note_filing(state_dir, NAME, filed_text, age_seconds=60)
+        res[key] = n.alert("error", TITLE, SHADOW_A, needs_human=True)
+        dirs[key] = (board, state_dir)
+
+    assert res["suppressed"]["backlog"] is False
+    assert res["filed"]["backlog"] is True
+    assert {k: v for k, v in res["suppressed"].items() if k != "backlog"} == {
+        k: v for k, v in res["filed"].items() if k != "backlog"}, (
+        "a cooldown suppression changed a channel other than the backlog filing, and "
+        "that is #775's silence arriving through the guard instead of around it")
+
+    suppressed_board, suppressed_dir = dirs["suppressed"]
+    filed_board, _ = dirs["filed"]
+    assert [p for p, b in zip(suppressed_board.post_paths, suppressed_board.posts)
+            if p == CREATE_PATH] == [], "the suppressed alert still filed its item"
+    assert len([p for p, b in zip(filed_board.post_paths, filed_board.posts)
+                if p == CREATE_PATH]) == 1
+
+    assert TITLE in (suppressed_dir / notify.ALERT_FILE_NAME).read_text()
+    assert any('"event": "alert"' in line or '"event":"alert"' in line
+               for line in (suppressed_dir / "ledger.jsonl").read_text().splitlines()), (
+        "the suppressed alert left no ledger row: the audit trail lost a firing")
+    note = (suppressed_dir / "vault" / "memory"
+            / f"{datetime.now().strftime('%Y-%m-%d')}.md")
+    assert f"{notify.DAILY_SECTION_PREFIX}{TITLE}" in note.read_text(), (
+        "the daily note — the surface a human actually reads — lost the suppressed alert")
+    assert NAME in _record(suppressed_dir)["suppressed"], (
+        "the suppression itself has to be on disk, in backlog-skipped.json")
 
 
 def _closes(board) -> list[dict]:

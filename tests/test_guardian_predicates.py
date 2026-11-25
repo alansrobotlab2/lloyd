@@ -3819,6 +3819,30 @@ def _close_item_on_board(path) -> None:
                     encoding="utf-8")
 
 
+def _age_the_filing_record(tmp_path, name: str, seconds: float) -> None:
+    """Move the guardian's own record of a filing `seconds` into the past.
+
+    #4428's cooldown is aged by rewriting the stamp in
+    `notify.BACKLOG_FILING_STATE_NAME` rather than by freezing a clock across a module:
+    that stamp IS the clock, written by `gstate.now_iso()` and read by
+    `notify._stamp_age_seconds`, and nothing else in the guardian decides the window. The
+    format is spelled here as `%Y-%m-%dT%H:%M:%SZ` so this read goes red loudly if the
+    writer's shape ever moves, instead of ageing nothing and leaving a "past the cooldown"
+    node silently testing the cooldown itself.
+    """
+    import json
+    from datetime import datetime, timedelta
+
+    import notify
+
+    path = Path(tmp_path) / notify.BACKLOG_FILING_STATE_NAME
+    data = json.loads(path.read_text(encoding="utf-8"))
+    entry = data["filed"][name]
+    stamp = datetime.strptime(entry["filed_at"], "%Y-%m-%dT%H:%M:%SZ")
+    entry["filed_at"] = (stamp - timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+
 def _skip_record(tmp_path) -> dict:
     """The guardian's on-disk record of what it suppressed, read back.
 
@@ -3963,13 +3987,24 @@ def test_closing_the_open_copy_lets_the_next_filing_through(tmp_path, monkeypatc
     """Clause 5: this is suppression and not a mute, which is the half of the design
     a watermark-shaped record is most likely to get wrong.
 
-    One title, three firings, one board: the first files, the second is silenced
-    because its own item is open, and the third files again once that item is closed.
-    The closed file and the new one are told apart by their own `status`, so the
-    assertion cannot be satisfied by the second filing having happened earlier, nor
-    by a third file nobody filed.
+    One title, four firings, one board: the first files, the second is silenced because
+    its own item is open, the third is silenced by #4428 because the item has been closed
+    and the alert's bytes are the ones THIS guardian posted for it, and the fourth files
+    again once the cooldown has run. The closed file and the new one are told apart by
+    their own `status`, so the assertion cannot be satisfied by the second filing having
+    happened earlier, nor by a third file nobody filed.
+
+    This node is the second witness for #4428, and the one its triage did not name: it
+    pinned "close the item and the next firing files" unconditionally, which is the
+    behaviour four close→refiling gaps (#3227→#3231, #3551→#3558, #1346→#1350,
+    #4239→#4244) showed to be the harm. The guarantee it exists for is NOT weakened here:
+    the fourth firing is that same guarantee, one window later. What changed is WHEN a
+    closed item stops holding the family silent — not on the close, and not forever.
     """
+    import notify
+
     board = tmp_path / "board"
+    name = f"[guardian] {DUPLICATE_TITLE}"
 
     with _stub_board(tmp_path, board_dir=board) as (server, seen):
         notifier = _board_notifier(server, tmp_path)
@@ -3981,6 +4016,16 @@ def test_closing_the_open_copy_lets_the_next_filing_through(tmp_path, monkeypatc
             "the second firing filed a duplicate while the first item was open")
 
         _close_item_on_board(_board_files(board)[0])
+        notifier.alert("error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
+        assert len(_board_files(board)) == 1, (
+            "#4428: an alert whose bytes are the ones this guardian posted for the row "
+            "that was just closed re-filed it inside the cooldown")
+        assert _skip_record(tmp_path)["suppressed"][name]["count"] == 2, (
+            "the cooldown suppression is not as countable as the open-row one: "
+            f"{_skip_record(tmp_path)}")
+
+        _age_the_filing_record(tmp_path, name,
+                               notify.BACKLOG_FILING_COOLDOWN_SECONDS + 60)
         notifier.alert("error", DUPLICATE_TITLE, NEEDS_HUMAN_BODY, needs_human=True)
 
     files = _board_files(board)

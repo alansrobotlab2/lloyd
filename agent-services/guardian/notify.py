@@ -27,6 +27,7 @@ rollback from punishment into a task, which is the point of the whole design.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -467,6 +468,77 @@ BACKLOG_SKIP_STATE_NAME = "backlog-skipped.json"
 #: room and stays well inside the unit's `WatchdogSec=90`; the read runs only on a
 #: tick that is already filing.
 BACKLOG_READ_TIMEOUT_SECONDS = 30.0
+#: How long a filing THIS guardian made keeps a byte-identical refiring from filing again
+#: once the row it created has been closed (#4428).
+#:
+#: The open-row guard above stops at `done`, and the corpus shows the harm did not stop
+#: there: a same-title alert re-filed the identical item minutes after the previous copy
+#: closed, four times — #3227→#3231 (42m37s), #3551→#3558 (23m19s), #1346→#1350 (1h09m),
+#: and #4239→#4244 (`completed: '2026-11-17T22:23:51.975570'`, automod `19717ab3`, →
+#: `created: '2026-11-17T22:47:07.968284'`, 23m16s).
+#:
+#: The figure is a judgement, not a measurement: those four are all under 1h10m, while a
+#: fifth pair (#4072→#4091) is 25h03m and sits just outside a day. One day is chosen as the
+#: span past which a recurrence is a new occurrence of a recurring condition rather than
+#: the same finding re-printed, and it is named here so the number can be argued with in
+#: one place instead of at a call site.
+#:
+#: What it is NOT keyed on, and this is the load-bearing half: no route exposes when a row
+#: closed. `_row_from` (`app/routers/backlog.py:458`) ships `completed` as a BOOL,
+#: `?done_since=` is DAY-granular (`_ISO_DATE_RE`, :637), and `updated_at` moves on every
+#: activity-log append — #4239 closed 2026-11-17T22:23:51Z yet still carried
+#: `updated: '2026-11-20T18:32:23'` three days later — so a board-side close stamp is
+#: either unavailable or a proxy that would suppress a filing days after the close, which
+#: is what `_done_date`'s own docstring (:596-604) warns about. The age is therefore read
+#: from the guardian's own record of the filing it made, in `BACKLOG_FILING_STATE_NAME`.
+BACKLOG_FILING_COOLDOWN_SECONDS = 24 * 3600.0
+#: The guardian's own record of the items it filed: `filed[<exact name>]` carrying the
+#: sha256 of the `description` bytes that were posted, the `gstate.now_iso()` stamp of the
+#: delivery, and how many times that name has been filed. A SEPARATE file from
+#: `BACKLOG_SKIP_STATE_NAME`, and that separation is the design: the skip record must stay
+#: a pure record — `_note_backlog_skip`'s own docstring is explicit that reading it back
+#: would let a skip outlive the item that justified it. This file is the one place a filing
+#: IS an input, and only ever as an age plus a content digest of a filing this process made
+#: itself. That is also what keeps #3757's retraction honest: `resolve` closing a row is
+#: not a filing, so an all-clear writes nothing here and cannot silence its own family.
+#: Never raises, and an unreadable or missing copy of it means FILE.
+BACKLOG_FILING_STATE_NAME = "backlog-filed.json"
+
+
+def _filing_fingerprint(description: str) -> str:
+    """The digest of a filing's `description` bytes, as posted and no more.
+
+    The input is the exact string that goes into the POST body — `body[:6000]` with the
+    cherry-pick and tag lines already folded in — because that is what "the same filing"
+    has to mean across a process restart: the alert `#4244` differs from `#4239` only in
+    the shadow paths its check measured that hour, and those are in the body.
+    """
+    return hashlib.sha256(description.encode("utf-8", "replace")).hexdigest()
+
+
+def _stamp_age_seconds(stamp) -> float | None:
+    """How many seconds ago a `gstate.now_iso()` stamp was written, or None.
+
+    `None` is the answer for anything this cannot read — a missing key, a non-string, an
+    unparseable date — and every `None` means "no cooldown, file". Both sides of this
+    comparison are UTC: `gstate.now_iso()` writes `datetime.now(timezone.utc) … + "Z"`, and
+    a stamp that carries no offset is treated as UTC too, because that is what every
+    front-matter stamp on this machine is (app/backlog_move.py:42-48). An unparseable stamp
+    is never guessed at: `now - <something invented>` is how a corrupt file silences a
+    channel for a day.
+    """
+    if not isinstance(stamp, str) or not stamp.strip():
+        return None
+    text = stamp.strip()
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        when = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return (datetime.now(timezone.utc) - when).total_seconds()
 
 
 def _read_note(path) -> str:
@@ -1710,6 +1782,17 @@ class Notifier:
         `BACKLOG_SKIP_STATE_NAME`; close that item and the next firing files again,
         which is what makes this suppression rather than a mute.
 
+        An OPEN row is not the only way the same alert arrives twice, and closing it was
+        not always enough: four times in this corpus an alert re-filed the identical item
+        minutes after the copy IT had filed was CLOSED (#3227→#3231 at 42m37s, #3551→#3558
+        at 23m19s, #1346→#1350 at 1h09m, #4239→#4244 at 23m16s). A closed row cannot be a
+        suppression input on its own, because #3757 closes one deliberately so the next
+        genuine outage of the family files. So the second input is this guardian's own
+        record of the filing it made: an exact-name row at `BACKLOG_CLOSED_STATUS` PLUS a
+        delivered filing of these same bytes inside `BACKLOG_FILING_COOLDOWN_SECONDS`
+        suppresses as well, recorded under `suppressed` in the same file. Nothing else here
+        changes, including that every inability to decide files.
+
         A read that fails, or answers anything but a list, does NOT suppress — it
         files. That is a deliberate difference from `voiceloss.py`'s `_rows`, which
         files nothing on a failed read: its filing is retried until it lands, and
@@ -1724,18 +1807,23 @@ class Notifier:
         instead of in the return.
         """
         item_name = f"[guardian] {title}"[:120]
-        self._board_read_error = None
-        if self._open_duplicate_on_board(item_name):
-            self._note_backlog_skip(item_name)
-            return False
-        if self._board_read_error:
-            self._note_backlog_skip(item_name, unread=self._board_read_error)
         body = text
         if commit:
             body += (f"\n\nYour work is preserved. To re-apply and investigate:\n"
                      f"    git cherry-pick {commit}\n")
         if tag:
             body += f"The pre-rollback tree is tagged `{tag}`.\n"
+        # The exact `description` bytes this filing would post, assembled BEFORE the guard
+        # rather than after it because the guard's second input is a digest of them
+        # (#4428). A digest taken after the POST is of something the guardian had already
+        # decided to send, which is not an input to a decision.
+        description = body[:6000]
+        self._board_read_error = None
+        if self._open_duplicate_on_board(item_name, description):
+            self._note_backlog_skip(item_name)
+            return False
+        if self._board_read_error:
+            self._note_backlog_skip(item_name, unread=self._board_read_error)
         # Field names match app/routers/backlog.py::backlog_task_create, which
         # takes `name`/`description`/`status`, NOT title/body. Sending the wrong
         # keys does not error — the endpoint defaults `name` to "New Task" and
@@ -1754,8 +1842,8 @@ class Notifier:
         # lloyd board is where operational alerts belong at all is a separate
         # ruling (#1798) that this does not settle.
         payload = json.dumps({
-            "name": f"[guardian] {title}"[:120],
-            "description": body[:6000],
+            "name": item_name,
+            "description": description,
             "board": "lloyd",
             "status": "draft",
             "priority": "high",
@@ -1803,10 +1891,18 @@ class Notifier:
                 # Weaken that written-file assertion, and live detection is owed
                 # again.
                 row_id = created.get("id")
-                return (created.get("success") is True
-                        and isinstance(row_id, int)
-                        and not isinstance(row_id, bool)
-                        and row_id > 0)
+                delivered = (created.get("success") is True
+                             and isinstance(row_id, int)
+                             and not isinstance(row_id, bool)
+                             and row_id > 0)
+                # Recorded only on the delivery, and recorded from the bytes that were
+                # posted (#4428). This is the sole writer of `BACKLOG_FILING_STATE_NAME`,
+                # which is what keeps #3757's retraction honest: `resolve` closing a row is
+                # not a filing, writes nothing here, so an all-clear can never arm a
+                # cooldown over its own family.
+                if delivered:
+                    self._note_backlog_filing(item_name, description)
+                return delivered
         except (urllib.error.URLError, OSError, ValueError):
             return False
 
@@ -1848,13 +1944,14 @@ class Notifier:
             return None
         return rows
 
-    def _open_duplicate_on_board(self, name: str) -> bool:
-        """True only when the board says an OPEN item already carries this name.
+    def _open_duplicate_on_board(self, name: str, description: str = "") -> bool:
+        """True when this filing would duplicate one the board, or this guardian, already has.
 
         Exact equality on the row's `name`, not a prefix and no new matcher: the
         route derives that field from the file's H1 (`_row_from` over `_split_body`),
         so the string compared here is the string `backlog_task_create` wrote into
-        that H1, which is the string this call would have posted.
+        that H1, which is the string this call would have posted. Same test, same
+        board (`BACKLOG_LIST_PATH` scoped to `BACKLOG_ITEM_BOARD`), for both branches.
 
         Open-ness is `voiceloss.canonical_status` against `voiceloss.OPEN_STATUSES`,
         the guardian's single copy of the board's status vocabulary — re-implemented
@@ -1866,9 +1963,19 @@ class Notifier:
         and the import failing answers False for the same reason everything else
         undecided does.
 
+        A CLOSED exact-name row suppresses on a stricter pair (#4428). It is not enough
+        that the row is `done` — #3757 puts it there so the NEXT real outage of the family
+        can file — so this branch also requires that this guardian filed that name inside
+        `BACKLOG_FILING_COOLDOWN_SECONDS` and that the `description` it posted digests the
+        same as this firing's. Byte equality is the whole point: `#4239` and `#4244` shared
+        a title and differed only in the shadow paths each hour measured, and a cooldown
+        keyed on the name alone would have silenced the second of them.
+
         Every inability to decide answers False, and False means the alert files.
         That is the point: the only failure this guard can produce is a duplicate,
-        and the only failure it must never produce is silence.
+        and the only failure it must never produce is silence. That rule runs ahead of
+        both branches: the status vocabulary is loaded before any of it, so a guard that
+        cannot decide whether a row is open files, whatever its own record says.
         """
         rows = self._board_rows(name)
         if rows is None:
@@ -1877,6 +1984,7 @@ class Notifier:
             import voiceloss
         except Exception:
             return False
+        closed_seen = False
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -1884,7 +1992,52 @@ class Notifier:
                 continue
             if voiceloss.canonical_status(row.get("status")) in voiceloss.OPEN_STATUSES:
                 return True
-        return False
+            closed_seen = True
+        # Only an exact-name row the board says is closed counts as a candidate: a row that
+        # merely QUOTES this alert, or a nameless one, is not the item this filing would
+        # duplicate, so it cannot start a cooldown either.
+        return bool(closed_seen and description
+                    and self._recent_filing_matches(name, description))
+
+    def _recent_filing_matches(self, name: str, description: str) -> bool:
+        """True when THIS guardian posted `name` with these bytes inside the cooldown.
+
+        The record is `BACKLOG_FILING_STATE_NAME`, written only by `_note_backlog_filing`
+        on a delivery the board confirmed. Three things must hold and each one is a
+        different reason not to suppress: a filing recorded for THIS exact name, its stored
+        digest equal to this firing's, and its `gstate.now_iso()` stamp young enough.
+
+        The age is read from the guardian's own stamp and never from the board, because no
+        route exposes a close instant (`_row_from` ships `completed` as a bool at
+        `app/routers/backlog.py:458`, `?done_since=` is day-granular at :548) and the one
+        field that looks like one moves on every activity append. Both clocks here are the
+        same one — `gstate.now_iso()` on both sides of the write — so no conversion is
+        involved and none can drift.
+
+        A missing file, bytes that are not JSON, an entry of the wrong shape, an absent or
+        unparseable stamp, an absent digest: all answer False, which files. A cooldown that
+        could be armed by corrupt state is a mute with extra steps.
+        """
+        try:
+            import gstate
+            data = gstate.read_json(self.state_dir / BACKLOG_FILING_STATE_NAME)
+            if not isinstance(data, dict):
+                return False
+            filed = data.get("filed")
+            if not isinstance(filed, dict):
+                return False
+            prior = filed.get(name)
+            if not isinstance(prior, dict):
+                return False
+            stored = prior.get("hash")
+            if not isinstance(stored, str) or not stored:
+                return False
+            if stored != _filing_fingerprint(description):
+                return False
+            age = _stamp_age_seconds(prior.get("filed_at"))
+            return age is not None and age <= BACKLOG_FILING_COOLDOWN_SECONDS
+        except Exception:
+            return False
 
     def _note_backlog_skip(self, name: str, *, unread: str | None = None) -> None:
         """Record that a filing for `name` was suppressed, in the guardian's state dir.
@@ -1947,6 +2100,58 @@ class Notifier:
                 "last_suppressed": name,
                 "board": BACKLOG_ITEM_BOARD,
                 "list_url": f"{self.backend_url}{BACKLOG_LIST_PATH}",
+            })
+            gstate.write_json_atomic(path, data)
+        except Exception:
+            return
+
+    def _note_backlog_filing(self, name: str, description: str) -> None:
+        """Record the filing that just landed, so a byte-identical refiring can be recognised.
+
+        The mirror image of `_note_backlog_skip`, and deliberately a different FILE: that
+        one is a record and must never be an input, because a skip read back would outlive
+        the item that justified it (#2080's clause 5). This one is the only filing record
+        the guardian keeps and the only suppression input that is not the board, so the two
+        cannot be confused by a reader or by a later edit — and a node that wants the board
+        unreadable still reads only `BACKLOG_SKIP_STATE_NAME`.
+
+        One entry per exact name, holding the digest of the posted `description`, the
+        `gstate.now_iso()` stamp of the delivery, and how many times this name has been
+        filed. The stamp is written second-granular because that is what `now_iso()`
+        returns and what `_stamp_age_seconds` parses: one clock, one format, no offset for
+        a reader to resolve.
+
+        Written only after the board confirmed a delivery, which is what makes #3757's
+        retraction survive this: `resolve` closing a row is not a filing and writes nothing
+        here, so an all-clear cannot arm a cooldown over the family it just cleared.
+
+        Never raises. A record that could not be written costs at most the cooldown — the
+        next identical firing files a duplicate — and must not cost the alert that already
+        happened, which is the same reason `_note_backlog_skip` cannot raise.
+        """
+        try:
+            import gstate
+            path = self.state_dir / BACKLOG_FILING_STATE_NAME
+            data = gstate.read_json(path) or {}
+            filed = data.get("filed")
+            filed = filed if isinstance(filed, dict) else {}
+            prior = filed.get(name)
+            prior = prior if isinstance(prior, dict) else {}
+            try:
+                count = int(prior.get("count") or 0)
+            except (TypeError, ValueError):
+                count = 0
+            filed[name] = {
+                "hash": _filing_fingerprint(description),
+                "filed_at": gstate.now_iso(),
+                "count": count + 1,
+            }
+            data.update({
+                "schema": 1,
+                "filed": filed,
+                "last_filed": name,
+                "board": BACKLOG_ITEM_BOARD,
+                "cooldown_seconds": BACKLOG_FILING_COOLDOWN_SECONDS,
             })
             gstate.write_json_atomic(path, data)
         except Exception:
