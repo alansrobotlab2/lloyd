@@ -47,6 +47,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -9026,3 +9027,336 @@ def test_the_sixteenth_pinned_pool_is_a_quoted_boot_line_the_walk_can_use(sixtee
         "hours before the window opens; the quoted provenance says 2026-11-14 19:57:38 "
         "engine-local, roughly two and a half days, and a much bigger gap means the rotation "
         "has rotated past the boot that actually served the day and this entry is now a guess")
+
+
+# ---------------------------------------------------------------------------
+# §1's "verbatim" command line, checked against the launcher instead of a copy
+# ---------------------------------------------------------------------------
+#
+# Three consecutive architecture reviews of this page found a flag missing from
+# the §1 block (2026-09-21: `--kv-cache-dtype fp8` and `--engram-config`;
+# 2026-10-21: it still carried `--language-model-only` a month after 7c7d6d69
+# and had no `--limit-mm-per-prompt`; 2026-11-21: no
+# `--long-prefill-token-threshold 2048`, which the conf had pinned for months
+# before the first of those reviews). Each was fixed by a human re-reading the
+# launcher by eye, which is the method that produced all three errors. The argv
+# is obtainable mechanically: the launcher prints it under `DRY_RUN=1`, and
+# `tests/test_flash_next_launcher.py` already runs it that way, so nothing here
+# has to know what the flags are. #4448.
+
+from tests.test_flash_next_launcher import _conf_env, _dry_run  # noqa: E402
+
+#: The module object `_dry_run` was defined in — NOT `tests.test_flash_next_launcher` looked
+#: up by name. There is no `tests/__init__.py`, so pytest imports a test file by its
+#: top-level name (`test_flash_next_launcher`) while this file's own `from tests.…` import
+#: puts a SECOND module object for the same file into `sys.modules`. A `monkeypatch.setattr`
+#: aimed at the dotted string can therefore patch the copy nobody is running and leave the
+#: running copy untouched, which reads as a falsifier that does not fire — the same
+#: double-module-object defect that swallowed the vault review's clauses (#4431's
+#: finding). Resolving through `_dry_run.__module__` names the one object that is.
+_LAUNCHER_MOD = sys.modules[_dry_run.__module__]
+assert _LAUNCHER_MOD.__dict__["_dry_run"] is _dry_run, (
+    "`_dry_run` is not the function its own module exports, so the sibling module object "
+    "bound above is not the one whose `_conf_env` the dry run reads")
+
+#: This module's own object, for the same reason: patching `"tests.test_vllm_doc_claims.DOC"`
+#: from inside a file pytest imported as `test_vllm_doc_claims` edits a different module.
+_SELF = sys.modules[__name__]
+
+#: The checkpoint file whose presence lets the launcher emit `--speculative-config`: its MTP
+#: block probes the draft head with `-f`, so a model dir without it boots with speculative
+#: decode off and the flag set loses a flag the live engine carries.
+_MTP_DRAFT_HEAD = "nvfp4_experts_mtp.safetensors"
+
+#: The section whose fenced block is the claim under test, named by its heading text so a
+#: renumbering fails loudly at the assertion instead of reading some other section's fence.
+_S1_HEADING = "## 1. What actually runs"
+
+
+def _s1_fence(text: str) -> str:
+    """The body of the single fenced block inside §1 of `text`, without its ``` rules.
+
+    Read raw rather than through `_section_lines()`: that helper drops any line whose first
+    word is a shell assignment, and a command line inside a fence is not prose — a filter
+    written for prose must not decide which tokens of a command are visible.
+    """
+    lines = text.splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith(_S1_HEADING)), None)
+    assert start is not None, f"`architecture/vllm.md` no longer heads a section {_S1_HEADING!r}"
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^##\s", lines[i])), len(lines))
+    fences = re.findall(r"^```[^\n]*\n(.*?)^```", "\n".join(lines[start:end]), re.S | re.M)
+    assert len(fences) == 1, (
+        f"§1 now holds {len(fences)} fenced blocks, so this node cannot know which one "
+        "claims to be the command line — narrow the helper deliberately, do not guess")
+    return fences[0]
+
+
+def _flag_set(tokens: list[str]) -> set[str]:
+    """The `--long-form` flags among `tokens`, deduplicated.
+
+    Values are excluded by design: an arm changes a value (`--max-num-seqs 8` under
+    `arm-1tok`, `4` under `arm-seq4`) without changing what the command *is*, and the worktree
+    has no weights, so the positional model path can never match the doc's either. Single-dash
+    flags are not part of this surface — the launcher emits `-m` on both sides.
+    """
+    return {tok for tok in tokens if tok.startswith("--")}
+
+
+def _stub_ckpt(base) -> Path:
+    """A model dir the launcher accepts: a stub `config.json` plus the MTP draft-head file.
+
+    The draft head is what makes this a faithful stand-in rather than a reduced boot. With
+    only `config.json` the launcher prints `WARNING: nvfp4_experts_mtp.safetensors missing`
+    and drops `--speculative-config`, a flag the live engine carries, so a rail that stubbed
+    one and not the other would report a doc defect that does not exist.
+    """
+    ckpt = Path(base) / "ckpt"
+    ckpt.mkdir(parents=True)
+    (ckpt / "config.json").write_text('{"architectures": "Stub"}', encoding="utf-8")
+    (ckpt / _MTP_DRAFT_HEAD).write_text("stub\n", encoding="utf-8")
+    return ckpt
+
+
+def _launcher_flags(tmp_path, **overrides) -> set[str]:
+    """The flags the launcher emits for the boot supervisord is configured to run.
+
+    Obtained only by running it. `_conf_env()` is named here because it is the reason the run
+    is trustworthy: `_dry_run()` exports the `environment=` pairs of
+    `agent-services/supervisor/conf.d/agent-llm-primary.conf`, the authoritative value source,
+    and launcher defaults are NOT a substitute — the conf pins `LONG_PREFILL_TOKEN_THRESHOLD`
+    where the launcher defaults it empty (the flag would vanish), and pins
+    `LANGUAGE_MODEL_ONLY="0"` where a leaked `1` in the ambient environment would make the
+    launcher emit `--language-model-only`, a flag that never boots. Both directions of that
+    error are checked by `test_the_s1_rail_reads_the_confs_environment_not_defaults`.
+    """
+    conf = _conf_env()
+    for key in ("VLLM_VENV", "LONG_PREFILL_TOKEN_THRESHOLD", "LANGUAGE_MODEL_ONLY"):
+        assert key in conf, (
+            f"the conf sets no {key}, so the launcher's own default for it would be what "
+            "this rail asserts against — a configuration that never boots")
+    assert conf["LONG_PREFILL_TOKEN_THRESHOLD"].strip(), (
+        f"the conf now leaves LONG_PREFILL_TOKEN_THRESHOLD empty ({conf[key]!r}), so the "
+        "launcher would not emit the flag the 2026-11-21 review added to §1; this rail's "
+        "conf-environment premise needs revisiting, not this assertion editing")
+    out = _dry_run(tmp_path, MODEL_DIR=str(_stub_ckpt(tmp_path)), **overrides)
+    argv_line = out.splitlines()[-1]   # DRY_RUN prints two summary echoes, then the argv
+    assert "vllm.entrypoints.cli.main serve" in argv_line, (
+        f"the launcher's last DRY_RUN line is not the argv, so the parse below would read "
+        f"prose as a command line: {argv_line[:120]!r}")
+    return _flag_set(shlex.split(argv_line))
+
+
+def _rail(doc_text: str, launcher_flags: set[str]) -> tuple[list[str], list[str]]:
+    """`(doc_only, launcher_only)` flag names between the §1 fence and the launcher's argv.
+
+    A function returning both directions rather than an assertion, so the shipped node and the
+    planted falsifier run byte-identical comparisons and differ only in the fence they read.
+    """
+    fence = {tok for tok in _flag_set(shlex.split(_s1_fence(doc_text).replace("\n", " ")))}
+    return sorted(fence - launcher_flags), sorted(launcher_flags - fence)
+
+
+def test_section_1_fence_lists_exactly_the_flags_the_launcher_emits(tmp_path):
+    """§1's command line says "verbatim", so the launcher itself is the reference for it.
+
+    The two flag sets must be equal, and neither may be a subset. A doc that lost a flag is
+    the direction all three reviews hit (`--kv-cache-dtype fp8`, `--limit-mm-per-prompt`,
+    `--long-prefill-token-threshold`); a doc that kept a flag the launcher no longer emits
+    under the conf environment is the direction the 2026-10-21 review hit
+    (`--language-model-only`). Both are drift, so both are refusals. 26 flags agree today.
+
+    This lands green: the 2026-11-21 review commit `e735dbd5` had already put the flag it
+    found missing into the fence, and `architecture/vllm.md` is untouched by this diff. The
+    node exists to make the sentence at §11's 2026-11-21 review-log entry — that #4448 is the
+    rail — true, and to catch the fourth one. It skips rather than failing where the engine
+    venv is absent, which is `_dry_run()`'s own behaviour; see
+    `test_section_1_rail_skips_rather_than_fails_without_the_engine_venv`.
+    """
+    launcher_flags = _launcher_flags(tmp_path)
+    doc_only, launcher_only = _rail(DOC.read_text(encoding="utf-8"), launcher_flags)
+    assert doc_only == [], (
+        f"§1's fence advertises {len(doc_only)} flag(s) the launcher does not emit under the "
+        f"conf's own environment: {doc_only}. Either the block still describes a boot that "
+        "no longer happens, or it was hand-copied wrong.")
+    assert launcher_only == [], (
+        f"the launcher emits {len(launcher_only)} flag(s) §1's fence omits: {launcher_only} — "
+        "the block says 'verbatim', and a reader rolling the engine back from it would lose "
+        "them.")
+
+
+def test_dropping_one_launcher_flag_from_the_s1_fence_fails_the_rail(tmp_path):
+    """The rail is wired: delete one emitted flag from a copy of the fence and it reports
+    exactly that flag; leave every flag in and the same comparison reports nothing.
+
+    The failing doc text is built here, never written to disk — the fence under test stays
+    the shipped one, and the mutated one is a string made from it. All 26 flags are planted
+    rather than one: a rail that detects only `--long-prefill-token-threshold` is a rail
+    fitted to the last finding, and the three reviews disagree about which flag that was. The
+    report must name the deleted flag in `launcher_only` and nothing in `doc_only`, or a red
+    run would point the reader at the wrong side of the difference.
+    """
+    launcher_flags = _launcher_flags(tmp_path)
+    text = DOC.read_text(encoding="utf-8")
+    assert _rail(text, launcher_flags) == ([], []), (
+        "the shipped fence does not already agree with the launcher, so a planted deletion "
+        "could not be attributed to the plant")
+    fence = _s1_fence(text)
+    assert text.count(fence) == 1, (
+        "the §1 fence body also appears elsewhere in `architecture/vllm.md`, so replacing it "
+        "to plant a flag would edit bytes this node does not own")
+    tokens = shlex.split(fence.replace("\n", " "))
+    for flag in sorted(launcher_flags):
+        at = tokens.index(flag)
+        cut = at + 1
+        while cut < len(tokens) and not tokens[cut].startswith("--"):
+            cut += 1                      # the flag with its value(s), not just its name
+        planted_fence = " ".join(tokens[:at] + tokens[cut:]) + "\n"
+        assert flag not in _flag_set(shlex.split(planted_fence)), (
+            f"the plant left {flag} in place")
+        # back into a full doc copy: the helper reads a section, and a bare fence would fail
+        # the heading assertion instead of the rail.
+        planted_doc = text.replace(fence, planted_fence)
+        doc_only, launcher_only = _rail(planted_doc, launcher_flags)
+        assert doc_only == [] and launcher_only == [flag], (
+            f"deleting {flag} from the fence produced doc_only={doc_only} "
+            f"launcher_only={launcher_only}: the rail must name the deleted flag and nothing "
+            "else")
+    assert len(launcher_flags) == 26, (
+        f"the launcher emits {len(launcher_flags)} flags under the conf environment while "
+        "this node's prose says all 26 are planted; correct the count here, not in the doc")
+
+
+def test_the_s1_rail_reads_the_confs_environment_not_the_launchers_defaults(tmp_path):
+    """Blank one conf variable and one flag disappears from the argv: the flag set is
+    env-derived, so no list of flags could have been written into this file instead.
+
+    The item's caveat, made testable. `LONG_PREFILL_TOKEN_THRESHOLD` is set to 2048 by the
+    conf's `environment=` line and defaults to empty in the launcher
+    (`"${LONG_PREFILL_TOKEN_THRESHOLD:-}"`), whereupon the launcher's
+    `[[ -n … ]] && AB_ARGS+=(…)` never appends the flag — which is precisely why the 2026-11-21
+    review found §1 missing it while a rail on launcher defaults would have found §1
+    *carrying an extra* flag. `MOE_BACKEND` and `LANGUAGE_MODEL_ONLY` are the same conditional
+    shape, the last one inverted: the conf's `"0"` is the only thing keeping
+    `--language-model-only` out of a boot, and out of this flag set.
+
+    No conf VALUE is pinned here — `--long-prefill-token-threshold 2048` may become 4096
+    without any doc or test being wrong, since the rail compares flags only. What is pinned
+    is that the values come from the conf.
+    """
+    with_conf = _launcher_flags(tmp_path)
+    assert "--long-prefill-token-threshold" in with_conf, (
+        "the flag the 2026-11-21 review added to §1 is not in the conf-environment argv, so "
+        "the comparison below has nothing to distinguish")
+    blank_dir = tmp_path / "blanked"
+    blanked = _dry_run(blank_dir, MODEL_DIR=str(_stub_ckpt(blank_dir)),
+                       LONG_PREFILL_TOKEN_THRESHOLD="")
+    without = _flag_set(shlex.split(blanked.splitlines()[-1]))
+    assert "--long-prefill-token-threshold" not in without, (
+        "the launcher now emits --long-prefill-token-threshold regardless of the conf value, "
+        "so the conf is no longer the authority this rail reads its flag set from")
+    assert without == with_conf - {"--long-prefill-token-threshold"}, (
+        f"blanking one conf variable changed more than one flag: "
+        f"{sorted(without ^ (with_conf - {'--long-prefill-token-threshold'}))}")
+
+
+def test_section_1_rail_skips_rather_than_fails_without_the_engine_venv(tmp_path, monkeypatch):
+    """A machine without the engine venv must not be reported as having a wrong doc.
+
+    The venv is an absolute path out of the conf, so this is not only a worktree concern: a
+    box without `vllm-flash-next-main-1110` would otherwise read as a documentation defect.
+    The skip is asserted at its source — `_dry_run()` raises it before `subprocess` is
+    reached — which is also what makes this rail safe to leave in the suite: it either skips
+    on the same condition that would make a real boot impossible, or it runs under
+    `DRY_RUN=1`, which the launcher honours by printing the argv and exiting. It never boots
+    or restarts the engine.
+    """
+    missing = tmp_path / "no-such-venv" / "vllm"
+    with pytest.raises(pytest.skip.Exception) as excinfo:
+        _dry_run(tmp_path, VLLM_VENV=str(missing))
+    assert str(missing) in str(excinfo.value), str(excinfo.value)
+
+    # …and the rail node itself, not just the helper: with the conf's VLLM_VENV pointed at a
+    # path that does not exist, running the shipped node raises skip rather than an assertion.
+    # Both copies of `_conf_env` are replaced because `_launcher_flags` reads the conf for its
+    # own premise assertions while `_dry_run()` reads it again for the subprocess environment;
+    # the real conf file is never touched, and the fake carries the three keys whose presence
+    # the rail insists on so the skip comes from the missing interpreter and not from them.
+    fake = {"VLLM_VENV": str(missing), "LONG_PREFILL_TOKEN_THRESHOLD": "2048",
+            "LANGUAGE_MODEL_ONLY": "0"}
+    monkeypatch.setattr(_SELF, "_conf_env", lambda: fake)
+    monkeypatch.setattr(_LAUNCHER_MOD, "_conf_env", lambda: fake)
+    with pytest.raises(pytest.skip.Exception):
+        test_section_1_fence_lists_exactly_the_flags_the_launcher_emits(tmp_path / "rail")
+
+
+def test_the_rail_refused_the_fence_as_it_stood_before_the_2026_11_21_fix(tmp_path):
+    """Run the same comparison against the fence as it was committed before the last fix, and
+    it names the one flag that review found by eye.
+
+    `e735dbd5` (arch-review: doc:vllm — stale, 2026-11-20 20:35 PST) added
+    `--long-prefill-token-threshold 2048` to §1 and changed nothing else in the block: its
+    fence held 25 flags, the conf-environment argv holds 26, and the difference is exactly
+    that one flag — which is the third review in a row to find a missing flag by hand. This
+    node is the rail's failing-before evidence, permanent rather than a one-off run: the doc
+    bytes come out of git history, the current page is never read for it, and no tree is
+    edited. It is what the 2026-09-21 finding (`--kv-cache-dtype fp8`,
+    `--engram-config`) and the 2026-10-21 finding (`--language-model-only` still carried, no
+    `--limit-mm-per-prompt`) would have looked like too, since the comparison is the same in
+    both directions.
+    """
+    launcher_flags = _launcher_flags(tmp_path)
+    historic = subprocess.run(
+        ["git", "-C", str(ROOT), "show", "e735dbd5^:architecture/vllm.md"],
+        capture_output=True, text=True)
+    assert historic.returncode == 0, (
+        f"`git show e735dbd5^:architecture/vllm.md` failed ({historic.stderr[:160]!r}), so "
+        "this node has no history to re-run the rail against — it is not evidence of anything "
+        "until that object is reachable")
+    doc_only, launcher_only = _rail(historic.stdout, launcher_flags)
+    assert doc_only == [], (
+        f"the pre-fix fence advertised flags the launcher does not emit: {doc_only} — the "
+        "review that filed this item found a missing flag, not an invented one, so a "
+        "different failure here means the fence or the launcher moved again")
+    assert launcher_only == ["--long-prefill-token-threshold"], (
+        f"the rail reports {launcher_only} against the pre-fix fence; it must name exactly "
+        "the flag e735dbd5 added, or the rail is not the guard this item claims")
+
+
+def test_the_shipped_rail_node_fails_on_a_doc_copy_missing_one_flag(tmp_path, monkeypatch):
+    """Not just the comparison: the node itself raises, on a doc copy the test wrote.
+
+    `test_dropping_one_launcher_flag_from_the_s1_fence_fails_the_rail` proves the helper's
+    arithmetic over all 26 flags; this proves the wiring above it, so that a red run of
+    `test_section_1_fence_lists_exactly_the_flags_the_launcher_emits` is what an operator
+    sees. The page is monkeypatched by module attribute — `architecture/vllm.md` is never
+    written, and the copy carries every byte of it except the one flag-line. The same call
+    against an unmutated copy must NOT raise, which is the half that keeps a rail which
+    always fails from passing for a rail that detects.
+    """
+    launcher_flags = _launcher_flags(tmp_path)
+    text = DOC.read_text(encoding="utf-8")
+    fence = _s1_fence(text)
+    tokens = shlex.split(fence.replace("\n", " "))
+    flag = "--long-prefill-token-threshold"      # the flag all three reviews circled
+    assert flag in _flag_set(tokens) and flag in launcher_flags, (
+        f"{flag} is no longer in both the fence and the argv, so it can no longer serve as "
+        "the planted flag — pick one that is in both, do not delete this assertion")
+    at = tokens.index(flag)
+    cut = at + 1
+    while cut < len(tokens) and not tokens[cut].startswith("--"):
+        cut += 1
+    mutated = text.replace(fence, " ".join(tokens[:at] + tokens[cut:]) + "\n")
+    for label, doc_text, expect_flag in (("mutated", mutated, flag),
+                                         ("pristine", text, None)):
+        copy = tmp_path / f"vllm-{label}.md"
+        copy.write_text(doc_text, encoding="utf-8")
+        monkeypatch.setattr(_SELF, "DOC", copy)
+        if expect_flag is None:
+            test_section_1_fence_lists_exactly_the_flags_the_launcher_emits(
+                tmp_path / f"pass-{label}")
+        else:
+            with pytest.raises(AssertionError) as excinfo:
+                test_section_1_fence_lists_exactly_the_flags_the_launcher_emits(
+                    tmp_path / f"fail-{label}")
+            assert expect_flag in str(excinfo.value), (
+                f"the node failed without naming {expect_flag}: {str(excinfo.value)[:200]}")
