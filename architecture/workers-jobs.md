@@ -3,7 +3,7 @@ segment: architecture
 tags: [architecture, lloyd, workers]
 type: reference
 status: implemented
-date: 2026-10-25
+date: 2026-11-25
 ---
 
 # The worker jobs
@@ -39,9 +39,11 @@ the order the pool considers them.
 
 Seventeen sources are registered.
 
-All seventeen have a block under `workers.sources`, and one is registered-but-off
-by design: `fitness` (2026-11-22) ships `enabled: false` until its noise floors are
-measured by hand (§4). Before it, `failure-ledger` was the last to get a block, on
+All seventeen have a block under `workers.sources`, and since 2026-11-23 none is
+registered-but-off: `fitness` was the last to ship that way (`enabled: false` until
+its noise floors were measured by hand), and `229337f6` enabled it on 2026-11-23 —
+the enable its own §4 entry records, which this paragraph went on asserting against
+for a day. Before it, `failure-ledger` was the last to get a block, on
 2026-10-06 (#2309). Until that block
 existed `WorkerPool._scheduler_pass` read an empty dict for the source
 (`workers/pool.py:2045`) and stepped past it at `:2046` without calling its
@@ -78,7 +80,7 @@ the parser as the count sentence being gone.
 | `failure-ledger` | mining | 75 | every 1 h poll; **one sweep a day** (`min_interval_seconds`) | 1 | direct (primary) | no | — | yes |
 | `bench-mine` | mining | 80 | 7200 s | 1 | direct (primary) | no | — | yes |
 | `frontend-probe-canary` | self-mod | 80 | 3600 s poll, one run a day | 1 | none (subprocess) | no | — | yes |
-| `fitness` | self-mod | 85 | 1800 s poll, one run a night inside 01:00–04:00 local | 1 | none (subprocess) | **yes** | — | **no** |
+| `fitness` | self-mod | 85 | 1800 s poll, one run a night inside 01:00–04:00 local | 1 | none (subprocess) | **yes** | — | yes |
 
 **KV-gated** is `LONG_LIVED = True`: tens of iterations each re-submitting a
 100–200k context, so the pool will not *claim* one while the primary's
@@ -168,10 +170,10 @@ removes.
   store failing to hold a row, and two functions decide that between them:
   `enqueue_if_due()` declines the offer silently unless `_runner_needed()` is true
   — `pending_promotions()` non-empty **and** no `runner_alive()`
-  (`workers/sources/automod_regression.py:455`) — because offering unconditionally
+  (`workers/sources/automod_regression.py:459`) — because offering unconditionally
   would write ninety-six "nothing to measure" rows a day over the handful worth
   reading; and `start_runner()`, the job body, re-checks and returns
-  `_skipped("no promotion is waiting to be measured")` (def `:1248`, skip `:1256`). So
+  `_skipped("no promotion is waiting to be measured")` (def `:1269`, skip `:1277`). So
   **a zero means no promotion was pending in the window** — or one was and a runner
   was already on it, which is the same `_runner_needed()` answer — and it is a
   declined offer, so unlike a `queued → skipped` transition elsewhere in this table
@@ -196,7 +198,7 @@ removes.
   for it at all: it has no `workers.sources` block, and
   `test_config_configures_only_registered_sources` fails the moment one is added,
   because the registry is what a `workers.sources` key may name. So its missing row
-  here, and its missing row in §1's 13-name roster, are the design working — unlike
+  here, and its missing row in §1's 17-name roster, are the design working — unlike
   a zero in the `automod-regression` row above, which is not.
 - **The store on this box begins 2026-09-22T20:03Z** (the 2026-09-22 data wipe), so
   no window `runs` can show holds the old names §7 lists, and a "7 days" window
@@ -207,11 +209,13 @@ removes.
 ## 3. Dispatch — one door onto the autonomy fleet
 
 One source, and it is not really a job. It is the seam the entire autonomy
-fleet comes through: 45 task files in the vault, each with its own schedule,
+fleet comes through: 53 numbered task files in the vault (`ls
+~/obsidian/autonomy | grep -cE '^[0-9]+-'`, and `/api/autonomy/tasks` returns the
+same 53, both read 2026-11-25), each with its own schedule,
 priority, skill and dependencies, all reaching the pool as
 `scheduled-task:<id>`. Everything the pool knows about the nightly KG chain or
 the morning triage, it knows through this one module — which makes it the widest
-fan-in in the table rather than the busiest: one module for 45 schedules, but
+fan-in in the table rather than the busiest: one module for 53 schedules, but
 257 runs over the 7 days to 2026-10-27 (`/api/workers/health`, window unclamped),
 fifth behind `autotriage`, `owed-check`, `autocode` and `board-steward` — the
 rank §2's own table gave it at its 2026-09-28 stamp too. It is also the source
@@ -225,7 +229,7 @@ per task through `autonomy.get_due_tasks`, and enqueues each due task under
 writes the per-task run record to `autonomy-runs/<id>/<run_id>.md`.
 
 What of that result reaches the pool is a hand-written whitelist
-(`workers/sources/scheduled_task.py:448`, `out` through to `return out`): a
+(`workers/sources/scheduled_task.py:684`, `out` through to `return out` at `:748`): a
 literal dict, then three
 keys lifted by name below it — `claims`, `acceptance_grade` and `script_alarm`,
 in that order, one severance each (#945, #623, #2619). The mechanism is deliberate
@@ -325,9 +329,9 @@ disarm all of them. One level up, two supported routes still stop the seat itsel
 and each stops the reporting of the problem along with the work:
 
 - **`workers.enabled: false` at boot.** `start_worker_pool()`
-  (`app/routers/workers.py:962`) returns before `WorkerPool` is constructed, so
+  (`app/routers/workers.py:1144`) returns before `WorkerPool` is constructed, so
   `_scheduler_loop` (`workers/pool.py:1998`) never runs at all.
-- **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:559`
+- **`POST /api/workers/enable {"enabled": false}`.** `app/routers/workers.py:656`
   awaits `pool.stop()`, which clears `_running` and cancels `_scheduler_task`
   (`workers/pool.py:1079`).
 
@@ -387,8 +391,8 @@ one `architecture/*.md` doc per run, and nothing else.
 
 What the five share is that **no member acts on its own conclusion**.
 `backlog-cluster` writes a file that triage is free to ignore; `autotriage`
-reaches a verdict and implements nothing; `autocode` lands only through thirteen
-rungs and a second reader; `automod-regression` measures and never reverts; and
+reaches a verdict and implements nothing; `autocode` lands only through the gate's
+sixteen rungs (`scripts/automod/gate.py:1`) and a second reader; `automod-regression` measures and never reverts; and
 `arch-review` may correct the doc it read and must *file* every other finding,
 including the one-line skill fix it could obviously make itself.
 Each one's output is the next one's input, and every handoff is a file on disk
@@ -736,7 +740,7 @@ no promotion under observation, no rollback pending, no round open — and
 `select_confirmed`, and enqueues at most one round under `autocode:round`.
 
 **Executes** one turn in a real session following the `automod-change-own-code`
-skill: open a worktree round, do the work, run the thirteen-rung gate, land it or
+skill: open a worktree round, do the work, run the sixteen-rung gate, land it or
 abort. Landing runs detached, exactly as when a human drives it.
 
 - **Two gates stand in front of it.** Triage must have reached `confirmed`
@@ -1843,3 +1847,17 @@ that put every disk-heavy scan on a thread, and stays.
   §2's pre-#1713 figures. Findings filed: #3283 (no rail reads doc
   `file:line` citations), #3284 (canary module docstring still says
   `--seeds 12`), #3285 (config comment claims every unattended turn is IV off).
+- 2026-11-25 · **stale** · §1 asserted `fitness` was the one registered-but-off
+  source (`enabled: false`) while §4 said it was enabled 2026-11-23 — config now
+  has all seventeen `workers.sources.*.enabled` true (PyYAML and `/api/workers/health`
+  agree), so §1's prose and the roster's `on` column are corrected and the pair is
+  reconciled; the gate's rung count is sixteen (`scripts/automod/gate.py:1`), not
+  the thirteen this file said twice; task files are 53, not 45; §1's roster is
+  17 names, not 13; and four `file:line` citations re-pointed (`workers.py:962`→
+  `:1144`, `:559`→`:656`, `scheduled_task.py:448`→`:684`, `automod_regression.py:455`
+  →`:459` with `:1248`/`:1256`→`:1269`/`:1277`). Verified exact and left alone:
+  `pool.py:1998`/`:2028`/`:2044`/`:2045`/`:2046`/`:1079`, `autonomy.py:5356`,
+  `scheduled_task.py:488`, the `_PRIORITY_MAP` values, every per-source cadence,
+  cap, priority and `max_inflight` in §1's table, `LONG_LIVED`'s ten declarers,
+  `POOL_SILENT_STREAK`, `_THROUGHPUT_RATE_WINDOW_MINUTES`, and the 12-group /
+  36-doc picklist arithmetic.
