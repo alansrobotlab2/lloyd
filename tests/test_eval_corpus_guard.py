@@ -5107,7 +5107,22 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: did not. The anchor names `d0eed5d6`, the commit carrying the leg, stamped in the commit
 #: beside it because a commit cannot carry its own name; that object holds the bytes this
 #: tree has, and the projection compares the file against itself by that name.
-RUN_EVAL_CODE_ANCHOR = "f7e36cb8"
+#:
+#: #4580 moves it a fifth time, for the reason #4404's move was legitimate: the
+#: `skills_search` nightly arm is behaviour, not prose — `score_skill_arm`,
+#: `attach_skill_arm`, `skill_arm_line`, the `SkillArmUnavailable` refusal and the
+#: `SKILL_ARM_*` constants above `build_parser`, the `--skill-arm` declaration itself,
+#: and `main()`'s call that files `skill_hit_at_1` into `summary.overall` plus the line
+#: it prints. Nothing was added to the scored corpus to reach it: the retrieval gold set
+#: is still 86 `- id:` rows and the arm reads its own file,
+#: `eval/skill_match_queries.yaml`, so the executable surface moved while the population
+#: the retrieval metrics divide by did not. It names `307d4fb9`, the commit carrying the
+#: arm, stamped here beside it for that same self-naming reason. Not the sha the arm was
+#: first written at upstream (`0003db69`, on the refused round's branch): that object is
+#: reachable from no ref after its rebase, so `git gc` would prune it and this node's
+#: first assertion — that the anchor RESOLVES — would go red on a tree nobody edited.
+#: `307d4fb9` is an ancestor of `main` and holds these exact bytes.
+RUN_EVAL_CODE_ANCHOR = "307d4fb9"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because

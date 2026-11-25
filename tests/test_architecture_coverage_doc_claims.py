@@ -3494,7 +3494,9 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 
     The doc must then carry no fallback-decided anchor at all. All six of its
     graded spans are re-typed to satisfy that — the five the item names
-    (`app/paths.py:121`, `eval/run_eval.py:2947`, `scripts/automod/gate.py:3435`,
+    (`app/paths.py:121`, `eval/run_eval.py:2947` — the number the doc carried until
+    #4399's `skills_search` arm moved that write to 3097, which is what the doc cites
+    and what the seed below replaces — `scripts/automod/gate.py:3435`,
     and the stale pair) plus `eval/run_tool_choice_eval.py:498`, which the item's
     count missed because it appears twice and named nothing either time.
     `EVAL_BASELINES_DIR`, `main` and `rung_prompt_surface` now stand beside their
@@ -3548,7 +3550,16 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
         "measurement.md")
     test_the_span_rule_is_shown_able_to_fail_on_anchors_the_corpus_wrote()
 
-    seeded = text.replace("eval/run_eval.py:2947", "eval/run_eval.py:2134")
+    # The seed is the doc's OWN current number, so it ages every time the doc is
+    # re-pointed: 2947 until #4399's `skills_search` nightly arm put 156 lines above
+    # the baseline write and moved it to 3097 (`architecture/measurement.md` cites
+    # that number now, and `tests/test_eval_ceiling_fields.py::CITED_PROSE_LINES`
+    # carries the same pair). #4399's first round is why this comment exists: it
+    # re-pointed the doc and this constant stayed, so `seeded != text` below held the
+    # doc fixed at a number the doc no longer prints, and the node reddened on its own
+    # seed rather than on the doc — which is exactly what "the node asserts on itself"
+    # was already warning about two lines down.
+    seeded = text.replace("eval/run_eval.py:3097", "eval/run_eval.py:2134")
     # #4347 grows `_reuse_inner`/`_reuse_rule` above `rung_prompt_surface`, so the
     # live number is 3608 and this pre-shift seed must age with it: seeding a value
     # the doc no longer carries replaces nothing and the node asserts on itself.

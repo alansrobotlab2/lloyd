@@ -85,6 +85,53 @@ def test_report_only_metrics_never_fire():
     assert detail["latency_ms_avg"]["armed"] is False
 
 
+def test_the_skill_arm_metric_is_not_in_the_compared_set():
+    """#4399 clause 4: `skill_hit_at_1` may not join `ARMED_METRICS`.
+
+    The arm has no baseline history and no measured noise floor of its own — its corpus
+    is `eval/skill_match_queries.yaml`, not the retrieval gold set `ZERO_NOISE`'s
+    fingerprint describes. An armed metric graded against a σ measured on a different
+    question set is #1352's unjustified floor, and #4399's own step 6 says two nightly
+    runs are watched before the number counts as a trend line. The gate compares
+    `ARMED_METRICS` and nothing else, so staying out of that tuple is the whole of what
+    keeps an untrended arm from moving a promotion verdict.
+    """
+    assert "skill_hit_at_1" not in R.ARMED_METRICS
+    assert not [m for m in R.ARMED_METRICS if "skill" in m], R.ARMED_METRICS
+
+
+def test_a_skill_arm_collapse_cannot_move_a_promotion_verdict():
+    """The same claim behaviourally: hit@1 0.722 -> 0.000 with every armed metric flat.
+
+    Shaped like `test_report_only_metrics_never_fire` — one metric collapsed, the rest
+    identical — because the tuple membership above is worth only what the verdict is:
+    `regressed` is the rollback request, so the question is whether this number can put
+    a word into `reasons`. It cannot.
+    """
+    cur = base(); cur["skill_hit_at_1"] = 0.0
+    was = base(); was["skill_hit_at_1"] = 0.722
+    regressed, reasons, detail = R.evaluate(cur, was, ZERO_NOISE)
+    assert not regressed, reasons
+    assert reasons == []
+    assert "skill_hit_at_1" not in detail, sorted(detail)
+
+
+def test_the_regression_source_never_names_the_skill_arm_metric():
+    """Byte-level: no new code path in the gate may read the arm.
+
+    `evaluate` and the two comparison-table builders all read `ARMED_METRICS`, so the
+    name appearing anywhere in this module would mean a fifth site invented its own
+    metric list. The count assertion is here so that if those sites ever move or go,
+    this node fails instead of quietly asserting about a name no longer referenced.
+    """
+    src = (Path(__file__).resolve().parent.parent
+           / "workers" / "sources" / "automod_regression.py").read_text(encoding="utf-8")
+    assert "skill_hit_at_1" not in src
+    assert src.count("ARMED_METRICS") >= 4, (
+        "the armed-metric sites moved; re-read this module before trusting the claim "
+        "above that ARMED_METRICS is the only thing the gate compares")
+
+
 # ---------------------------------------------------------------------------
 # the absolute latency budget (#1129)
 # ---------------------------------------------------------------------------

@@ -2503,6 +2503,133 @@ def attach_episodic_floor_leg(out: dict, *, memory_dir: Path | str | None = None
     return out
 
 
+# ---------------------------------------------------------------------------------
+# The skills_search nightly arm (#4399, #4031's unlanded core)
+# ---------------------------------------------------------------------------------
+#
+# `skills_search` is a live surface — 132 `"name": "skills_search"` calls in
+# `~/lloyd-data/sessions/*.json` measured 2026-11-20, `.json.gz` archives excluded so
+# that count is a floor — and the nightly recorded no number of its own. hit@1 0.722
+# existed only as prose in `eval/measurements/skills-search-embed-2026-11-10.md`, so a
+# retirement that broke the matcher could not appear in any trend line. `--skill-arm`
+# publishes it into the same artifact the retrieval metrics live in.
+#
+# Two rules this block exists to keep:
+#
+#   * **One scorer, not two.** `eval/run_skill_match_eval.py` already implements the
+#     hit@1 rule, the labelled denominator and the embed re-order, and its own tests
+#     (`tests/test_skill_match_eval.py`, `tests/test_skills_search_embed_rerank.py`)
+#     pin them. This arm imports and calls those callables; the number it publishes is
+#     the number that module publishes. A second implementation here would agree today
+#     and drift silently, which is the defect #4031 was opened for.
+#   * **Report-only, in the strongest available sense.** The arm is not a term of
+#     `matches_production_defaults` (`build_run_config` below, whose six terms are all
+#     retrieval knobs against `RECALL_*` constants), so `app/uptake.py`'s
+#     `retrieval_gate()` keeps every `--skill-arm` night in its non-regression pool; and
+#     `skill_hit_at_1` is absent from `workers/sources/automod_regression.py::ARMED_METRICS`,
+#     so a collapse in it cannot move a promotion verdict. Both halves are pinned in
+#     tests; #4399's step 6 says two nightly runs are watched before the number counts
+#     as a trend line, and until then nothing may gate on it.
+SKILL_ARM_KEY = "skill_hit_at_1"
+SKILL_ARM_NAME_KEY = "skill_arm_name"
+SKILL_ARM_NOTE_KEY = "skill_arm_note"
+SKILL_ARM_LABELLED_KEY = "skill_arm_labelled_turns"
+#: The arm `eval/run_skill_match_eval.py --tool-arm` publishes as `tool_embed_w2`:
+#: `tool_arm(True)` at its declared defaults (`weight=2.0`, `k=16`). That same command
+#: also publishes `tool_lexical` (0.481 against this arm's 0.722), and production serves
+#: the re-order (`config.yaml` `skills: search_embed_rerank: true`), so the nightly
+#: number is the re-ordered one — recorded by name in the artifact for the same reason.
+SKILL_ARM_NAME = "tool_embed_w2"
+SKILL_ARM_QUERIES = HERE / "skill_match_queries.yaml"
+
+
+class SkillArmUnavailable(RuntimeError):
+    """The arm cannot be scored; the artifact records null and the line reads `absent`."""
+
+
+def score_skill_arm(queries_path: Path | str | None = None) -> dict:
+    """The skill-matcher scorer's own report dict for the arm this nightly publishes.
+
+    Every step is `eval/run_skill_match_eval.py`'s: `load_records`, `active_skill_names`
+    plus `check_labels`, `tool_arm(True)`, `score`. The stale-label check is not
+    decoration — the runner prints the offending labels and `return 2` rather than score
+    them, and a retired skill left in the corpus silently shrinks the labelled
+    denominator that hit@1 divides by. Raising here is the in-process form of that exit
+    code, so a re-label owed reaches the nightly as `skill=absent` naming the label
+    rather than as a hit@1 move.
+
+    Raises `SkillArmUnavailable` for a refusal the runner would exit 2 on, and lets
+    anything else (unreadable file, unparseable YAML, an embedder that never answers)
+    propagate as itself. `attach_skill_arm` turns all of it into a null.
+    """
+    from eval import run_skill_match_eval as skill_eval
+
+    path = Path(queries_path) if queries_path else SKILL_ARM_QUERIES
+    records = skill_eval.load_records(path)
+    stale = skill_eval.check_labels(records, skill_eval.active_skill_names())
+    if stale:
+        raise SkillArmUnavailable(
+            f"{len(stale)} stale skill label(s) in {path}, e.g. {stale[0]}")
+    return skill_eval.score(records, skill_eval.tool_arm(True))
+
+
+def attach_skill_arm(summary: dict, *, enabled: bool,
+                     queries_path: Path | str | None = None) -> bool:
+    """Write the arm's fields into `summary["overall"]`; return whether they were written.
+
+    `enabled=False` writes NOTHING, which is the clause: a default run has to stay
+    byte-comparable with the nightly series since 2026-09-23, where no `skill`-bearing
+    key exists. A `null` on an unasked arm would also read as "scored, found nothing".
+
+    When enabled, the key is always present and its value is null on any failure —
+    `score()`'s own `rate()` already returns None over a zero labelled population, so the
+    three shapes that mean "no verdict" all land as null and none of them as 0.0.
+    `skill_arm_note` carries why, because an absent number nobody can explain gets
+    re-measured by hand at 06:30.
+    """
+    if not enabled:
+        return False
+    overall = summary["overall"]
+    try:
+        report = score_skill_arm(queries_path)
+    except Exception as exc:  # noqa: BLE001 — a report-only arm never fails the run
+        overall[SKILL_ARM_KEY] = None
+        overall[SKILL_ARM_LABELLED_KEY] = None
+        overall[SKILL_ARM_NAME_KEY] = SKILL_ARM_NAME
+        overall[SKILL_ARM_NOTE_KEY] = (
+            f"{type(exc).__name__}: {exc}"[:400] or type(exc).__name__)
+        return True
+    hit1 = report.get("hit@1")
+    labelled = report.get("labelled_turns")
+    overall[SKILL_ARM_KEY] = hit1
+    overall[SKILL_ARM_LABELLED_KEY] = labelled
+    overall[SKILL_ARM_NAME_KEY] = SKILL_ARM_NAME
+    overall[SKILL_ARM_NOTE_KEY] = (
+        None if hit1 is not None else
+        f"the scorer published no hit@1: {labelled} labelled turn(s) in the corpus, so "
+        f"there is no denominator to divide by")
+    return True
+
+
+def skill_arm_line(overall: dict) -> str:
+    """The printed arm line, and the `absent` spelling the skill quotes verbatim.
+
+    Shaped by `unverified=absent` (`_cf_unverified_text` above): "the arm could not be
+    scored" and "the arm scored zero hits" are different facts and only one of them is a
+    pass, so the failure prints the word `absent` and the reason, never
+    `skill_hit_at_1=0`. The denominator rides on the line for the same reason #763 put
+    `(n=50/81)` on the others — a rate without its population is a rate somebody
+    extrapolates from.
+    """
+    value = overall.get(SKILL_ARM_KEY)
+    if value is None:
+        note = overall.get(SKILL_ARM_NOTE_KEY) or "the arm reported no value"
+        return f"         skill arm: skill=absent ({note})"
+    return (f"         skill arm: skill={value}  "
+            f"(hit@1 over {overall.get(SKILL_ARM_LABELLED_KEY)} labelled turns, "
+            f"arm={overall.get(SKILL_ARM_NAME_KEY)})")
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The CLI's parser, as a function so a test can read its real defaults.
 
@@ -2591,6 +2718,21 @@ def build_parser() -> argparse.ArgumentParser:
                     default=True,
                     help="Skip the perturbed twin of every query (halves the "
                          "run; summary then carries null counterfactual rates)")
+    # Report-only arm (#4399), deliberately NOT a knob: no retrieval parameter of this
+    # run changes, so `matches_production_defaults` stays true and the night keeps its
+    # place in `app/uptake.py`'s pool. The cost is real and separate — 208-ish skill
+    # vectors plus one embed per turn at ~150 ms
+    # (`eval/run_skill_match_eval.py:_build_vectors`, `app.qwen3_embed`), cached under
+    # `DATA_ROOT/eval/skill-embed-cache.json` — and it is NOT in
+    # `tests/test_eval_corpus_guard.py`'s wall-clock arithmetic, which derives the
+    # nightly ceiling from the retrieval gold set only. That is why #4399's timing check
+    # is a human clause against a live run rather than a guard.
+    ap.add_argument("--skill-arm", action="store_true",
+                    help="Also score eval/skill_match_queries.yaml through "
+                         "eval/run_skill_match_eval.py's own scorer (the "
+                         "tool_embed_w2 skills_search arm) and record "
+                         "summary.overall.skill_hit_at_1; report-only, adds no "
+                         "retrieval knob")
     return ap
 
 
@@ -2944,6 +3086,14 @@ def main() -> int:
     # label may name; the cost is bounded by EPISODIC_LEG_MAX_ITEMS recall calls
     # (~60 s at this corpus's measured 971 ms per call).
     floor_leg = attach_episodic_floor_leg(out)[EPISODIC_FLOOR_KEY]
+    # The skills_search arm (#4399). Attached after every retrieval number above is
+    # final, and only when asked for: a run without the flag writes no `skill`-bearing
+    # key at all, so the artifact stays byte-comparable with the series since 2026-09-23.
+    # Nothing between here and `write_text` reads what it writes — the arm scores a
+    # different corpus (`eval/skill_match_queries.yaml`) through a different scorer, and
+    # its one failure mode that could reach the run, an embedder that never answers, is
+    # caught into a null by `attach_skill_arm`.
+    attach_skill_arm(summary, enabled=bool(args.skill_arm))
     out_path = EVAL_BASELINES_DIR / f"{args.label}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
@@ -2958,6 +3108,12 @@ def main() -> int:
               f"mrr={_fmt_rate3(floor_leg['mrr'])}")
     else:
         print(f"Episodic floor leg: NOT RUN — {floor_leg['reason']}")
+    # Printed here rather than inside `print_table` because it is not a retrieval
+    # metric: it scores a different corpus and `eval_trend_stats.py`/the paired check
+    # must never read it as one. One line, value or `skill=absent` plus the reason, so a
+    # nightly whose skill corpus went stale does not read as an unimproved 0.722.
+    if args.skill_arm:
+        print(skill_arm_line(summary["overall"]))
 
     print_table(records, summary)
     verdict = out["latency_budget"]

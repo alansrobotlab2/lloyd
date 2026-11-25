@@ -1703,8 +1703,8 @@ def test_predating_the_builder_key_cannot_blank_the_agreement(tmp_path, monkeypa
 #: file, so the same property is asserted here for the whole set.
 CITED_PROSE_LINES: list[tuple[int, str]] = [
     (128, "def _corpus_provenance"),        # architecture/retrieval.md:87
-    (2702, '"matches_production_defaults": ('),  # architecture/autonomy-jobs.md:1274
-    (2947, "EVAL_BASELINES_DIR"),           # architecture/measurement.md:38
+    (2844, '"matches_production_defaults": ('),  # architecture/autonomy-jobs.md:1303
+    (3097, "EVAL_BASELINES_DIR"),           # architecture/measurement.md:38
 ]
 
 
@@ -1721,12 +1721,19 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
     rationale lives in `eval/label_agreement_ceiling.py`, the module that owns the
     command. A round that genuinely has to move the harness re-numbers the citations in
     `architecture/` AND this list, in the commit that does it.
+
+    #4399 is such a round: the `skills_search` nightly arm put 156 lines above the
+    conjunction (the `score_skill_arm`/`attach_skill_arm`/`skill_arm_line` block, its
+    constants, the `--skill-arm` declaration and the `main()` call), so both citations
+    moved — 2702→2844 and 2947→3097 — and the two `architecture/` pages were re-numbered
+    in the same commit as this list, which is the only order in which the rule holds.
     """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 2975, (
-        f"eval/run_eval.py is {len(lines)} lines, not the 2,975 every `architecture/` "
-        "line citation and this list were re-numbered to on 2026-11-20, when #4404's "
-        "episodic-floor leg grew it from 2,735 — behaviour, not prose, so the rule was "
+    assert len(lines) == 3131, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 3,131 every `architecture/` "
+        "line citation and this list were re-numbered to on 2026-11-25, when #4399's "
+        "skills_search arm grew it from the 2,975 #4404's episodic-floor leg had reached "
+        "on 2026-11-20 (from 2,735 before that) — behaviour, not prose, so the rule was "
         "the re-number this node documents rather than line-neutrality. Re-number in the "
         "one commit that moves the harness again, or make the change line-neutral like "
         "#4050's")
