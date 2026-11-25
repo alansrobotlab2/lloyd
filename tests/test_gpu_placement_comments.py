@@ -23,6 +23,8 @@ import ast
 import re
 from pathlib import Path
 
+import pytest
+
 from tests.test_qwen3_tts_omni_launcher import GPU3_UUID
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -318,7 +320,13 @@ _ENV_KEY = re.compile(r"^\s*(?:environment|Environment)\s*=")
 #: pairs with commas: `CUDA_VISIBLE_DEVICES="4",LD_LIBRARY_PATH="…"` is one field, not
 #: a card list, and a value that ran to the end of the line read every later variable
 #: as a card.
-_CUDA_ASSIGN = re.compile(r"CUDA_VISIBLE_DEVICES=([^\s,]+)")
+#: Widened for #4572 to both separators the surfaces use: `=` for supervisord and
+#: systemd, `:` for the Python dict entry in `QMD_ENV`, the dict the nightly passes
+#: as `env=` to every qmd CLI call. One reader for all three spellings, because a
+#: second regex for the third is the same blind spot #4473 was filed against. The
+#: widening only ADDS what parses — every string `=`-only used to match, it matches
+#: still — and `test_the_widened_reader_still_parses_both_service_surfaces` pins that.
+_CUDA_ASSIGN = re.compile(r"CUDA_VISIBLE_DEVICES\s*[:=]\s*([^\s,]+)")
 
 #: The lines that make a file actually run something, on either surface.
 _EXEC_KEY = re.compile(r"^\s*(?:ExecStart|command)\s*=")
@@ -390,8 +398,39 @@ def _qmd_runners() -> dict[str, str]:
             assert pin is not None, (
                 f"{path.name} runs qmd with no card pinned in its environment")
             runners[path.name] = pin
-    assert runners, "no qmd runner pins a card on either surface: the glob or the parse is broken"
+    # #4572: the nightly's own CLI env is qmd's fourth runner, and it lives on a
+    # third surface none of these globs reach — a Python dict in a script.
+    script = MAINTENANCE.read_text(encoding="utf-8")
+    pin = _qmd_env_pin(script)
+    assert pin is not None, (
+        f"{MAINTENANCE.name} runs qmd with no card pinned in its QMD_ENV dict")
+    runners[MAINTENANCE.name] = pin
+    assert runners, "no qmd runner pins a card on any surface: the glob or the parse is broken"
     return runners
+
+
+def _qmd_env_pin(text: str) -> str | None:
+    """The card a `QMD_ENV` dict pins. Not `_runner_pin`: that one is deliberately
+    scoped to lines beginning `environment=`/`Environment=`, which is the whole point
+    on the conf and unit surfaces (`test_the_derivation_reads_the_environment_line_not_its_prose`
+    is why), and a dict declaration matches neither key. Same rule though: at most one
+    card, or the question "which card is qmd on" has stopped being answerable."""
+    cards = _cuda_cards_in("\n".join(_qmd_env_declarations(text)))
+    assert len(cards) <= 1, (
+        f"QMD_ENV pins {sorted(cards)}: this section asks which card qmd runs on, so a "
+        "multi-card dict needs the question restated rather than answered arbitrarily")
+    return next(iter(cards)) if cards else None
+
+
+def _off_card_detail(runners: dict[str, str]) -> list[str]:
+    """Each off-card runner spelled out with BOTH cards in the sentence — the runner's
+    own and the daemon's. #4572 clause 4: a mismatch that reports as
+    "runs qmd with no card pinned" sends the next reader looking for a missing line
+    when the real fault is a wrong value, and the two fixes are not the same fix."""
+    home = runners["agent-qmd-daemon.conf"]
+    return [f"{name} pins CUDA_VISIBLE_DEVICES={card} while agent-qmd-daemon.conf pins "
+            f"CUDA_VISIBLE_DEVICES={home}"
+            for name, card in sorted(_off_card(runners).items())]
 
 
 def _off_card(runners: dict[str, str]) -> dict[str, str]:
@@ -412,9 +451,10 @@ def test_qmd_runners_are_swept_from_both_surfaces_and_agree_on_one_card():
     units = {n for n in runners if n.endswith(".service")}
     assert confs and units, f"the sweep reached only one surface: {sorted(runners)}"
     assert {"agent-qmd-daemon.conf", "agent-qmd-watcher.conf",
-            "lloyd-qmd-cleanup.service"} <= set(runners), sorted(runners)
-    off = _off_card(runners)
+            "lloyd-qmd-cleanup.service", MAINTENANCE.name} <= set(runners), sorted(runners)
+    off = _off_card_detail(runners)
     assert not off, (
+        f"these qmd runners disagree with the daemon: {off}. "
         f"these qmd runners are on another card than agent-qmd-daemon.conf: {off}. The "
         "exposure is latent rather than current — cleanup binds no model today — but the "
         "day it loads the embedder or reranker, an off-card runner puts 6+ GiB on the "
@@ -492,6 +532,176 @@ def test_the_cleanup_unit_keeps_every_device_free_cuda_variable():
                  "LD_LIBRARY_PATH=/usr/lib:/opt/cuda/lib64",
                  "CUDA_PATH=/opt/cuda", "CUDA_HOME=/opt/cuda"):
         assert decl in env, f"{decl!r} is no longer in the unit's environment: {env!r}"
+
+
+# --- #4572: the nightly's own CLI env is qmd's fourth runner ------------------
+
+MAINTENANCE = ROOT / "scripts" / "maintenance" / "qmd_index_maintenance.py"
+PROBE_PAGE = (Path.home() / "obsidian" / "skills" / "qmd-index-maintenance"
+              / "daemon-health-probe.md")
+
+#: The llama.cpp device-mode key every qmd service runner sets. Read off the runners
+#: rather than typed as a literal, for the same reason the card is derived: a second
+#: copy of the value is a second thing to drift.
+_LLAMA_GPU = re.compile(r"QMD_LLAMA_GPU[=:]\s*\"?([^\s,\"']+)\"?")
+
+
+def _qmd_env_declarations(text: str) -> list[str]:
+    """`QMD_ENV`'s entries as declaration lines, read off the syntax tree.
+
+    `ast` and not an import, and not a whole-file regex: importing a 4,100-line
+    nightly to answer a question about six lines of it runs its module body, and
+    `ast.literal_eval` over the whole dict dies on `HOME` and `PATH`, whose values are
+    f-strings — the two entries nobody here cares about. So each value is read on its
+    own: a literal comes back as its text, anything else comes back as a
+    `<node-type>` placeholder, which keeps the entry visible to a card scan without
+    pretending to know what a computed value evaluates to.
+
+    Spelled `KEY=value` so the declarations this returns go through the same
+    `_runner_pin` the conf and systemd surfaces use: one pin reader, three surfaces."""
+    for node in ast.parse(text).body:
+        if isinstance(node, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == "QMD_ENV" for t in node.targets):
+            assert isinstance(node.value, ast.Dict), (
+                "QMD_ENV is no longer a dict literal, so this reader's premise is gone — "
+                "rewrite it against whatever the nightly builds its CLI env from now")
+            decls = []
+            for key, val in zip(node.value.keys, node.value.values):
+                if not isinstance(key, ast.Constant):
+                    continue
+                if isinstance(val, ast.Constant) and isinstance(val.value, (str, int)):
+                    decls.append(f"{key.value}={val.value}")
+                else:
+                    decls.append(f"{key.value}=<{type(val).__name__}>")
+            assert decls, "QMD_ENV has no entries to read"
+            return decls
+    raise AssertionError(
+        f"{MAINTENANCE.name} has no module-level QMD_ENV dict: the nightly's CLI env moved")
+
+
+def test_the_nightly_script_is_qmds_fourth_runner_on_the_daemons_card():
+    """Clauses 1 and 3. The nightly passes `QMD_ENV` as `env=` to every qmd CLI call
+    it makes — `subprocess` `env=` REPLACES the child's environment, so whatever this
+    dict says is the card the nightly's `qmd embed` (a multi-GB GGUF load) lands on.
+    It was still on card 0, the card a372c876 moved qmd off on 2026-11-10, while the
+    daemon, the watcher and the cleanup unit were re-pinned to 4 by #4473: a runner
+    the 2026-11-10 sweep never touched because no guard read a Python dict. Its card
+    here is the daemon's card, DERIVED, and the sweep covers it because the dict is
+    parsed, not because a glob was widened — see
+    `test_a_glob_widening_alone_would_have_missed_the_nightly`."""
+    script = MAINTENANCE.read_text(encoding="utf-8")
+    assert re.search(r"env=QMD_ENV\b", script), (
+        "QMD_ENV is no longer passed to a subprocess as env=, so this node's claim that "
+        "the dict is a qmd runner needs restating against whatever replaced it")
+    runners = _qmd_runners()
+    assert MAINTENANCE.name in runners, sorted(runners)
+    assert runners[MAINTENANCE.name] == runners["agent-qmd-daemon.conf"], _off_card_detail(runners)
+
+
+def test_no_cuda_visible_devices_zero_survives_in_the_nightly_script():
+    """Clause 1's second half, the literal one. Whole file, so a comment that spells
+    the retired assignment trips it too — `0` is not "no card", it is the desktop's
+    3090, the card 6+ GiB of embedder must not land on."""
+    cards = _cuda_cards_in(MAINTENANCE.read_text(encoding="utf-8"))
+    assert "0" not in cards, (
+        f"{MAINTENANCE.name} still assigns CUDA_VISIBLE_DEVICES to card 0: {cards}. "
+        "qmd's card is derived from agent-qmd-daemon.conf; a runner naming a card of "
+        "its own is how #4473 and then #4572 happened.")
+
+
+def test_qmd_env_carries_the_llama_gpu_the_three_service_runners_carry():
+    """Clause 2. Without `QMD_LLAMA_GPU=cuda` the fork's `auto` device mode may pick
+    its Vulkan build, and ggml-vulkan creates a logical device for every GPU it can
+    see — measured 2026-11-25, that aborts the model load with rc 134 on a box with
+    GPU 1 at 95,094/97,887 MiB and GPU 2 at 24,168/24,576 MiB, which is what #4571
+    misread as a broken CLI. The value is read off the three service runners so this
+    node cannot drift from them."""
+    wanted = set()
+    for name in ("agent-qmd-daemon.conf", "agent-qmd-watcher.conf",
+                 "lloyd-qmd-cleanup.service"):
+        path = (CONF_D / name) if name.endswith(".conf") else (SYSTEMD / name)
+        m = _LLAMA_GPU.search("\n".join(_env_declarations(path.read_text(encoding="utf-8"))))
+        assert m, f"{name} no longer sets QMD_LLAMA_GPU: the value this compares to is gone"
+        wanted.add(m.group(1))
+    assert wanted == {"cuda"}, wanted
+    nightly = _LLAMA_GPU.search("\n".join(_qmd_env_declarations(
+        MAINTENANCE.read_text(encoding="utf-8"))))
+    assert nightly, (
+        f"{MAINTENANCE.name}'s QMD_ENV sets no QMD_LLAMA_GPU, so its CLI calls can load "
+        f"on Vulkan while the service runners set {sorted(wanted)}")
+    assert nightly.group(1) in wanted, (nightly.group(1), wanted)
+
+
+def test_the_sweep_goes_red_when_the_nightly_dict_slips_off_the_daemons_card():
+    """Clause 4, and the control that makes clause 3's reader real: the drift cut in
+    memory, exactly as #4473's unit control does it, so nothing shipped is edited to
+    prove a node can fail. The dict entry must fail as a CARD CONFLICT naming both
+    cards — not as "runs qmd with no card pinned", which is a different fault with a
+    different fix and would send the next reader hunting for a missing line."""
+    text = MAINTENANCE.read_text(encoding="utf-8")
+    card = _qmd_runners()["agent-qmd-daemon.conf"]
+    drifted = re.sub(r'("CUDA_VISIBLE_DEVICES":\s*")\d(")',
+                     lambda m: f"{m.group(1)}0{m.group(2)}", text)
+    assert drifted != text, (
+        "the nightly's QMD_ENV no longer pins a card in the shape this cut expects, so "
+        "the control below proves nothing")
+    pin = _qmd_env_pin(drifted)
+    assert pin == "0", f"the drifted dict reads as card {pin!r}, not as card 0"
+    detail = _off_card_detail({**_qmd_runners(), MAINTENANCE.name: pin})
+    assert detail == [
+        f"{MAINTENANCE.name} pins CUDA_VISIBLE_DEVICES=0 while agent-qmd-daemon.conf "
+        f"pins CUDA_VISIBLE_DEVICES={card}"], detail
+    assert "no card pinned" not in detail[0], detail
+
+
+def test_a_glob_widening_alone_would_have_missed_the_nightly():
+    """Why clause 3 is "parse the dict" and not "add a glob": the maintenance script
+    matches neither key the sweep's own loop looks for, so a third entry in
+    `QMD_RUNNER_SURFACES` files it as "runs nothing" and the node stays green with the
+    fourth runner on the retired card. Measured, not argued — these three assertions
+    are the triage finding pinned, and they fail the day the sweep's shape changes."""
+    text = MAINTENANCE.read_text(encoding="utf-8")
+    assert not any(_EXEC_KEY.match(ln) for ln in text.splitlines()), (
+        "the sweep's exec-key test now matches the nightly script, so a glob alone "
+        "might work and this node's reason for the dict reader has to be restated")
+    assert not _env_declarations(text), (
+        "the environment-key reader now matches the nightly script: same restatement")
+    assert _cuda_cards_in(text) == {_qmd_runners()[MAINTENANCE.name]}, (
+        "a whole-file card scan of the nightly no longer agrees with the dict reader")
+
+
+def test_the_widened_reader_still_parses_both_service_surfaces():
+    """`_CUDA_ASSIGN` grew a second separator for the dict spelling. The widening must
+    stay additive, so the two surfaces it already read are asserted here at their real
+    values: supervisord's quoted `CUDA_VISIBLE_DEVICES="4"` inside a comma-joined
+    `environment=` field, and systemd's bare `CUDA_VISIBLE_DEVICES=4` on a line that
+    carries three variables."""
+    assert _runner_pin(QMD_DAEMON_CONF.read_text(encoding="utf-8")) == "4"
+    assert _runner_pin(CLEANUP_UNIT.read_text(encoding="utf-8")) == "4"
+    assert _cuda_cards_in('"CUDA_VISIBLE_DEVICES": "4"') == {"4"}, (
+        "the dict spelling is what this widening was for")
+    assert _cuda_cards_in("CUDA_VISIBLE_DEVICES=0") == {"0"}
+
+
+@pytest.mark.skipif(not PROBE_PAGE.is_file(),
+                    reason="the vault root is not on this box, so the skill page is not "
+                           "here to read (tests/conftest.py isolates HOME for the base probe)")
+def test_the_health_probe_page_retracts_the_broken_vsearch_arm():
+    """Clause 5, in the tree that actually ships the prose: the skill page is what
+    every future qmd debug reads, and the section #4571's run landed there told
+    readers the stronger of the two health probes was dead. The retraction keeps the
+    one true half — an abort says nothing about the daemon — and replaces the four
+    false statements with the measurements: the env rule, the variable ggml really
+    reads, and the command that measures device order."""
+    flat = " ".join(PROBE_PAGE.read_text(encoding="utf-8").split())
+    assert "RETRACTED" in flat, "the broken-arm section is no longer marked retracted"
+    assert "is itself broken" not in flat, "the page still headlines the arm as broken"
+    assert "abort is not evidence of a wedged daemon" in flat, (
+        "the retraction must keep the true half: an abort is not evidence about the daemon")
+    assert "QMD_LLAMA_GPU=cuda" in flat, "the page must state the env rule for a hand vsearch"
+    assert "qmd doctor" in flat, "the page must name the device-order measurement"
+    assert "GGML_VK_VISIBLE_DEVICES" in flat, (
+        "the page must correct GGML_VK_VISIBLE_GPUS to the name libggml-vulkan.so reads")
 
 
 def test_the_cleanup_unit_names_its_card_and_says_cleanup_loads_no_model():

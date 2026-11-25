@@ -398,14 +398,34 @@ VEC0_REBUILD_RULED_OUT = (
     "the backup put back automatically if the check after the swap fails. A command-line "
     "`--swap` still needs a terminal.")
 
+#: qmd's card, GPU 4 since 2026-11-10 (a372c876, "move qmd's whole stack onto the
+#: 3090 at index 4"). This dict is qmd's FOURTH runner: every qmd CLI call this route
+#: makes passes it as `env=`, and `subprocess` replaces the child's environment
+#: wholesale, so the card named here is the card the nightly's `qmd embed` — a
+#: multi-GB GGUF load — lands on. Until #4572 it named the card qmd had been moved
+#: OFF of, which no guard could see because the three #4473 sweeps read only
+#: `conf.d` and `systemd`, never a Python dict. `tests/test_gpu_placement_comments.py`
+#: now parses this dict and compares its card to the one
+#: `agent-services/supervisor/conf.d/agent-qmd-daemon.conf` pins, naming both cards on
+#: a mismatch: a card move is a sweep over the confs, `lloyd-qmd-cleanup.service` and
+#: this file together, and the test goes red on the file that gets missed.
+#:
+#: `QMD_LLAMA_GPU=cuda` is the value all three service runners set. Without it the
+#: fork's `auto` device mode can pick its Vulkan build, and ggml-vulkan then creates a
+#: logical device for every GPU it can see — measured 2026-11-25 on a box with GPU 1 at
+#: 95,094/97,887 MiB and GPU 2 at 24,168/24,576 MiB, that aborts the model load with rc
+#: 134, which #4571 misread as a broken CLI. The env rule for a hand `vsearch`, and the
+#: `qmd doctor` reading that identifies which card a load actually landed on, are in
+#: `~/obsidian/skills/qmd-index-maintenance/daemon-health-probe.md`.
 QMD_ENV = {
     "HOME": str(Path.home()),
     "PATH": f"/opt/cuda/bin:{Path.home()}/.local/bin:/usr/local/bin:/usr/bin:/bin",
     "CUDA_DEVICE_ORDER": "PCI_BUS_ID",
-    "CUDA_VISIBLE_DEVICES": "0",
+    "CUDA_VISIBLE_DEVICES": "4",
     "CUDA_PATH": "/opt/cuda",
     "CUDA_HOME": "/opt/cuda",
     "LD_LIBRARY_PATH": "/usr/lib:/opt/cuda/lib64",
+    "QMD_LLAMA_GPU": "cuda",
     "QMD_VEC_BACKEND": "bit",
 }
 
