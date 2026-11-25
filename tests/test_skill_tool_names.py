@@ -78,7 +78,7 @@ from app.paths import (  # noqa: E402
     ACCOUNT_HOME, DATA_ROOT, EVAL_DJEV_REPORTS_DIR, IS_WORKTREE, LIVE_CHECKOUT,
     PRODUCTION_DATA_ROOT)
 
-SKILLS_DIRS = [Path.home() / "obsidian" / "skills", ROOT / "skills"]
+#: No root list is bound here, deliberately: #4365. `_skill_roots()` reads the walker's.
 
 # Tool names that were never real in Lloyd, or no longer are. The first group
 # was found in active skills on 2026-09-04.
@@ -168,17 +168,79 @@ ALLOWED_TO_MENTION = {
 # shielded by an entry no scan could ever have reached.
 
 
+def _skill_roots() -> list[Path]:
+    """The roots the fence walks: the walker's own, read at call time (#4365).
+
+    `agent_mcp.skills.skill_roots()` is the single answer to "where do live skills
+    sit" that #1294 established — `vault_root()/skills` plus every entry `config.yaml`
+    `skills.directories` names — and it re-reads the module-level `SKILLS_DIRS` on
+    every call, so a probe that points that name at a fixture tree moves this walk
+    with it. The pair this file bound at import answered the same question a second
+    time and missed both inputs the walker honours: under a relocated vault
+    (`LLOYD_VAULT_ROOT`) the prompt followed the vault and the fence did not, and a
+    skill installed under a second configured root reached the advertised index
+    without ever being phantom-checked. Its `<repo>/skills` half named a directory
+    `agent_mcp/skills.py:38` records as never having existed on this box.
+    """
+    from agent_mcp.skills import skill_roots
+
+    return skill_roots()
+
+
+def _primary_skill_root() -> Path:
+    """The walker's built-in root — where `.archived/` and a spilled skill's sibling
+    files sit. `skill_roots()` puts `vault_root()/skills` first and appends the
+    configured roots after it, so this follows a relocated vault, which the hardcoded
+    pair this replaced could not. Asserted rather than defaulted: a walker with no root
+    at all has no corpus to bound, which is a broken environment, not an empty archive.
+    """
+    roots = _skill_roots()
+    assert roots, (
+        "agent_mcp.skills.skill_roots() named no root at all, so there is no skill tree "
+        "to read the archive or a skill's folder out of")
+    return roots[0]
+
+
+def _checked_skill_files(files: list[Path]) -> list[Path]:
+    """An empty walk is a failure on the live checkout, and never silently quiet.
+
+    The module fixture used to `pytest.skip` unconditionally on an empty walk, and in a
+    round's `tests` rung that read as green while contributing nothing:
+    `gate._child_env(isolate_home=True)` moves `$HOME` to the round home, whose
+    `obsidian` is a symlink `scripts/automod/worktree.py:ensure_round_home` makes
+    inside an `except OSError: pass` — a link that failed to form emptied the walk
+    exactly as a genuine absence would. `LIVE_CHECKOUT` and `IS_WORKTREE` were already
+    imported for the path fence and unused here; on the live checkout, where the vault
+    the prompt serves *is* the tree under guard, an empty walk is damage and says so.
+    """
+    if files:
+        return files
+    if not IS_WORKTREE and ROOT == LIVE_CHECKOUT:
+        pytest.fail(
+            f"the fence walked zero skills on the live checkout at {LIVE_CHECKOUT} "
+            f"(roots: {[str(p) for p in _skill_roots()]}) — the vault is unreachable, "
+            "so every phantom and path node below would pass by scanning nothing")
+    pytest.skip("no skills directory on this machine")
+
+
+@pytest.fixture(scope="module")
+def skill_files() -> list[Path]:
+    return _checked_skill_files(_active_skill_files())
+
+
 def _active_skill_files() -> list[Path]:
     """Every SKILL.md the prompt actually advertises.
 
-    Mirrors prompt_builder._load_skills_index: dot-prefixed directories are
-    the archive and are excluded, as are quarantined skills.
+    Mirrors prompt_builder._load_skills_index's *rules*: dot-prefixed directories are
+    the archive and are excluded, as are quarantined skills. Its *roots* are the
+    walker's, read at call time by `_skill_roots()`, so the fence cannot scan a
+    different tree from the one the index advertises (#4365).
     """
     from app.prompt_builder import _is_quarantined_skill
 
     out: list[Path] = []
     seen: set[str] = set()
-    for root in SKILLS_DIRS:
+    for root in _skill_roots():
         if not root.exists():
             continue
         for entry in sorted(root.iterdir()):
@@ -191,12 +253,161 @@ def _active_skill_files() -> list[Path]:
     return out
 
 
-@pytest.fixture(scope="module")
-def skill_files() -> list[Path]:
+def _fresh_interpreter_probe(extra_env: dict[str, str]) -> dict:
+    """Re-import this module's walk in a clean interpreter with `extra_env` added.
+
+    The one process boundary the fence's roots cross: `_BUILTIN_SKILL_DIRS` is composed
+    at import (`agent_mcp/skills.py:36`) from `vault_root()`, so an in-process
+    `monkeypatch.setenv` cannot move it — the only honest question about a relocated
+    vault or a moved `$HOME` is what a *fresh interpreter* under that environment walks.
+    Prints one JSON object so the parent compares values, not prose.
+
+    cwd is the checkout, which is what a pytest run always has, and `$LLOYD_DATA` is
+    inherited from conftest's scratch so the child never names the live data root.
+    """
+    script = (
+        "import json, pathlib, sys\n"
+        "sys.path.insert(0, '.')\n"
+        "sys.path.insert(0, 'tests')\n"
+        "import test_skill_tool_names as t\n"
+        "from agent_mcp import skills as s\n"
+        "print('PROBE ' + json.dumps({\n"
+        "  'roots': [str(p) for p in t._skill_roots()],\n"
+        "  'walker': [str(p) for p in s.SKILLS_DIRS],\n"
+        "  'files': [str(p) for p in t._active_skill_files()],\n"
+        "  'vault': str(t.VAULT),\n"
+        "  'account_home': str(t.ACCOUNT_HOME),\n"
+        "  'path_home': str(pathlib.Path.home()),\n"
+        "}))\n"
+    )
+    proc = subprocess.run([sys.executable, "-c", script], cwd=ROOT,
+                          env={**os.environ, **extra_env},
+                          capture_output=True, text=True, timeout=180)
+    line = next((ln for ln in proc.stdout.splitlines() if ln.startswith("PROBE ")), None)
+    assert proc.returncode == 0 and line, (
+        f"the fence probe died (rc={proc.returncode}) under {extra_env}\n"
+        f"stdout: {proc.stdout[-1200:]}\nstderr: {proc.stderr[-2500:]}")
+    return json.loads(line[len("PROBE "):])
+
+
+def _planted_skill(skills_root: Path, name: str, body: str) -> Path:
+    """A live-looking skill at `skills_root/<name>/SKILL.md`, for root probes."""
+    skill_dir = skills_root / name
+    skill_dir.mkdir(parents=True, exist_ok=True)
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(f"---\nstatus: active\n---\n{body}\n", encoding="utf-8")
+    return skill_file
+
+
+def test_a_relocated_vault_is_the_tree_the_fence_walks(tmp_path):
+    """#4365 clause 1: `LLOYD_VAULT_ROOT` moves the fence with the prompt.
+
+    One planted skill under a relocated vault, in a subprocess because the walker's
+    roots are composed at import. The hardcoded pair was
+    `Path.home()/"obsidian"/"skills"` and `<repo>/skills`, so the planted skill reached
+    the advertised index while no scan of the fence ever saw it.
+    """
+    fake_vault = tmp_path / "fakevault"
+    planted = _planted_skill(fake_vault / "skills", "planted-under-a-relocated-vault",
+                             "Call `web_search` for every lookup.")
+    out = _fresh_interpreter_probe({"LLOYD_VAULT_ROOT": str(fake_vault)})
+    assert out["roots"] == out["walker"], (
+        f"the fence walks {out['roots']} while the walker names {out['walker']}: two "
+        "answers to where skills live is the defect")
+    assert str(fake_vault / "skills") in out["roots"], (
+        f"a relocated vault is not among the roots the fence walks: {out['roots']}")
+    assert str(planted) in out["files"], (
+        f"the skill under the relocated vault was never walked: {out['files']}")
+
+
+def test_a_second_configured_root_cannot_hide_a_phantom_tool(monkeypatch, tmp_path):
+    """#4365 clause 2: a second `skills.directories` entry cannot hide a phantom tool.
+
+    `agent_mcp.skills.SKILLS_DIRS` is the module-level name `skill_roots()` reads on
+    every call, so pointing it at a temp root is what installing a skill under a second
+    configured root amounts to — the same handle
+    `tests/test_skill_lint_clip_ordering.py:127` uses on that module's roots. The walk
+    has to return the planted file and the matcher has to report its name.
+    """
+    from agent_mcp import skills as skills_mod
+
+    planted = _planted_skill(tmp_path / "extra-skills", "installed-in-a-second-root",
+                             "Call `web_search` for every lookup.")
+    monkeypatch.setattr(skills_mod, "SKILLS_DIRS", [planted.parent.parent])
     files = _active_skill_files()
-    if not files:
-        pytest.skip("no skills directory on this machine")
-    return files
+    assert files == [planted], (
+        "the walk did not follow the second configured root: "
+        f"{[str(f) for f in files]}")
+    offenders = _phantom_offenders(files)
+    assert offenders == {"installed-in-a-second-root": ["web_search"]}, (
+        f"a skill in a second configured root named a phantom tool and the matcher "
+        f"reported {offenders}")
+
+
+def test_the_fence_root_list_is_the_walkers_and_never_the_repo_skills_root():
+    """#4365 clause 3 (first half), on this checkout as it stands.
+
+    `<repo>/skills` never existed on this box, and `agent_mcp/skills.py:38` records the
+    same entry being dropped from `_BUILTIN_SKILL_DIRS` on 2026-11-09 for exactly that
+    reason — the fence's half of it contributed zero files while claiming a root the
+    code had already retired. Asserted on values, not prose: the walk's roots are the
+    walker's list, and the checkout's `skills` directory is not in either.
+    """
+    from agent_mcp.skills import skill_roots as walker_skill_roots
+
+    roots = _skill_roots()
+    assert roots == walker_skill_roots(), (
+        "the fence's roots and the walker's are not one list on this checkout")
+    assert ROOT / "skills" not in roots, (
+        f"<repo>/skills is back in the roots the fence walks: {[str(p) for p in roots]}")
+    assert roots, "the walker named no skill root at all on this checkout"
+
+
+def test_an_empty_walk_fails_the_live_checkout_instead_of_skipping(monkeypatch):
+    """#4365 clause 4: an empty walk is silent no more than once.
+
+    Both arms are simulated the way the path fence's own scope nodes do it, by
+    `_point_the_fence`'s technique of rebinding the module's checkout anchors — the
+    live arm cannot be reached honestly from inside the live checkout, which is the
+    suite refuses (`tests/conftest.py:320`).
+    """
+    mod = sys.modules[__name__]
+    monkeypatch.setattr(mod, "IS_WORKTREE", False)
+    monkeypatch.setattr(mod, "ROOT", LIVE_CHECKOUT)
+
+    with pytest.raises(pytest.fail.Exception) as live:
+        _checked_skill_files([])
+    assert "live checkout" in str(live.value), (
+        f"the live-checkout arm skipped past an empty walk with this message: {live.value}")
+
+    monkeypatch.setattr(mod, "IS_WORKTREE", True)
+    with pytest.raises(pytest.skip.Exception) as worktree:
+        _checked_skill_files([])
+    assert "no skills directory" in str(worktree.value)
+
+    files = _checked_skill_files(_active_skill_files())
+    assert files, (
+        "the guard fired on a non-empty walk — it may refuse silence, not the check")
+
+
+def test_the_path_fence_reads_the_account_vault_under_a_moved_home(tmp_path):
+    """#4365 clause 5: `VAULT` follows `ACCOUNT_HOME`, like the rule above the imports.
+
+    `$HOME` moved to an empty directory in a subprocess, because `Path.home()` is
+    exactly what `gate._child_env` moves and the module constant is composed at import.
+    The path-absent node's subject reads are `(VAULT / "skills" / ...)`, so a
+    `Path.home()`-derived `VAULT` reads a tree that does not exist and the node passes
+    on a vault it never opened — the failure the `ACCOUNT_HOME` comment block above the
+    imports already argues against, one class over from the roots.
+    """
+    fake_home = tmp_path / "fakehome"
+    fake_home.mkdir()
+    out = _fresh_interpreter_probe({"HOME": str(fake_home)})
+    assert out["path_home"] == str(fake_home), (
+        f"the subprocess did not run under a moved $HOME: {out['path_home']}")
+    assert out["vault"] == str(Path(out["account_home"]) / "obsidian"), (
+        f"VAULT read {out['vault']} while $HOME was {out['path_home']} and the account "
+        f"home is {out['account_home']} — the path fence was reading neither")
 
 
 _PHANTOM_PATTERN = re.compile(
@@ -444,7 +655,7 @@ def _archived_skill_names() -> frozenset[str]:
     into either file this round edits would re-add the string the shipped verification
     greps both of them for (#4363).
     """
-    archive = SKILLS_DIRS[0] / ".archived"
+    archive = _primary_skill_root() / ".archived"
     if not archive.is_dir():
         return frozenset()
     return frozenset(
@@ -569,7 +780,7 @@ def test_no_exemption_set_carries_an_archived_skill_and_losing_it_exposed_nothin
     """
     archived = _archived_skill_names()
     assert archived, (
-        f"nothing lives under {SKILLS_DIRS[0] / '.archived'} on this machine, so this "
+        f"nothing lives under {_primary_skill_root() / '.archived'} on this machine, so this "
         "node would pass with no archived name to check against anything")
     lint_set = _set_literal(_lint_source(), "PHANTOM_EXEMPT")
 
@@ -650,14 +861,59 @@ def test_a_dead_entry_in_an_exemption_ledger_reddens_the_bound(skill_files):
         assert ghost in complaints[0] and label in complaints[0], complaints[0]
 
 
+def _skill_candidates(name: str) -> list[Path]:
+    """Where `name`'s SKILL.md could be, in the order the walk prefers it.
+
+    The walker's own roots, read at call time — the same list `_active_skill_files()`
+    walks — with the built-in root's folder ahead of them, so a probe asking after one
+    skill cannot answer about a different tree than the fence scanned (#4365).
+    """
+    return list(dict.fromkeys(
+        [root / name / "SKILL.md" for root in _skill_roots()]
+        + [_primary_skill_root() / name / "SKILL.md"]))
+
+
+def _web_lookup_skill_body() -> str | None:
+    """The live `web-search-and-fetch` skill body, or None when the walk holds no
+    such skill. Its candidate list is `_skill_candidates()`, the roots the walk reads;
+    it used to rebuild the path from the module's hardcoded pair, which under a
+    relocated vault looked in a tree the prompt was not serving.
+    """
+    for candidate in _skill_candidates("web-search-and-fetch"):
+        if candidate.is_file():
+            return candidate.read_text(encoding="utf-8", errors="replace")
+    return None
+
+
+def test_the_single_skill_probe_reads_the_roots_the_walk_reads(monkeypatch, tmp_path):
+    """#4365 clause 3 (second half): the existence probe walks what the walk walks.
+
+    A planted `web-search-and-fetch` carrying a marker only this node wrote, under a
+    root the walker knows and the old hardcoded pair did not. A probe still reading the
+    pair found the live vault's copy instead, so the marker — not the skill's mere
+    existence — is what makes this able to fail.
+    """
+    from agent_mcp import skills as skills_mod
+
+    planted = _planted_skill(
+        tmp_path / "second-root", "web-search-and-fetch",
+        "http_search is the real tool. marker: probe-roots-follow-the-walker\n\n"
+        "## When to Use\nOnly from this fixture.\n")
+    monkeypatch.setattr(skills_mod, "SKILLS_DIRS", [planted.parent.parent])
+    assert _skill_candidates("web-search-and-fetch")[0] == planted, (
+        f"the probe's candidate list did not follow the walker: "
+        f"{[str(p) for p in _skill_candidates('web-search-and-fetch')]}")
+    body = _web_lookup_skill_body()
+    assert body is not None and "probe-roots-follow-the-walker" in body, (
+        f"the probe read a different tree than the walk: {body!r}")
+
+
 def test_web_lookup_skill_exists_and_names_the_real_tools():
     """The replacement for the archived `websearch` skill must be present and
     correct, or the phantom-name fix has no positive half."""
-    candidates = [d / "web-search-and-fetch" / "SKILL.md" for d in SKILLS_DIRS]
-    found = [p for p in candidates if p.exists()]
-    if not found:
+    body = _web_lookup_skill_body()
+    if body is None:
         pytest.skip("web-search-and-fetch skill not installed on this machine")
-    body = found[0].read_text(encoding="utf-8", errors="replace")
     for tool in ("http_search", "http_fetch", "http_request"):
         assert tool in body, f"web-search-and-fetch must document {tool}"
     # The localhost carve-out has to stay: Bash + curl is correct there.
@@ -668,7 +924,10 @@ def test_web_lookup_skill_exists_and_names_the_real_tools():
 # The same defect one level up: a skill naming a PATH that is not there.
 # ─────────────────────────────────────────────────────────────────────────
 
-VAULT = Path.home() / "obsidian"
+#: Not `Path.home() / "obsidian"`: `gate._child_env` moves `$HOME` to a round home and
+#: `Path.home()` follows it, while the vault is where the account puts it — the same
+#: rule the block above the `app.paths` import gives for `DATA_ROOT` (#4365).
+VAULT = ACCOUNT_HOME / "obsidian"
 
 #: Checked-out source a doc may name. Anything else under the repo root is
 #: runtime state (`_pipeline/`, `sessions/`, `*.db`, logs), which a run creates

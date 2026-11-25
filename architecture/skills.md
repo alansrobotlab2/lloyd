@@ -465,17 +465,21 @@ and three were archived as documenting tools that never existed.
 Two gates now, deliberately at different cadences:
 
 - **`tests/test_skill_tool_names.py`** is the hard one. `_active_skill_files`
-  (`:167`) mirrors the walk's *rules* — dot-dirs and quarantine included — over
-  a root pair the file hardcodes at `:81` rather than the walker's
-  `SKILLS_DIRS`, so what it guards is the live vault, not literally what one
-  turn's index renders. That hardcoded pair is the sixth walk #1294 did not
-  retire, it still names the `<repo>/skills` root 2026-11-09 deleted from the
-  code and `config.yaml` for never existing, and because the module fixture
-  `pytest.skip`s on an empty walk (`:187-192`) while a round's `tests` rung runs
-  with `HOME` pointed at the round home (`_child_env(isolate_home=True)`,
+  (`:231`) mirrors the walk's *rules* — dot-dirs and quarantine included — over the
+  walker's **own** roots, read at call time through `_skill_roots()`, so what it
+  guards is the live vault, not literally what one turn's index renders. Until #4365
+  landed it kept a *second* answer to where skills live, bound at module scope: it
+  missed `LLOYD_VAULT_ROOT` and `config.yaml skills.directories`, so a relocated
+  vault or a second configured root put a skill into the prompt and outside the
+  fence, and its `<repo>/skills` half named the root 2026-11-09 deleted from the code
+  and `config.yaml` for never existing. The module fixture also used to
+  `pytest.skip` on an empty walk while a round's `tests` rung runs with `HOME`
+  pointed at the round home (`_child_env(isolate_home=True)`,
   called at `scripts/automod/gate.py:_run_suite:3779`, and
-  `scripts/automod/worktree.py:ensure_round_home:104` keeps the vault out of it), the
-  fence contributes a **skip** there rather than a check — filed as #4362.
+  `scripts/automod/worktree.py:ensure_round_home:104` keeps the vault out of it), so
+  a fence that scanned nothing could still report a pass; an empty walk on the live
+  checkout now fails outright (`_checked_skill_files`), skipping only in a worktree —
+  the other half of #4362, closed on the same diff.
   Fails on any banned name where it does run. `KNOWN_UNFIXED` is **empty and stays empty**: a new entry means
   a regression, not a grandfathering. A second test guards the guard, asserting
   against live aggregator discovery that nothing in `PHANTOM_TOOLS` has since
