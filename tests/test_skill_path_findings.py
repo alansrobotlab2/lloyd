@@ -11,6 +11,7 @@ suite's rule rather than restating it, and it never blocks the commit.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -266,3 +267,222 @@ def test_the_same_line_numbered_path_without_the_sweep_block_prints(vault):
         f"{_SKILL}: newly names `{_DANGLING_2484}`, which is not in the checkout at "
         f"{REPO_ROOT}"], (
         f"a bare citation of an absent script stopped being a finding: {findings}")
+
+
+# ── the gold-refresh delete edge (#4469) ────────────────────────────────────
+
+#: Where the rung finds the answer key, relative to the repo under commit. The
+#: live one lives in the vault (`~/obsidian/lloyd/bench/`); every node below
+#: seeds its own copy in the synthetic vault, which is what pins the source.
+_GOLD_CARD = "lloyd/bench/bench_016_audit_skill_dead_paths.md"
+
+#: A dead checkout path no skill may name — the shape bench_016 audits for.
+_GOLD_PATH = "scripts/a_script_the_gold_card_still_lists_4469.py"
+_NOT_GOLD = "scripts/a_script_no_card_lists_this_at_all_4469.py"
+
+
+def _card(items: list[str]) -> str:
+    """A `lloyd/bench/*.md` card in the real shape: YAML front matter whose
+    `objective_checks[0].gold_items` is the set
+    `test_skill_dead_path_gold_still_matches_the_skills` compares the skills with,
+    plus prose. Item values carry NO `~/lloyd/` prefix, exactly as the live
+    bench_016 stores `scripts/memory/extract-session-log.py`."""
+    rows = "".join(f"  - {i}\n" for i in items)
+    return ("---\n"
+            "id: bench_016_audit_skill_dead_paths\n"
+            "category: synthetic\n"
+            "objective_checks:\n"
+            "- type: find_all\n"
+            "  value: gold_member\n"
+            "  gold_items:\n"
+            f"{rows}"
+            "---\n"
+            "Audit the active skills for dead `~/lloyd/…` paths.\n")
+
+
+def _cite_then_repoint(vault: Path, cite: str, *, card_items: list[str],
+                       rel: str = _SKILL) -> None:
+    """Commit a skill page (or task file) while it cites `cite`, then STAGE the edit
+    that repoints it away, leaving that edit uncommitted.
+
+    This is the shape of the two commits that reddened the gold node after the fact:
+    vault `07379a6ac` replaced `service-health-check`'s command that listed
+    `~/lloyd/autonomy.db`, and vault `dd9530a1` deleted
+    `file-path-resolution`'s `~/lloyd/inner-voice/system_prompt.md` line. Both fixed
+    a real defect and both silently orphaned the answer key; the card is written
+    before the first commit so the only difference HEAD-to-index is the citation.
+    """
+    card = vault / _GOLD_CARD
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text(_card(card_items), encoding="utf-8")
+    doc = vault / rel
+    if not doc.exists():
+        doc.parent.mkdir(parents=True, exist_ok=True)
+        doc.write_text("---\nname: demo\n---\n# Demo\n", encoding="utf-8")
+    cited = f"\nRun `~/lloyd/{cite}`.\n"
+    doc.write_text(doc.read_text(encoding="utf-8") + cited, encoding="utf-8")
+    _git(vault, "add", "-A")
+    _git(vault, "commit", "-qm", "the doc cites the path")
+    doc.write_text(doc.read_text(encoding="utf-8").replace(
+        cited, "\nThat command needs no repo-rooted path.\n"), encoding="utf-8")
+    _git(vault, "add", "-A")
+
+
+def _gold_lines(out: str) -> list[str]:
+    return [ln for ln in out.splitlines() if ln.startswith(rung.GOLD_PREFIX)]
+
+
+def test_removing_a_gold_path_from_a_skill_prints_one_gold_refresh_line(vault,
+                                                                        capsys):
+    """Clauses 1 and 4: the delete edge prints its notice, and the gold comes from
+    the repo under commit.
+
+    `test_only_what_the_edit_adds_is_reported` pins why the rung is additions-only —
+    a permanent alarm is a disabled alarm — and that is exactly the half of this
+    drift nothing could see: the skill stops naming a dead path, the card still
+    lists it as gold, and the symmetric node
+    (`test_skill_dead_path_gold_still_matches_the_skills`) reddens on the next
+    scheduled `live_vault` run with nothing printed at the commit that did it.
+
+    The card is seeded in the SYNTHETIC vault, not read from `~/obsidian`: gold is
+    loaded from the repo handed to `report()`, so a run pointed at `vault_root()`
+    would find no card here and this node would pass for the wrong reason.
+    """
+    _cite_then_repoint(vault, _GOLD_PATH, card_items=[_GOLD_PATH])
+    assert rung.gold_refresh(vault) == {_GOLD_CARD: [_GOLD_PATH]}
+    assert rung.report(vault) == 0
+    gold = _gold_lines(capsys.readouterr().out)
+    assert len(gold) == 1, f"expected exactly one gold-refresh line: {gold}"
+    assert _GOLD_CARD in gold[0], gold[0]
+    assert f"`{_GOLD_PATH}`" in gold[0], gold[0]
+    assert "drop" in gold[0] and "same commit" in gold[0], gold[0]
+
+
+def test_the_gold_refresh_line_is_not_a_dead_path_finding(vault, capsys):
+    """Clause 2: the notice rides outside `findings`, so the commit's verdict is
+    unchanged on the very edge that triggers it.
+
+    Not a finding is load-bearing twice over. `report()` must still return 0 — the
+    wrapper commits other writers' state, so a rung that ever turned a skill edit
+    into a refusal is the bug the module docstring refuses to be — and `ADVICE` must
+    not ride along, because its instruction is to reword the SKILL.md and the gold
+    line's instruction is to edit a bench card, opposite asks about one commit. The
+    summary line still reading `0 new dead path(s)` beside a printed notice is what
+    pins the count as the leg's own and not this line's.
+    """
+    _cite_then_repoint(vault, _GOLD_PATH, card_items=[_GOLD_PATH])
+    findings, checked = rung.path_findings(vault)
+    assert (findings, checked) == ([], 1), (
+        f"the gold notice leaked into the findings list: {findings}")
+    assert rung.report(vault) == 0
+    out = capsys.readouterr().out
+    assert ("skill-path: 1 staged skill/task file(s) checked, "
+            "0 new dead path(s)") in out, out
+    assert not [ln for ln in out.splitlines()
+                if ln.startswith("skill-path FINDING:")], out
+    assert "without a repo-rooted path" not in out, (
+        f"the dead-path ADVICE block printed for a commit that added no path: {out}")
+    gold = _gold_lines(out)
+    assert len(gold) == 1 and not gold[0].startswith("skill-path FINDING:"), out
+
+
+def test_the_gold_refresh_line_fires_on_the_delete_edge_and_nothing_else(vault,
+                                                                         capsys):
+    """Clause 3, the four silences, and the control that keeps them honest.
+
+    Each edge below is one step of the same staged index, and each has to stay
+    quiet: a path the cards do not list is not drift; an edit that only ADDS a dead
+    path is the leg `skill-path FINDING:` already owns, and printing a gold notice
+    there would say the answer key moved when nothing left it; a doc whose citation
+    survives the edit leaves the corpus — and so the gold set — intact; and
+    `autonomy/*.md` is not the gold node's corpus at all, since that node walks
+    `skills/**/SKILL.md`, so a task file dropping a `~/lloyd/…` path can never
+    orphan an item. The last step is the control: with the card, the doc and the
+    delete all present, the line prints, so the four asserts above measured the
+    edges and not the fixture.
+    """
+    def gold_now() -> list[str]:
+        capsys.readouterr()
+        assert rung.report(vault) == 0
+        return _gold_lines(capsys.readouterr().out)
+
+    # A removed path no card lists: the corpus lost a dead path, the answer key
+    # never had it, so there is nothing to refresh.
+    _cite_then_repoint(vault, _NOT_GOLD, card_items=[_GOLD_PATH])
+    assert gold_now() == [], "a path absent from every gold_items asked for a refresh"
+    _git(vault, "commit", "-qm", "edge 1: the removed path was never gold")
+
+    # An edit that only adds a dead path: the finding leg speaks, the gold leg does
+    # not, and the two prefixes must not be confused for one verdict.
+    _append(vault, f"\nAlso run `~/lloyd/{_GOLD_PATH}`.\n")
+    findings, _checked = rung.path_findings(vault)
+    assert len(findings) == 1 and _GOLD_PATH in findings[0], findings
+    assert gold_now() == [], "an added path printed an answer-key notice"
+    _git(vault, "commit", "-qm", "edge 2: an added path")
+
+    # A staged edit that leaves the citation standing: same doc, same card, corpus
+    # unchanged, so the gold set has not moved.
+    _git(vault, "commit", "--allow-empty", "-qm", "edge 3 opens")
+    _append(vault, "\nIt also reads `tests/test_skill_tool_names.py`.\n")
+    findings, checked = rung.path_findings(vault)
+    assert (findings, checked) == ([], 1), findings
+    assert gold_now() == [], "an unchanged citation orphaned a gold item"
+
+    # A task file dropping a path the card DOES list: not the gold node's corpus.
+    _cite_then_repoint(vault, _GOLD_PATH, card_items=[_GOLD_PATH],
+                       rel="autonomy/4469-demo.md")
+    assert gold_now() == [], (
+        "an autonomy task edit printed a notice the gold node can never go red for")
+
+    # The control: the same skill, the same card, the citation deleted.
+    skill = vault / _SKILL
+    skill.write_text(skill.read_text(encoding="utf-8").replace(
+        f"\nAlso run `~/lloyd/{_GOLD_PATH}`.\n",
+        "\nThat command needs no repo-rooted path.\n"), encoding="utf-8")
+    _git(vault, "add", "-A")
+    gold = gold_now()
+    assert len(gold) == 1 and _GOLD_CARD in gold[0], (
+        f"the control edge did not print: {gold}")
+
+
+def test_the_gold_match_is_the_lowercase_lloyd_relative_form(vault, capsys):
+    """Clause 4's comparison form: what `bench_dead_refs` returns, not what the
+    regex captured.
+
+    The live card stores `- scripts/memory/extract-session-log.py` with no
+    `~/lloyd/` prefix, and `bench_dead_refs` yields lower-cased lloyd-relative rels,
+    so the two meet on exactly that form. A compare written against the raw
+    `BENCH_REF` capture would carry the `~/lloyd/` prefix (and, for the mixed-case
+    citation below, the wrong case) and would never match a real card. Mixed case in
+    the skill and lower case in the card is the pair that distinguishes the two:
+    matching the returned rel matches both, matching the capture matches neither.
+    """
+    cited = "Scripts/A_Script_The_Gold_Card_Lists_4469.PY"
+    _cite_then_repoint(vault, cited, card_items=[cited.lower()])
+    assert rung.gold_refresh(vault) == {_GOLD_CARD: [cited.lower()]}
+    assert rung.report(vault) == 0
+    gold = _gold_lines(capsys.readouterr().out)
+    assert len(gold) == 1, gold
+    assert _GOLD_CARD in gold[0] and f"`{cited.lower()}`" in gold[0], gold[0]
+
+
+def test_the_docstring_names_the_gold_card_and_no_gold_item_count():
+    """Clause 5: the module stops counting the gold it cannot see.
+
+    The docstring said "the bench task's four gold items" while the card's own body
+    had re-derived the set to two — a number in prose rots the night a skill is
+    repointed, and this rung is the thing that repoints it. The card's path is named
+    instead, because that file is where the count actually lives and where a reader
+    goes to argue with it. `tests/test_bench_audit_tasks.py` is the victim node and
+    stays untouched: its assertion and its `live_vault` marker are the witness that
+    this line is worth having.
+    """
+    doc = rung.__doc__ or ""
+    assert "lloyd/bench/bench_016_audit_skill_dead_paths.md" in doc, (
+        "the docstring still does not name the card that owns the gold set")
+    assert not re.search(
+        r"(?:\b\d+\b|\b(?:one|two|three|four|five|six|seven|eight|nine)\b)"
+        r"\s+gold", doc, re.I), (
+        f"the docstring states a gold-item count again: {doc.splitlines()[27:32]}")
+    assert not re.search(r"gold\s+(?:items?|paths?|set)\s*(?:=|:)\s*\d+", doc, re.I), (
+        "the docstring states a gold-item count again")

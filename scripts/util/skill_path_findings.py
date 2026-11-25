@@ -26,8 +26,9 @@ the line says how to reword, and the job that reads its own commit output can
 amend in the same run instead of leaving main red for a hand sweep.
 
 Only what the staged edit adds is reported (rows in the index minus rows at
-HEAD), so pre-existing drift — `PATH_KNOWN_UNFIXED`, the bench task's four gold
-items — never prints: a permanent alarm is a disabled alarm.
+HEAD), so pre-existing drift — `PATH_KNOWN_UNFIXED`, the gold items of
+`lloyd/bench/bench_016_audit_skill_dead_paths.md` — never prints: a permanent
+alarm is a disabled alarm.
 
 The path rule is NOT restated here. It is `_absent_refs`, `_tree_ignores` and
 `PATH_KNOWN_UNFIXED` in `tests/test_skill_tool_names.py`, loaded from the same
@@ -40,6 +41,20 @@ That leg subtracts the loaded guard's `_creation_sites` too: paths a page says i
 own job writes, whether at a flag, a redirection or in an English sentence, are
 outputs and not citations (#2157, #2223), and one commit's two legs must not print
 different verdicts about one sentence.
+
+The one edge the delete side gets a line for (#4469): a staged `skills/**/SKILL.md`
+edit that STOPS naming a dead path whose row is still gold in
+lloyd/bench/bench_016_audit_skill_dead_paths.md gets a single
+`skill-path GOLD REFRESH:` line naming that card, because `gold_items` is a
+hand-maintained answer key and the edit just orphaned one of its rows. Both
+instances were silent commits: vault `07379a6ac` repointed `service-health-check`
+off `~/lloyd/autonomy.db` (#4461) and vault `dd9530a1` deleted
+`file-path-resolution`'s `~/lloyd/inner-voice/system_prompt.md` line (#3110), and
+each left the symmetric node red for a day. It is a notice, not a finding: the
+count line and the exit status are what they were, and `autonomy/*.md` is not its
+corpus because the node walks `skills/**/SKILL.md` alone. A whole-file `SKILL.md`
+deletion never reaches it either — `staged_docs` is `--diff-filter=AM` — which is
+the wider silent edge #4469 deliberately leaves open.
 
     python3 ~/lloyd/scripts/util/skill_path_findings.py --repo ~/obsidian
 """
@@ -166,11 +181,86 @@ def path_findings(repo: Path, guard=None) -> tuple[list[str], int]:
     return findings, len(docs)
 
 
+def _gold_keys(repo: Path) -> dict[str, set[str]]:
+    """The answer keys the repo being committed carries, card by card.
+
+    {card path relative to `repo`: lower-cased `gold_items` values}, read through
+    `scripts.autoresearch.common.load_bench_tasks` — the loader the bench nodes use,
+    so this cannot disagree with them about what a card or a gold item is. Cards with
+    unparseable front matter are skipped by that loader, which is what a reporting
+    rung wants: a broken card prints nothing instead of reaching a commit.
+
+    From THIS repo and not from `vault_root()`, because `report()` is handed the repo
+    under commit and a card set belonging to some other tree would be the wrong
+    answer key for it. Values are compared as the lower-cased lloyd-relative rels
+    `bench_dead_refs` returns, since that is how bench_016 stores them
+    (`- scripts/memory/extract-session-log.py`, no `~/lloyd/` prefix).
+    """
+    from scripts.autoresearch.common import load_bench_tasks  # stdlib + yaml only
+
+    keys: dict[str, set[str]] = {}
+    for task in load_bench_tasks(repo / "lloyd" / "bench"):
+        items: set[str] = set()
+        for check in task.get("objective_checks") or []:
+            if isinstance(check, dict):
+                items |= {str(g).strip().lower()
+                          for g in check.get("gold_items") or []}
+        if items:
+            keys[Path(task["_path"]).relative_to(repo).as_posix()] = items
+    return keys
+
+
+def gold_refresh(repo: Path, guard=None) -> dict[str, list[str]]:
+    """Gold rows a staged skill edit orphans, keyed by the card still listing them.
+
+    The delete edge `path_findings` deliberately does not compute: refs at HEAD minus
+    refs in the index, over the corpus the gold node walks — `skills/**/SKILL.md`,
+    `.archived` skipped — because an `autonomy/*.md` edit that drops a `~/lloyd/…`
+    path can never orphan a gold item and printing one there would be a false alarm
+    on the task-file corpus. The result is intersected with each card's gold rows, so
+    a removed path no card lists stays silent.
+
+    The removal is per edited doc rather than a re-walk of the whole corpus, which
+    would mean reading every skill page in the vault at commit time: a path another
+    active skill still names keeps the corpus intact, and the advice below carries
+    that caveat instead of this loop guessing at it.
+    """
+    guard = guard or _load_guard()
+    cards = _gold_keys(repo)
+    if not cards:
+        return {}
+    removed: set[str] = set()
+    for rel in staged_docs(repo):
+        if not rel.startswith("skills/") or ".archived" in Path(rel).parts:
+            continue
+        removed |= (bench_dead_refs(_show(repo, f"HEAD:{rel}"), guard.ROOT)
+                    - bench_dead_refs(_show(repo, f":{rel}"), guard.ROOT))
+    out: dict[str, list[str]] = {}
+    for card, gold in cards.items():
+        orphaned = sorted(gold & removed)
+        if orphaned:
+            out[card] = orphaned
+    return out
+
+
 ADVICE = ("skill-path: a path named this way turns tests/test_skill_tool_names.py or "
           "tests/test_bench_audit_tasks.py red on main. If the file was removed or "
           "never tracked, name it in prose without a repo-rooted path (\"the code "
           "tree's stray `.t` scratch directory\"), then amend; if it should exist, "
           "it has to land first. Do not add it to PATH_KNOWN_UNFIXED or to a gold set.")
+
+#: Deliberately not `skill-path FINDING:`. A finding says reword the SKILL.md and
+#: brings ADVICE with it; this says edit a bench card too, and the two asks about one
+#: commit must not arrive under one prefix — or be counted as one verdict.
+GOLD_PREFIX = "skill-path GOLD REFRESH:"
+
+GOLD_ADVICE = (
+    "drop the item from that card's gold_items in this same commit — the gold set is "
+    "hand-maintained, so the skill edit moved the corpus and nobody moved the card "
+    "(unless another active skill still names the path, in which case the row is "
+    "right and the card stays). "
+    "tests/test_bench_audit_tasks.py::test_skill_dead_path_gold_still_matches_the_"
+    "skills asserts the two sets are equal and goes red on the next live_vault run.")
 
 
 def report(repo: Path) -> int:
@@ -182,6 +272,7 @@ def report(repo: Path) -> int:
         return 0
     try:
         findings, checked = path_findings(repo, guard)
+        refresh = gold_refresh(repo, guard)
     except Exception as exc:                       # noqa: BLE001 - never block a commit
         print(f"skill-path: CHECK FAILED ({exc})", flush=True)
         return 0
@@ -191,6 +282,10 @@ def report(repo: Path) -> int:
         print(f"skill-path FINDING: {finding}", flush=True)
     if findings:
         print(ADVICE, flush=True)
+    for card, rows in sorted(refresh.items()):
+        listed = ", ".join(f"`{row}`" for row in rows)
+        print(f"{GOLD_PREFIX} {card} still lists {listed} in gold_items, which this "
+              f"commit takes out of the skills; {GOLD_ADVICE}", flush=True)
     return 0
 
 
