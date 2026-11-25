@@ -228,7 +228,7 @@ per task through `autonomy.get_due_tasks`, and enqueues each due task under
 `scheduled-task:<id>`. **Executes** by delegating to `autonomy.run_task`, which
 writes the per-task run record to `autonomy-runs/<id>/<run_id>.md`.
 
-What of that result reaches the pool is a hand-written whitelist
+What of that result reaches the pool is a hand-written whitelist inside `execute`
 (`workers/sources/scheduled_task.py:684`, `out` through to `return out` at `:748`): a
 literal dict, then three
 keys lifted by name below it — `claims`, `acceptance_grade` and `script_alarm`,
@@ -392,7 +392,8 @@ one `architecture/*.md` doc per run, and nothing else.
 What the five share is that **no member acts on its own conclusion**.
 `backlog-cluster` writes a file that triage is free to ignore; `autotriage`
 reaches a verdict and implements nothing; `autocode` lands only through the gate's
-sixteen rungs (`scripts/automod/gate.py:1`) and a second reader; `automod-regression` measures and never reverts; and
+sixteen rungs (the `ladder` literal in `Gate.run` at `scripts/automod/gate.py:2722`)
+and a second reader; `automod-regression` measures and never reverts; and
 `arch-review` may correct the doc it read and must *file* every other finding,
 including the one-line skill fix it could obviously make itself.
 Each one's output is the next one's input, and every handoff is a file on disk
@@ -1851,13 +1852,20 @@ that put every disk-heavy scan on a thread, and stays.
   source (`enabled: false`) while §4 said it was enabled 2026-11-23 — config now
   has all seventeen `workers.sources.*.enabled` true (PyYAML and `/api/workers/health`
   agree), so §1's prose and the roster's `on` column are corrected and the pair is
-  reconciled; the gate's rung count is sixteen (`scripts/automod/gate.py:1`), not
+  reconciled; the gate's rung count is sixteen (`scripts/automod/gate.py`), not
   the thirteen this file said twice; task files are 53, not 45; §1's roster is
-  17 names, not 13; and four `file:line` citations re-pointed (`workers.py:962`→
-  `:1144`, `:559`→`:656`, `scheduled_task.py:448`→`:684`, `automod_regression.py:455`
-  →`:459` with `:1248`/`:1256`→`:1269`/`:1277`). Verified exact and left alone:
-  `pool.py:1998`/`:2028`/`:2044`/`:2045`/`:2046`/`:1079`, `autonomy.py:5356`,
-  `scheduled_task.py:488`, the `_PRIORITY_MAP` values, every per-source cadence,
+  17 names, not 13. Four `file:line` citations were re-pointed — `app/routers/workers.py`
+  from 962 to 1144 and from 559 to 656, `workers/sources/scheduled_task.py` from 448
+  to 684, and `workers/sources/automod_regression.py` from 455 to 459 with 1248 to
+  1269 and 1256 to 1277 — and each is cited at its new line in the section above that
+  discusses it. The old numbers are written here as prose and not as `path:NNN`
+  spans on purpose: a span asserts where something lives *now*, and these assert
+  where it used to live, which is the distinction #3292's unreadable-citation rail
+  cannot make — it read the old numbers written that way as claims about the current
+  tree, and a basename with no directory is read by no rail at all. Verified exact
+  and left alone at the lines the sections above already cite: `workers/pool.py`
+  1998, 2028, 2044, 2045, 2046 and 1079; `app/autonomy.py` 5356;
+  `workers/sources/scheduled_task.py` 488; the `_PRIORITY_MAP` values, every per-source cadence,
   cap, priority and `max_inflight` in §1's table, `LONG_LIVED`'s ten declarers,
   `POOL_SILENT_STREAK`, `_THROUGHPUT_RATE_WINDOW_MINUTES`, and the 12-group /
   36-doc picklist arithmetic.
