@@ -1632,3 +1632,65 @@ def test_the_torch_embedder_matches_the_reference_implementation():
         v = qwen3_embed.embed_query(QUERY_INSTRUCTION + qs[ids[i]])
         assert float(v @ R[i]) >= 0.999
 
+
+
+# ── #4033: the document leg carries the conversation linker's note links ─────
+
+def _recall_with_docs(monkeypatch, files: list[str]) -> dict:
+    """The real `_vault_recall_base` with qmd answering `files`, in that order, and
+    the cross-encoder named as the ranker so no djev read is attempted."""
+    rows = [{"file": f"qmd://{f}", "title": f, "snippet": "s", "score": 1.0 - i / 100}
+            for i, f in enumerate(files)]
+    monkeypatch.setattr(vault, "_qmd_daemon_search", lambda *a, **k: list(rows))
+    return vault._vault_recall_base({
+        "query": "what's the noise floor in our relationship graph?", "limit": 10,
+        "grep_code": False, "include_facts": False, "expand_graph": False,
+        "graph_rerank": False, "demote_daily_logs": False}, reranker="qmd")
+
+
+def test_recall_documents_carry_their_linked_notes(world, monkeypatch):
+    """A returned note with an active conversation edge lists the note at the other
+    end — here the gold `autonomy/74-…` the recall itself did not return — so the
+    linked gold note is in the returned set; a note with none carries no field."""
+    _root, st = world
+    job, skill = "autonomy/74-kg-mention-classifier.md", "skills/kg-mention-classifier/SKILL.md"
+    st.edges.add({"source": job, "target": skill, "type": "implements",
+                  "confidence": 0.9}, origin="conversation")
+    out = _recall_with_docs(monkeypatch, [skill, "backlog/1099-unlinked.md"])
+    docs = {d["path"]: d for d in out["documents"]}
+    assert docs[skill]["linked_notes"] == [
+        {"path": job, "type": "implements", "direction": "in"}]
+    assert "linked_notes" not in docs["backlog/1099-unlinked.md"]
+    assert "linked_notes_unavailable" not in out
+    # The ranked list itself is untouched: the links ride on the note.
+    assert [d["path"] for d in out["documents"]] == [skill, "backlog/1099-unlinked.md"]
+
+
+def test_recall_links_use_the_same_cap_and_skip_expired(world, monkeypatch):
+    _root, st = world
+    note = "skills/dream-consolidation/SKILL.md"
+    ids = [st.edges.add({"source": note, "target": f"knowledge/n{i:02d}.md",
+                         "type": "related_to", "confidence": 0.5 + i / 100},
+                        origin="conversation") for i in range(10)]
+    st.edges.expire(ids[-1], "test: retired")  # the most confident one
+    out = _recall_with_docs(monkeypatch, [note])
+    links = out["documents"][0]["linked_notes"]
+    assert [l["path"] for l in links] == [f"knowledge/n{i:02d}.md" for i in range(8, 0, -1)]
+
+
+def test_an_unreadable_store_costs_the_links_not_the_recall(world, monkeypatch):
+    """Named once at the top level, never an empty link list, and the documents
+    are served; the lookups stop at the first failure."""
+    _root, st = world
+    calls: list[str] = []
+
+    def broken(*a, **k):
+        calls.append(k.get("either"))
+        raise kg_store.StoreUnavailable("read failed on kg.sqlite: database is locked")
+
+    monkeypatch.setattr(st.edges, "active", broken)
+    out = _recall_with_docs(monkeypatch, ["knowledge/a.md", "knowledge/b.md"])
+    assert [d["path"] for d in out["documents"]] == ["knowledge/a.md", "knowledge/b.md"]
+    assert all("linked_notes" not in d for d in out["documents"])
+    assert "database is locked" in out["linked_notes_unavailable"]
+    assert calls == ["knowledge/a.md"]

@@ -801,7 +801,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
              djev_rerank_top: int = RECALL_DJEV_RERANK_TOP,
              counterfactual: bool = True,
              report_dups: bool = True,
-             collapse_dups: bool = False) -> list[dict]:
+             collapse_dups: bool = False, linked_notes: str = "off") -> list[dict]:
     records = []
     # Frozen perturbation records, loaded once. Absent or short is surfaced per
     # query below as an unscored counterfactual block rather than crashing the
@@ -873,7 +873,7 @@ def run_eval(queries: list[dict], limit: int = 20, expand_graph: bool = True,
         # has no path back into the scores. `report_dups=False` is the paired-off
         # arm of the metric itself, used by tests/test_eval_ci_reporting.py to
         # prove the stage moves nothing.
-        scoring = _score(spec, result, seeds=seeds,
+        scoring = _score(spec, _with_linked_notes(result, linked_notes), seeds=seeds,
                          dup_metrics=(_dup_metrics_for_paths(_doc_paths(result))
                                       if report_dups else None),
                          collapse_dups=collapse_dups)
@@ -2656,7 +2656,7 @@ def build_parser() -> argparse.ArgumentParser:
     cannot fail is why a run seeded at 5 against a production seeded at 10
     reported `matches_production_defaults: true` for eight days (#843).
     """
-    ap = argparse.ArgumentParser()
+    ap = _add_linked_notes_arg(argparse.ArgumentParser())  # #4033, defined at file end
     ap.add_argument("--queries", default=str(HERE / "vault_recall_queries.yaml"))
     ap.add_argument("--label", default="baseline", help="Label embedded in the output filename")
     ap.add_argument("--notes", default="", help="Free-text notes saved with the run (e.g. config knobs)")
@@ -2838,7 +2838,7 @@ def build_run_config(args: argparse.Namespace) -> dict:
         # not ask" means the default — metric on, arm off — not an AttributeError
         # from a config recorder.
         "report_dups": not getattr(args, "no_dup_metrics", False),
-        "collapse_dups": getattr(args, "collapse_dups", False),
+        "collapse_dups": getattr(args, "collapse_dups", False), "linked_notes": getattr(args, "linked_notes", "off"),
         "dup_threshold": _dup.DUP_JACCARD_THRESHOLD,
         "dup_calibration_agreement": _dup.calibration_agreement(),
         "matches_production_defaults": (
@@ -2949,7 +2949,7 @@ def main() -> int:
         # paired collapse arm (off by default). Both recorded in the artifact by
         # `build_run_config`, so a night can be asked which of the two it ran.
         report_dups=not args.no_dup_metrics,
-        collapse_dups=args.collapse_dups,
+        collapse_dups=args.collapse_dups, linked_notes=getattr(args, "linked_notes", "off"),
     )
     # The collection list is resolved HERE for the same reason the ceiling is: only
     # `main` knows which index this run scored, and `summarize` must stay a function
@@ -3295,6 +3295,53 @@ def escalate_refused_ceiling(overall: dict, queries: list[dict], *,
     except Exception as exc:  # noqa: BLE001 — a note is never worth the nightly
         print(f"[warn] refused-ceiling escalation not written: {exc}", file=sys.stderr)
         return False
+
+
+# ── #4033: the linked-notes arm ──────────────────────────────────────────────
+# `vault_recall` puts the conversation linker's note-to-note edges on each
+# returned document as `linked_notes` (agent_mcp/_document_links.py). `_doc_paths`
+# reads `documents[].path` only, so by default this eval is blind to them — which
+# keeps every historical baseline comparable, and is also why a default before/
+# after run of #4033 measures zero by construction. The arm scores a copy of the
+# result whose document list carries the linked notes too; the record's own
+# `doc_paths_top10`, the duplicate-slot metrics and every other reader still see
+# the ranked list as served. Recorded in the run config as `linked_notes`.
+#   tail    linked notes appended after the ranked list, deduped: no ranked
+#           document moves, so only doc_recall / doc_hit can change.
+#   inline  each linked note right after the document that carries it, the order
+#           a reader meets them in: later documents are pushed down, so this is
+#           the arm that can regress mrr_doc / ndcg10 and must be read for that.
+LINKED_NOTES_MODES = ("off", "tail", "inline")
+
+
+def _add_linked_notes_arg(ap: argparse.ArgumentParser) -> argparse.ArgumentParser:
+    ap.add_argument("--linked-notes", choices=LINKED_NOTES_MODES, default="off",
+                    help="#4033 arm: also score the `linked_notes` each returned document "
+                         "carries (tail: after the ranked list; inline: after their "
+                         "carrier). Default off: the served ranked list only.")
+    return ap
+
+
+def _with_linked_notes(result: dict, mode: str) -> dict:
+    """`result` with its documents' linked notes folded into the scored list."""
+    if mode not in LINKED_NOTES_MODES:
+        raise ValueError(f"linked_notes mode {mode!r} not in {LINKED_NOTES_MODES}")
+    docs = (result.get("documents") or []) if isinstance(result, dict) else []
+    if mode == "off" or not any(isinstance(d, dict) and d.get("linked_notes") for d in docs):
+        return result
+    seen = {str(d.get("path", "")) for d in docs if isinstance(d, dict)}
+    out: list[dict] = []
+    tail: list[dict] = []
+    for d in docs:
+        out.append(d)
+        for link in (d.get("linked_notes") or []) if isinstance(d, dict) else []:
+            path = str(link.get("path") or "")
+            if not path or path in seen:
+                continue
+            seen.add(path)
+            (out if mode == "inline" else tail).append(
+                {"path": path, "linked_from": d.get("path"), "link_type": link.get("type")})
+    return {**result, "documents": out + tail}
 
 
 if __name__ == "__main__":

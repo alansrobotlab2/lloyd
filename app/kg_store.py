@@ -641,7 +641,7 @@ class _Edges:
                types: Optional[Iterable[str]] = None, *, either: Optional[str] = None,
                min_confidence: float = 0.0) -> list[dict]:
         """Active edges, optionally filtered. `either=name` matches source OR target."""
-        where = ["expired_at IS NULL"]
+        where = ["+expired_at IS NULL" if either is not None else "expired_at IS NULL"]  # unary +: the #4033 note at file end
         params: list[Any] = []
         if source is not None:
             where.append("source=?"); params.append(source)
@@ -1843,3 +1843,12 @@ def read_only_registry(path: Path | str | None = None) -> tuple[list[str], set[s
     except sqlite3.Error as exc:
         raise StoreUnavailable(f"cannot read {target} read-only: {exc}") from exc
     return names, aliases
+
+
+# Why `_Edges.active(either=...)` spells its filter `+expired_at IS NULL` (#4033).
+# With no `sqlite_stat1` the planner served `expired_at IS NULL AND (source=? OR
+# target=?)` from `edges_expired` — a walk over every active row (66k on the live
+# store, 26-35 ms per call). The unary `+` takes that index out of the running, so
+# the OR is answered as a MULTI-INDEX OR over `edges_source` and `edges_target`
+# (0.11 ms). Same rows: `+x IS NULL` is `x IS NULL` with no index use. Kept at the
+# file's end so no line above moves (docs cite this file by line).

@@ -1835,7 +1835,7 @@ def _vault_read(params: dict) -> dict:
             start = max(0, start_line - 1)
             end = (start + num_lines) if num_lines > 0 else len(lines)
             text = "\n".join(lines[start:end])
-        return {"path": path, "text": text or "(empty file)"}
+        return _document_links.attach_to_read({"path": path, "text": text or "(empty file)"}, target.relative_to(VAULT).as_posix())  # #4033
     except Exception as exc:
         return _err(str(exc), ErrorCode.INTERNAL)
 
@@ -3533,7 +3533,7 @@ def _vault_recall_base(params: dict, *, seed_top_k: int | None = None,
             documents = _graph_rerank(documents, seed_entities, weighted_neighbors, alpha=rerank_alpha)[:limit]
         else:
             documents = documents[:limit]
-        result = {"documents": documents, "facts": facts, "query": query}
+        result = _document_links.attach_to_recall({"documents": documents, "facts": facts, "query": query})  # #4033
         # A knob the caller set that this call could not honour is named here,
         # not logged (#1372). Absent unless the caller actually sent one, so the
         # default recall — which is every recall production serves — pays
@@ -3778,3 +3778,9 @@ async def call_tool(name: str, arguments: dict):
                     else RECALL_KNOB_STRIPPED_NOTE) for k in stripped}}
         return _wrap(result)
     return _wrap(_err(f"Unknown tool: {name}", ErrorCode.UNKNOWN_TOOL))
+
+
+# At the end so no line above moves (architecture docs cite this file by line):
+# the conversation linker's note-to-note edges, served beside a read note and
+# each recalled document (#4033).
+from agent_mcp import _document_links  # noqa: E402
