@@ -135,13 +135,13 @@ _RETIRED_WITNESS_NAMES = frozenset(
 #:   `signatures.json`          guardian.py:1028 (the chronic-error cache, re-written when it refreshes)
 #:   `voice.json`               speak.py:126 (`CONFIG_NAME`), re-written into the state dir at every guardian stage by bin/sync-voice-config.py:28
 #:   `conversation-relation-proposals.json`  conversation_relations.py:45 (`PROPOSALS_FILE`), rewritten by `save_proposals` at :807 — under `commit_lock` and via `atomic_write_text` at :856, which replaces the same path — on every #51 run, so the file's counts move nightly
+#:   `seen.json`                scripts/youtube_channel_monitor.py:113/:135 (`STATE_FILE`), rewritten in place by `save_state()` at :289 — the first member that is not a guardian file (#4492)
 #:
-#: The guardian cannot be IMPORTED for this (`agent-services/guardian/` has no
-#: `__init__.py`; `scripts/` reads those files by path only, as promote.py:533 does), so
-#: the registry is declared here and its members are traceable to the lines above. A
-#: fifth store is dated by adding ITS basename to this set: the banned-name set above is
-#: a different judgement, and
-#: `tests/test_witness_artifact_clause.py::test_a_fifth_rolling_source_dates_without_touching_the_ban`
+#: Neither the guardian (`agent-services/guardian/` has no `__init__.py`; `scripts/` reads
+#: those files by path only, as promote.py:533 does) nor the monitor script is IMPORTED
+#: for this, so the registry is declared here and its members are traceable to the lines
+#: above. A new store is dated by adding ITS basename to this set: the banned-name set
+#: above is a different judgement, and `tests/test_witness_artifact_clause.py::test_a_fifth_rolling_source_dates_without_touching_the_ban`
 #: is the rail that keeps the two from collapsing back into one hand-list.
 _ROLLING_STATE_NAMES = frozenset({
     "data_watch.json",
@@ -151,7 +151,7 @@ _ROLLING_STATE_NAMES = frozenset({
     "logcursors.json",
     "signatures.json",
     "voice.json",
-    "conversation-relation-proposals.json",
+    "conversation-relation-proposals.json", "seen.json",
 })
 
 

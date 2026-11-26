@@ -4402,13 +4402,13 @@ def test_a_matching_digest_keeps_the_demand_and_asks_for_sha256sum(tmp_path):
     be the one whose output IS the quoted figure, and an extract cannot carry a digest of the
     whole, so the demand asks for the bytes whole.
     """
-    store = _live_state(tmp_path)
+    store = _live_state(tmp_path, "state.json")  # in neither registry: seen.json is dated (#4492)
     live = _digest_of(store)
     text = f"The state at `{store}` is 3 lines, 41 bytes, sha256 {live} at the read."
     out = _owed(text)
     assert len(out) == 1, f"a digest that matches must still be asked for: {out}"
     d, = out
-    assert "`sha256sum backlog/data/seen.json`" in d, d
+    assert "`sha256sum backlog/data/state.json`" in d, d
     assert "wc -l -c" not in d, f"a line count cannot reproduce a digest: {d}"
     assert "an extract reproducing the same numbers" not in d, \
         f"an extract has no digest of the file: {d}"
@@ -5245,3 +5245,66 @@ def test_the_owed_list_a_triage_publishes_carries_the_mirror_demand_not_a_copy_o
     assert f"`git show HEAD:{rel} | wc -l -c`" in owed[0], owed[0]
     assert "backlog/data" not in owed[0], owed[0]
     assert len(owed[0]) <= B.CLAUSE_MAX_CHARS, owed[0]
+
+# ── seen.json is a declared rolling source (#4492) ────────────────────────────────
+#
+# `~/.local/share/ai-engineer/seen.json` is rewritten in place by the YouTube monitor's
+# `save_state()` (`scripts/youtube_channel_monitor.py`, `STATE_FILE`), so a witness copied
+# from it is a snapshot of a moving file: 866,062 B / 18,687 lines on 2026-11-19, 870,084 B /
+# 18,773 lines on 2026-11-21. #4339 was publishing an undated `wc -l -c` demand on the
+# bare slot for it — a re-derivation that goes false at the next write.
+_SEEN_NAME = "seen.json"
+_SEEN_SOURCE = "~/.local/share/ai-engineer/seen.json"
+_SEEN_DATED = "backlog/data/2026-11-21.4342-ai-engineer-seen.json"
+
+
+def _seen_witness():
+    return B._witness_artifact(Path(_SEEN_SOURCE), taken=lambda d, n: False,
+                               day="2026-11-21", item_id=4342)
+
+
+def test_the_monitor_seen_store_is_a_declared_rolling_source(tmp_path, monkeypatch):
+    """#4492. `seen.json` joins `_ROLLING_STATE_NAMES` by name, as #3644's member did.
+
+    Clause 1: the member is declared, the predicate fires, and the retired-slot ban is the
+    same two names. Clause 2: the item's own probe answers the dated slot. Clause 3: with the
+    member seeded OUT the same probe gets the bare slot back, so the dated name is this
+    member's doing and not a directory pattern's. Clause 4: a basename in neither registry,
+    in the same directory, still takes the bare slot.
+    """
+    before = set(B._ROLLING_STATE_NAMES)
+    assert _SEEN_NAME in B._ROLLING_STATE_NAMES, (
+        "seen.json is not a declared rolling source, so a witness of the monitor's store "
+        "still takes the undated bare slot #4339 was publishing")
+    assert B._witness_name_must_be_dated(_SEEN_NAME) is True, (
+        "the name is in the registry but the predicate that reads it did not fire")
+    assert set(B._RETIRED_WITNESS_NAMES) == {"promotions.jsonl",
+                                             "landed_outcomes.jsonl"}, (
+        "the retired-slot ban moved while the rolling registry was widened")
+
+    got = _seen_witness()
+    assert got == _SEEN_DATED, (
+        f"the emitter answered {got!r}; the tag is the source directory `ai-engineer`")
+    bare = "backlog/data/" + _SEEN_NAME
+    assert got != bare, "the bare slot is still on offer for a file save_state() rewrites"
+
+    without = before - {_SEEN_NAME}
+    assert without != before, "the member is not removable, so the seed tests nothing"
+    monkeypatch.setattr(B, "_ROLLING_STATE_NAMES", frozenset(without))
+    seeded = _seen_witness()
+    assert seeded == bare, (
+        f"with the member removed the emitter still answered {seeded!r}, so the dated "
+        "name above is not this member's doing and the node proves nothing")
+    assert B._witness_name_must_be_dated(_SEEN_NAME) is False, (
+        "the predicate fired for a name in neither registry")
+    monkeypatch.undo()
+
+    assert set(B._ROLLING_STATE_NAMES) == before, "the seed leaked past the node"
+    for undeclared in ("ai-engineer-notes.json", "index.db", "sessions.jsonl"):
+        assert B._witness_name_must_be_dated(undeclared) is False, (
+            f"{undeclared} dates too, so the registry widened by a rule, not a name")
+        src = Path("~/.local/share/ai-engineer") / undeclared
+        assert B._witness_artifact(src, taken=lambda d, n: False, day="2026-11-21",
+                                   item_id=4342) == f"backlog/data/{undeclared}", (
+            f"a name in neither set, in the SAME directory as seen.json, lost the bare "
+            f"slot: {undeclared}")
