@@ -10,6 +10,13 @@
         --corpus eval/measurements/observation-compression-corpus.yaml \
         --compressor rung4_truncate --budget 0.25
 
+    # pin a sample by row id (#4507): a seeded, stratified draw, then score only it
+    .venvs/lloyd/bin/python eval/run_observation_compression_eval.py sample \
+        --corpus <corpus.yaml> --n 48 --seed 4507 \
+        --out eval/measurements/observation-compression-frontier-sample-48.txt
+    .venvs/lloyd/bin/python eval/run_observation_compression_eval.py score \
+        --corpus <corpus.yaml> --row-ids-file <that file> [--row-id <id> ...] ...
+
     # publish the note from that run record (#4508: the frontier verdict, the row
     # roster, the span tally and the harvest skips, as tracked repo content)
     .venvs/lloyd/bin/python eval/run_observation_compression_eval.py report \
@@ -549,6 +556,71 @@ def load_corpus(path: Path) -> list[CorpusRow]:
     return out
 
 
+class UnknownRowIds(ValueError):
+    """`--row-id` named ids the corpus does not hold; `.missing` lists them sorted."""
+
+    def __init__(self, missing: Sequence[str]) -> None:
+        self.missing = sorted(missing)
+        super().__init__("row id(s) not in the corpus: " + ", ".join(self.missing))
+
+
+def select_rows(rows: Sequence[CorpusRow], row_ids: Iterable[str] | None) -> list[CorpusRow]:
+    """The corpus rows a `score` run scores (#4507): all of them, or exactly the named set.
+
+    The selection is a SET, returned in corpus order, so the order the ids were given
+    in cannot change which rows are scored or the order their records are written.
+    An id the corpus does not hold raises `UnknownRowIds` before anything is scored —
+    the typo check that replaces a first-row preflight, at the cost of no engine time.
+    `None` or an empty list keeps the pre-#4507 behaviour: every row, in corpus order.
+    """
+    wanted = {str(i) for i in (row_ids or ())}
+    if not wanted:
+        return list(rows)
+    missing = wanted - {r.row_id for r in rows}
+    if missing:
+        raise UnknownRowIds(missing)
+    return [r for r in rows if r.row_id in wanted]
+
+
+def read_row_ids_file(path: Path) -> list[str]:
+    """Ids one per line; blank lines and `#` comment lines (the sample's header) skipped."""
+    return [ln.strip() for ln in Path(path).read_text(encoding="utf-8").splitlines()
+            if ln.strip() and not ln.lstrip().startswith("#")]
+
+
+#: The stratum `draw_sample` allocates over. `tool_name` is the corpus's natural one:
+#: a Read body, a Bash transcript and an http_fetch page compress differently, and a
+#: plain draw from 200 rows can leave a 40-row stratum thin by chance.
+SAMPLE_STRATUM = "tool_name"
+
+
+def draw_sample(rows: Sequence[CorpusRow], n: int, *, seed: str) -> list[str]:
+    """A seeded, stratified, reproducible choice of `n` row ids (#4507's 48-row sample).
+
+    Proportional allocation over `SAMPLE_STRATUM` by largest remainder (ties broken by
+    stratum name), then `random.Random(f"{seed}:{stratum}").sample` over that stratum's
+    SORTED ids, so the draw depends on the corpus's ids and the seed and on nothing
+    else — not on row order, not on dict order, not on PYTHONHASHSEED. Returned sorted.
+    """
+    import random
+
+    if n <= 0 or n > len(rows):
+        raise ValueError(f"cannot draw {n} of {len(rows)} rows")
+    groups: dict[str, list[str]] = {}
+    for r in rows:
+        groups.setdefault(str(getattr(r, SAMPLE_STRATUM)), []).append(r.row_id)
+    total = len(rows)
+    exact = {k: n * len(v) / total for k, v in groups.items()}
+    quota = {k: int(x) for k, x in exact.items()}
+    short = n - sum(quota.values())
+    for k in sorted(groups, key=lambda k: (-(exact[k] - quota[k]), k))[:short]:
+        quota[k] += 1
+    chosen: list[str] = []
+    for k in sorted(groups):
+        chosen += random.Random(f"{seed}:{k}").sample(sorted(groups[k]), quota[k])
+    return sorted(chosen)
+
+
 # ---------------------------------------------------------------------------
 # Rendering: one template, both arms, and the generation it stands in for
 # ---------------------------------------------------------------------------
@@ -828,6 +900,13 @@ def compress(
 
     Returns `(replacement, info)`; `info` records the arm's own numbers so a
     report can tell the budget that was ASKED from the size that was RETAINED.
+
+    `info["byte_identical"]` says whether the replacement IS the observation, byte for
+    byte (#4507). It is the rung-4 no-op test: production's rung truncates the LARGEST
+    tool result, so when that is a prefix message — or this observation sits under
+    `min_chars` — the chosen row comes back untouched, both arms carry one prompt, and
+    the pair measures nothing about compression. Recorded on every arm so the JSONL
+    schema does not depend on the compressor; only rung 4 can plausibly return it true.
     """
     if compressor not in COMPRESSORS:
         raise ValueError(f"unknown compressor {compressor!r}; one of {COMPRESSORS}")
@@ -843,6 +922,7 @@ def compress(
             "compressor": compressor, "budget": budget,
             "budget_chars": budget_chars, "target_chars": target_chars,
             "arm": "production_relief_rung4",
+            "byte_identical": replacement == observation,
         }
     if compressor == EXTRACTIVE:
         replacement = extractive_spans(observation, _query_terms(row.prefix), budget_chars)
@@ -850,6 +930,7 @@ def compress(
             "compressor": compressor, "budget": budget,
             "budget_chars": budget_chars, "target_chars": target_chars,
             "arm": "query_conditioned_extractive",
+            "byte_identical": replacement == observation,
         }
     if summariser is None:
         raise ValueError(
@@ -863,6 +944,7 @@ def compress(
         "compressor": compressor, "budget": budget,
         "budget_chars": budget_chars, "target_chars": target_chars,
         "arm": "secondary_model_summary",
+        "byte_identical": replacement == observation,
     }
 
 
@@ -1338,6 +1420,10 @@ def score_row(
         "tokens_retained_pct": (round(100.0 * len(replacement) / len(row.observation), 2)
                                 if row.observation else 0.0),
         "action_kind": row.next_action.get("kind", ""),
+        # True when the candidate arm's observation is the full arm's, byte for byte
+        # (#4507): the row is then one prompt scored twice, and `aggregate` counts it
+        # as a no-op beside the cell's mean instead of letting it average in silently.
+        "byte_identical": info.get("byte_identical"),
         "valid": False,
         "invalid_reason": None,
         "delta_ce_nats": None,
@@ -1521,6 +1607,7 @@ def aggregate(records: Sequence[dict]) -> dict:
             "undecidable": 0, "declines": 0, "tiers": {},
             "delta_ce_sum": 0.0, "kl_sum": 0.0, "kl_rows": 0,
             "tokens_retained_sum": 0, "span_alignments": {},
+            "no_op_rows": 0, "no_op_unknown": 0,
         })
         a["rows"] += 1
         if not rec.get("valid"):
@@ -1529,6 +1616,14 @@ def aggregate(records: Sequence[dict]) -> dict:
             a["invalid_reasons"][reason] = a["invalid_reasons"].get(reason, 0) + 1
             continue
         a["valid_rows"] += 1
+        # The no-op count is over the SAME population as the mean it sits beside: a
+        # valid row whose candidate observation is byte-identical to the full arm's.
+        # A record with no flag (written before #4507) is unknown, never a 0.
+        identical = rec.get("byte_identical")
+        if identical is None:
+            a["no_op_unknown"] += 1
+        elif identical:
+            a["no_op_rows"] += 1
         # How this cell's ΔCE and KL were anchored. A cell with any estimated span is
         # the weaker measurement, and the report says so rather than letting the number
         # arrive with no trace of the route that produced it.
@@ -1631,6 +1726,11 @@ def _cell(value: Any, spec: str) -> str:
     return "n/a" if value is None else spec.format(value)
 
 
+def _no_op_cell(a: dict) -> str:
+    """The no-op count over the cell's valid rows, or `n/a` when any row has no flag."""
+    return "n/a" if a.get("no_op_unknown") else str(a.get("no_op_rows", 0))
+
+
 def span_route_line(agg: dict) -> str:
     """The `span routes over valid rows: exact=N, estimated=M` line, over the whole run.
 
@@ -1658,7 +1758,8 @@ def render_report(agg: dict, *, floor: float) -> str:
         f"next-action agreement floor (full-arm self-consistency): {floor}",
         "",
         f"{'compressor':<18}{'budget':>7}{'rows':>6}{'valid':>7}{'invalid':>9}"
-        f"{'agree':>8}{'declines':>10}{'ΔCE nats':>11}{'KL@1':>10}{'tokens':>9}",
+        f"{'agree':>8}{'declines':>10}{'ΔCE nats':>11}{'no-op':>7}{'KL@1':>10}"
+        f"{'tokens':>9}",
     ]
     for (compressor, budget), a in sorted(agg.items()):
         lines.append(
@@ -1667,6 +1768,7 @@ def render_report(agg: dict, *, floor: float) -> str:
             f"{_cell(a.get('agreement_rate'), '{:.3f}'):>8}"
             f"{a['declines']:>10}"
             f"{_cell(a.get('mean_delta_ce_nats'), '{:+.4f}'):>11}"
+            f"{_no_op_cell(a):>7}"
             f"{_cell(a.get('mean_kl_first_position'), '{:.4f}'):>10}"
             f"{_cell(a.get('mean_tokens_retained'), '{:.0f}'):>9}"
         )
@@ -1677,6 +1779,9 @@ def render_report(agg: dict, *, floor: float) -> str:
         lines.append(route_line)
     lines.append("unit of the `tokens` column: characters (row field `retained_unit`);"
                  " the budget axis is characters too — no tokenizer produced either number.")
+    lines.append("`no-op`: valid rows whose candidate observation is byte-identical to the"
+                 " full arm's (row field `byte_identical`) — one prompt scored twice, so a"
+                 f" {RUNG4} mean is quoted with this count beside it or not at all.")
     lines.append("")
     for compressor, entry in sorted(fr["compressors"].items()):
         clear = entry["clearing_budget"]
@@ -2032,7 +2137,19 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
                    help="pass one to score the SPILL-BACKED rung-4 arm (#1499 shape)")
     s.add_argument("--floor", type=float, default=0.0,
                    help="agreement floor from the full-arm self-consistency repeats")
+    s.add_argument("--row-id", action="append", default=None,
+                   help="score only this corpus row (repeatable; order-free); an id the "
+                        "corpus lacks exits 2 before any arm is scored")
+    s.add_argument("--row-ids-file", default="",
+                   help="ids one per line (`#` lines skipped), merged with --row-id; "
+                        "the file `sample` writes")
     s.add_argument("--out", required=True)
+
+    sm = sub.add_parser("sample", help="draw a seeded, stratified row-id sample to pin")
+    sm.add_argument("--corpus", required=True)
+    sm.add_argument("--n", type=int, required=True)
+    sm.add_argument("--seed", required=True)
+    sm.add_argument("--out", required=True)
 
     rp = sub.add_parser("report",
                         help="publish eval/measurements/observation-compression-<date>.md "
@@ -2093,10 +2210,35 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
                   "publish the count rather than lowering --min-bytes")
         return 0
 
+    if args.cmd == "sample":
+        corpus_path = Path(args.corpus)
+        ids = draw_sample(load_corpus(corpus_path), args.n, seed=args.seed)
+        out = Path(args.out)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text("".join([
+            f"# {len(ids)} row ids drawn by `draw_sample(n={args.n}, seed={args.seed!r})`,\n",
+            f"# stratified by {SAMPLE_STRATUM}, from {corpus_path.name} "
+            f"({corpus_path.stat().st_size} bytes)\n",
+        ] + [f"{i}\n" for i in ids]), encoding="utf-8")
+        print(f"{len(ids)} row ids -> {out}")
+        return 0
+
     rows = load_corpus(Path(args.corpus))
     if not rows:
         print(f"corpus {args.corpus} has no rows", file=sys.stderr)
         return 2
+    asked = list(args.row_id or ())
+    if args.row_ids_file:
+        asked += read_row_ids_file(Path(args.row_ids_file))
+    try:
+        rows = select_rows(rows, asked)
+    except UnknownRowIds as exc:
+        for rid in exc.missing:
+            print(f"--row-id {rid}: not in corpus {args.corpus}", file=sys.stderr)
+        return 2
+    # Named verbatim on every record and in the printed report, so the JSONL alone
+    # says which set was scored and a re-run with the same ids is checkable against it.
+    selection: list[str] | str = sorted(r.row_id for r in rows) if asked else "all"
     compressors = args.compressor or list(COMPRESSORS)
     budgets = args.budget or list(BUDGETS)
     engine = LogprobClient(args.engine_url, model=args.model)
@@ -2110,6 +2252,10 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
                   session_id=args.session_id)
         for row in rows for c in compressors for b in budgets
     ]
+    for rec in records:
+        rec["row_selection"] = selection
+        if rec["compressor"] == SUMMARY:
+            rec["summary_url"] = args.summary_url
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     with out.open("w", encoding="utf-8") as fh:
@@ -2117,6 +2263,12 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
             fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
     agg = aggregate(records)
     print(render_report(agg, floor=args.floor))
+    if selection == "all":
+        print(f"\nrow selection: all {len(rows)} corpus rows (no --row-id)")
+    else:
+        print(f"\nrow selection ({len(selection)} by --row-id):")
+        for rid in selection:
+            print(f"  {rid}")
     print(f"\n{len(records)} rows of records -> {out}")
     return 0
 

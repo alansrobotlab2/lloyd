@@ -1661,3 +1661,210 @@ def test_a_rung4_mean_with_no_no_op_count_is_refused(tmp_path):
 
     unwritten = tmp_path / "measurements" / "observation-compression-2026-11-26.md"
     assert not unwritten.exists(), "the refusal wrote a note anyway"
+
+
+# ---------------------------------------------------------------------------
+# #4507 — the frontier sample is pinned by row id, and a rung-4 no-op is counted
+# ---------------------------------------------------------------------------
+#
+# The `score` nodes below drive `main()` with `LogprobClient` replaced by a factory
+# that hands back a stub, so the CLI's own selection, refusal and printing are what is
+# exercised — and the factory COUNTS its constructions, which is how "before any arm is
+# scored" is checked rather than asserted.
+
+class _RowsStub(StubEngine):
+    """A `StubEngine` over several rows: a prompt holding ANY row's observation is full."""
+
+    def __init__(self, observations: list[str], **kw) -> None:
+        super().__init__(observation=observations[0], **kw)
+        self.observations = observations
+
+    def _is_full(self, prompt: str) -> bool:
+        return any(obs in prompt for obs in self.observations)
+
+
+def _three_row_corpus(tmp_path: Path) -> tuple[list["R.CorpusRow"], Path]:
+    """Three rows with distinct observations, so a scored row is identifiable by bytes."""
+    import dataclasses
+
+    root, _big = _make_sessions(tmp_path)
+    base = R.harvest(root).rows[0]
+    rows = [dataclasses.replace(base, row_id=f"{base.row_id}-{tag}",
+                                observation=_observation(tag.upper()),
+                                observation_bytes=len(_observation(tag.upper()).encode()))
+            for tag in ("a", "b", "c")]
+    return rows, R.save_corpus(rows, tmp_path / "corpus.yaml")
+
+
+def _patched_client(monkeypatch, rows) -> list:
+    """Replace `LogprobClient` with a stub factory; the returned list logs each build."""
+    built: list = []
+    step = R.render_action(rows[0].next_action)
+
+    def factory(*_a, **_kw):
+        eng = _RowsStub([r.observation for r in rows], full_nll=1.0, cand_nll=1.5,
+                        full_step=step, cand_step=step)
+        built.append(eng)
+        return eng
+
+    monkeypatch.setattr(R, "LogprobClient", factory)
+    return built
+
+
+def _score(tmp_path, name: str, corpus: Path, *extra: str) -> tuple[int, Path]:
+    out = tmp_path / f"{name}.jsonl"
+    rc = R.main(["score", "--corpus", str(corpus), "--compressor", R.RUNG4,
+                 "--budget", "0.25", "--out", str(out), *extra])
+    return rc, out
+
+
+def _records(path: Path) -> list[dict]:
+    return [json.loads(ln) for ln in path.read_text(encoding="utf-8").splitlines()]
+
+
+def test_score_row_id_is_repeatable_and_order_free_and_names_its_set(
+        tmp_path, monkeypatch, capsys):
+    """#4507 clauses 1 and 4: `--row-id` twice scores exactly those rows, in any order.
+
+    Two runs name the same two of three ids in opposite orders. Both score exactly
+    those two rows (by the JSONL's row ids AND by the observations the engine saw —
+    the third row's bytes never reach a prompt), both write byte-identical JSONL, and
+    every record plus the printed report carries the selected set verbatim.
+    """
+    rows, corpus = _three_row_corpus(tmp_path)
+    built = _patched_client(monkeypatch, rows)
+    a, b, c = (r.row_id for r in rows)
+
+    rc1, out1 = _score(tmp_path, "fwd", corpus, "--row-id", a, "--row-id", c)
+    printed1 = capsys.readouterr().out
+    rc2, out2 = _score(tmp_path, "rev", corpus, "--row-id", c, "--row-id", a)
+    printed2 = capsys.readouterr().out
+    assert rc1 == rc2 == 0
+
+    recs1, recs2 = _records(out1), _records(out2)
+    assert {r["row_id"] for r in recs1} == {a, c}
+    assert out1.read_bytes() == out2.read_bytes(), "id order changed what was scored"
+    seen = [p for eng in built for _kind, p in eng.prompts]
+    assert not any(rows[1].observation in p for p in seen), "an unnamed row was scored"
+    assert any(rows[0].observation in p for p in seen) and any(
+        rows[2].observation in p for p in seen)
+
+    for rec in recs1 + recs2:
+        assert rec["row_selection"] == sorted([a, c]), rec["row_selection"]
+    for printed in (printed1, printed2):
+        assert "row selection (2 by --row-id):" in printed, printed
+        assert f"  {a}\n" in printed and f"  {c}\n" in printed and b not in printed
+
+
+def test_an_unknown_row_id_exits_nonzero_before_any_arm_is_scored(
+        tmp_path, monkeypatch, capsys):
+    """#4507 clause 2: a typo costs no engine time.
+
+    One good id and one absent id: `score` exits 2, names the absent id on stderr,
+    never builds the engine client, and writes no run record.
+    """
+    rows, corpus = _three_row_corpus(tmp_path)
+    built = _patched_client(monkeypatch, rows)
+    rc, out = _score(tmp_path, "typo", corpus,
+                     "--row-id", rows[0].row_id, "--row-id", "nosuchid#tool-0")
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "nosuchid#tool-0" in err, err
+    assert built == [], "the engine client was built before the ids were checked"
+    assert not out.exists(), "a refused selection still wrote a run record"
+    with pytest.raises(R.UnknownRowIds) as got:
+        R.select_rows(rows, ["nosuchid#tool-0", rows[0].row_id])
+    assert got.value.missing == ["nosuchid#tool-0"]
+
+
+def test_no_row_id_scores_every_corpus_row_as_before(tmp_path, monkeypatch, capsys):
+    """#4507 clause 3: with no `--row-id` every row is scored, in corpus order.
+
+    The records equal what `score_row` returns for each row directly — the pre-#4507
+    loop — apart from the one `row_selection: "all"` label the run now writes.
+    """
+    rows, corpus = _three_row_corpus(tmp_path)
+    _patched_client(monkeypatch, rows)
+    rc, out = _score(tmp_path, "all", corpus)
+    assert rc == 0
+    recs = _records(out)
+    assert [r["row_id"] for r in recs] == [r.row_id for r in rows]
+    assert all(r.pop("row_selection") == "all" for r in recs)
+    step = R.render_action(rows[0].next_action)
+    direct = [R.score_row(row, _RowsStub([x.observation for x in rows], full_nll=1.0,
+                                         cand_nll=1.5, full_step=step, cand_step=step),
+                          compressor=R.RUNG4, budget=0.25)
+              for row in R.load_corpus(corpus)]
+    assert recs == json.loads(json.dumps(direct, ensure_ascii=False))
+    assert R.select_rows(rows, None) == rows == R.select_rows(rows, [])
+    assert "row selection: all 3 corpus rows" in capsys.readouterr().out
+
+
+def test_compress_flags_a_byte_identical_rung4_row_and_the_report_counts_it(tmp_path):
+    """#4507 clause 5: a rung-4 no-op is flagged per row and counted beside the mean.
+
+    A row whose observation sits under production's `min_chars` comes back from rung 4
+    untouched — one prompt on both arms. `compress()` says so, the record carries it,
+    `aggregate` counts it over the valid rows the mean is taken from, and the report's
+    rung-4 line prints that count in the `no-op` column right after the ΔCE mean.
+    """
+    import dataclasses
+
+    row, _big = _harvested(tmp_path)
+    small_obs = _observation("SMALL", lines=6)
+    assert len(small_obs) < R.DEFAULT_MIN_CHARS
+    small = dataclasses.replace(row, row_id=row.row_id + "-small", observation=small_obs,
+                                observation_bytes=len(small_obs.encode()))
+
+    rep_big, info_big = R.compress(row, 0.25, compressor=R.RUNG4)
+    rep_small, info_small = R.compress(small, 0.25, compressor=R.RUNG4)
+    assert info_big["byte_identical"] is False and rep_big != row.observation
+    assert info_small["byte_identical"] is True and rep_small == small_obs
+
+    recs = [R.score_row(r, _stub(r, full_nll=1.0, cand_nll=1.5),
+                        compressor=R.RUNG4, budget=0.25) for r in (row, small)]
+    assert [r["byte_identical"] for r in recs] == [False, True]
+    assert all(r["valid"] for r in recs)
+    cell = R.aggregate(recs)[(R.RUNG4, 0.25)]
+    assert cell["no_op_rows"] == 1 and cell["no_op_unknown"] == 0
+
+    report = R.render_report(R.aggregate(recs), floor=0.0)
+    header = next(ln for ln in report.splitlines() if ln.startswith("compressor"))
+    assert re.search(r"ΔCE nats\s+no-op", header), header
+    line = next(ln for ln in report.splitlines() if ln.startswith(R.RUNG4 + " "))
+    cols = line.split()
+    assert cols[cols.index(R._cell(cell["mean_delta_ce_nats"], "{:+.4f}")) + 1] == "1", line
+
+    # A record written before the flag existed is an unknown count, never a 0.
+    old = [{k: v for k, v in r.items() if k != "byte_identical"} for r in recs]
+    old_line = next(ln for ln in R.render_report(R.aggregate(old), floor=0.0).splitlines()
+                    if ln.startswith(R.RUNG4 + " "))
+    assert " n/a " in old_line, old_line
+
+
+def test_the_frontier_sample_is_a_seeded_stratified_draw_that_reproduces(tmp_path):
+    """#4507's sample is a rule, not a list someone typed: same seed, same ids.
+
+    The tracked 48-id file is checked for shape only (the 11.6 MB corpus it was drawn
+    from is runtime data outside the tree); the draw itself is checked on a fixture —
+    reproducible, order-free, proportional per stratum, and moved by the seed.
+    """
+    import dataclasses
+
+    rows, _ = _three_row_corpus(tmp_path)
+    many = [dataclasses.replace(rows[i % 3], row_id=f"r{i:03d}",
+                                tool_name=("Read", "Bash", "http_fetch", "Task")[i % 4])
+            for i in range(40)]
+    one = R.draw_sample(many, 12, seed="4507")
+    assert one == R.draw_sample(list(reversed(many)), 12, seed="4507") == sorted(one)
+    assert len(set(one)) == 12
+    by = {t: sum(1 for r in many if r.row_id in one and r.tool_name == t)
+          for t in ("Read", "Bash", "http_fetch", "Task")}
+    assert by == {"Read": 3, "Bash": 3, "http_fetch": 3, "Task": 3}, by
+    assert R.draw_sample(many, 12, seed="other") != one
+
+    pinned = ROOT / "eval" / "measurements" / "observation-compression-frontier-sample-48.txt"
+    ids = R.read_row_ids_file(pinned)
+    assert len(ids) == len(set(ids)) == 48 and ids == sorted(ids)
+    assert all(re.fullmatch(r"\d{8}_\d{6}_\w+#chatcmpl-tool-[0-9a-f]+", i) for i in ids)
+    assert "seed='4507'" in pinned.read_text(encoding="utf-8")
