@@ -1078,14 +1078,27 @@ rather than bytes, and holds its pre-apply bytes through the repair only because
 the repair renames a new inode over each file it touches — the property
 `test_a_hardlink_snapshot_still_holds_the_pre_apply_bytes_after_the_apply` pins,
 since a snapshot that silently tracked the write would be worse than none. And it
-prunes what it creates, keeping the newest 7, because no other mechanism bounds
-that root — `scripts/groundskeeper/retention-sweep.py` has no pattern for
-`facts-snapshot-*`, so an unpruned nightly snapshot of a tree measured at 51,481
-`.md` files on 2026-11-26 (44,227 on 2026-10-26, 46,109 on 2026-11-03) is an
-unbounded store opened on the very night a count
-was scheduled to come down — and because the parking ruling means Step 4 never
-runs on schedule, the one snapshot the 2026-10-17 attended repair left behind is
-still there 40 days on, 229 MB on disk, bounded by nothing (#4592). Re-derive the size — the tree is derived output the
+prunes what it creates, keeping the newest 7. Until 2026-11-26 that shell line was the
+only thing bounding the root it writes: Step 4 sits inside this parked task, and the
+retention sweep had no pattern for `facts-snapshot-*`, so every attended re-run opened
+another hardlink tree over a facts tree measured at 51,481 `.md` files on 2026-11-26
+(44,227 on 2026-10-26, 46,109 on 2026-11-03) and nothing aged it — the directory the
+2026-10-17 repair left behind stood 40 days on at 229 MB on disk. As of 2026-11-26 the
+sweep bounds this store too: store 31 of
+`scripts/groundskeeper/retention-sweep.py` removes a `facts-snapshot-<run tag>`
+directory only when its tag puts it past `FACTS_SNAPSHOT_MAX_AGE_DAYS` (30 days) AND it
+sits outside the newest `FACTS_SNAPSHOT_KEEP` (7). The conjunction is what spares that
+2026-10-17 directory the first applying run — it is past the horizon and the newest
+snapshot on the box at the same time — and the 7 is the number job #98's own skill Step 4
+already keeps, pinned equal to this constant by
+`test_the_retag_skill_still_owns_the_number_seven`, so the two surfaces cannot hold two
+numbers. The sweep is now the
+pruner that fires: task #98 has never run as of 2026-11-26 (`select count(*) from runs
+where task_id=98` over `~/lloyd-data/workers.db` returned no row that day), so Step 4
+has never pruned on schedule either (#4592). The store this adds is one store, not a
+bounded root: the same root still holds `kg-quarantine-<tag>.sqlite`, which #2557 owns,
+and the `entity-vectors.prev-<YYYYMMDD>/` rename of a live store, which matches no glob. Re-derive the size — the
+tree is derived output the
 nightly pipeline rewrites, and the skill's copy of the count was twelve days stale
 when #3408 was filed — with
 `cd ~/lloyd-data/_pipeline/vault-derived && find facts -name '*.md' | wc -l`.
@@ -1209,7 +1222,7 @@ a task whose `skill_name` is that skill — the only route by which the orphan g
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|
 | #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
-| #79 | daily | yes | Retention over the 30 stores it now bounds (24 on 2026-10-27, 28 on 2026-11-12; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 30 lines measured 2026-11-26): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
+| #79 | daily | yes | Retention over the 31 stores it now bounds (24 on 2026-10-27, 28 on 2026-11-12; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 31 lines measured 2026-11-26): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 | #90 | daily | own series only | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
@@ -1344,7 +1357,7 @@ leave unread. #36's queue held 31,291 items and nothing read it back (below).
 The retention sweep has since deleted it: store 10 unlinks `groundskeeper-queue.json`
 and `groundskeeper-writes.jsonl` from the `_pipeline` store directory past
 `GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`
-(`scripts/groundskeeper/retention-sweep.py:615`), added by `d24c7ecd` (#1574) —
+(`scripts/groundskeeper/retention-sweep.py:667`), added by `d24c7ecd` (#1574) —
 measured 2026-10-26 and again 2026-10-29, `ls ~/lloyd-data/_pipeline/groundskeeper*`
 returns no such file, so #36 no longer produces anything at all and the group's
 no-consumer case is one member deep. #70's findings are advisory and reach #83

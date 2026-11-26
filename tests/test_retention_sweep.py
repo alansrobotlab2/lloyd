@@ -172,6 +172,12 @@ def rs(tmp_path, monkeypatch):
         # node that needs it. Created here because an absent root is a state every node has
         # to be able to distinguish from an empty one — the sweep's own `present` flag.
         ("FACTS_QUARANTINE_ROOT", "vault-derived", True),
+        # #4592's snapshot store is the SAME directory as the entry above, so it redirects to
+        # the same tmp subdir: the whole point of the arm is that it bounds the other tenant of
+        # a root store 18 already walks, and the fixture's own guard at the bottom of this
+        # fixture refuses to let a `*_ROOT` constant that deletes reach the real filesystem.
+        # Unregistered, every node in this file would error rather than run.
+        ("FACTS_SNAPSHOT_ROOT", "vault-derived", True),
         # Store 18, the injection-canary corpus (#2862). The one store in this file that
         # lives in the CHECKED-OUT TREE, so unlike every entry above it there IS a real
         # directory at `eval/measurements/injection-canary/` in the very repo these tests
@@ -2024,14 +2030,14 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 30, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 31, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
     # "29 stores", not "29 unbounded-growth stores": the 28th store is held by ruling and
     # measured, so the skill's description bounds 28 of the 29 and a phrase that said
     # otherwise would be a count paid for with a falsehood (#4060).
-    assert "30 stores" in text, (
+    assert "31 stores" in text, (
         "the skill's description states a store count other than 30")
-    assert "30 in all" in text, "the skill's body states a store count other than 30"
+    assert "31 in all" in text, "the skill's body states a store count other than 31"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2135,17 +2141,18 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # without these two rows in it and has to be able to tell that from a broken sweep.
     assert "automod stores: REFUSED" in flat, (
         "the skill never says what a non-production run prints in place of the two rows")
-    # Twenty-SEVEN, not twenty-four: the three automod rungs collapse into one refusal line,
-    # so a refused run prints 30 - 3 = 27 store lines, and it went stale three times over on
-    # the way here (#3789, #3951 and #4060 each added a store that prints outside the guard).
-    # #4205's and #4206's stores join the prints-outside-the-guard set — a data-root journal
-    # that archives is not a deletion the refusal exists to stop — so this is the sentence
-    # that has to be re-derived by the round that appends the next store.
-    assert "twenty-seven store lines plus one refusal line" in flat, (
-        "the skill does not say that a refusal run reports twenty-seven stores by design: "
+    # Twenty-EIGHT, not twenty-seven: the three automod rungs collapse into one refusal line,
+    # so a refused run prints 31 - 3 = 28 store lines, and this sentence has gone stale on
+    # every store that prints outside the guard (#3789, #3951, #4060, #4205 and #4206 each
+    # moved it). #4592's snapshot store joins that set for the same reason as the journals:
+    # an undo tree past its horizon and outside the newest 7 is a reclaim the refusal does
+    # not exist to stop, so it prints from a worktree too. Re-derive it by counting the
+    # stores that print outside `if refusal`, never by copying the previous number.
+    assert "twenty-eight store lines plus that line" in flat, (
+        "the skill does not say that a refusal run reports twenty-eight stores by design: "
         "the three automod rungs collapse into one refusal line, and every data-root "
-        "store — #3789's safety denials, #4205's ceiling reports and #4206's fact write-gate "
-        "journal among them — prints there anyway")
+        "store — #3789's safety denials, #4205's ceiling reports, #4206's fact write-gate "
+        "journal and #4592's facts-snapshot trees among them — prints there anyway")
 
 
 #: A row shaped exactly like the table's own, naming a path the sweep does not print a
@@ -2302,6 +2309,13 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # 30 lines the sweep prints rather than raising
                       # `unrecognised store-count numeral`.
                       "30": 30,
+                      # #4592 added the thirty-first store (the `facts-snapshot-*` undo trees
+                      # `skills/retag-untagged-facts/SKILL.md` Step 1 takes in the SAME
+                      # `vault-derived` root store 18 walks, which nothing bounded until this
+                      # arm), so a vault file saying "31 stores are reported" is graded against
+                      # the 31 lines the sweep prints rather than raising
+                      # `unrecognised store-count numeral`.
+                      "31": 31,
 
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
@@ -2362,11 +2376,12 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     # twenty-sixth (the guard-refusal journal under `safety/`), #3951 the twenty-seventh (the
     # kg index residue), #4060 the twenty-eighth (the HELD `rounds/` store, which is a
     # line the sweep reports and never bounds) and #4205 the twenty-ninth (the ceiling's
-    # unread report files), so the census this guard compares prose against moved from 24 to
-    # 25 to 26 to 27 to 28 to 29.
-    assert len(_store_report) == 30, (
-        f"the sweep prints {len(_store_report)} store lines, not the 29 its report "
-        f"has had since #4205 added the ceiling report store: {_store_report}")
+    # unread report files), #4206 the thirtieth (the fact write-gate's decision journal) and
+    # #4592 the thirty-first (the `facts-snapshot-*` undo trees sharing store 18's root), so
+    # the census this guard compares prose against moved 24 → 25 → 26 → 27 → 28 → 29 → 30 → 31.
+    assert len(_store_report) == 31, (
+        f"the sweep prints {len(_store_report)} store lines, not the 31 its report "
+        f"has had since #4592 added the facts-snapshot store: {_store_report}")
 
     printed = [ln.split(":")[0] for ln in _store_report]
     dirs_line = f"~/lloyd-work round dirs >{rs.WORKTREE_DIR_MAX_AGE_DAYS}d"
@@ -2455,6 +2470,17 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                     # it matches none of the three suffixes and the selector is one short again.
                     rs._fact_write_gate_line(
                         rs.sweep_fact_write_gate(False, time.time())
+                    ).split(":")[0].strip(),
+                    # #4592's snapshot store is invisible for #4206's reason with one
+                    # difference: the renderer DOES carry a delete verb, but it puts
+                    # `candidate`/`freed` in the HEAD and appends its notes after it, so the
+                    # line ends in `no vault-derived root` on a box with no such root yet and
+                    # in the keep/hold note on a box with snapshots in it — never in the
+                    # suffix. A count taken through that selector is one short in EITHER mode,
+                    # which is the drift this node exists to catch. Head taken from the
+                    # renderer, as the three above do, so a wording change moves here first.
+                    rs._facts_snapshot_line(
+                        rs.sweep_facts_snapshot(False, time.time())
                     ).split(":")[0].strip()]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
@@ -2498,7 +2524,7 @@ def test_an_indented_report_line_is_a_store_whatever_it_ends_in():
         f"the rule counted a line that is not a store: {report}")
 
 
-def test_a_run_outside_the_production_checkout_reports_twenty_seven_stores_and_one_refusal_line(
+def test_a_run_outside_the_production_checkout_reports_twenty_eight_stores_and_one_refusal_line(
         rs, monkeypatch, capsys):
     """The other direction of the same rule: a refused rung prints one refusal line, and
     that line is not a store.
@@ -2516,7 +2542,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_seven_stores_and_o
     the predicate's original reason (a worktree shares the live repo's refs) does not
     literally cover it, but a tree that is not the live checkout has no business deciding
     to compress the loop's own audit trail, and one guard that covers all three stores is
-    the rule. A refused run therefore still prints twenty-four store lines plus one refusal
+    the rule. A refused run therefore still prints twenty-eight store lines plus one refusal
     line: neither the pytest basetemp root #2418 added, the tool-quality store #2472 added,
     nor the injection-canary corpus #2862 added is one of the three guarded stores, so all
     three print here whatever the tree is, and the last two of those are asserted below
@@ -2527,7 +2553,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_seven_stores_and_o
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 27, f"a refusal run should report twenty-seven stores: {report}"
+    assert len(report) == 28, f"a refusal run should report twenty-seven stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2739,7 +2765,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 30, (
+    assert len(items) == len(_store_report) == 31, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -8861,11 +8887,18 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     # typography while the thing it is for — does the skill count what the sweep prints —
     # went ungraded. The count itself is checked against the printed lines by the
     # table-row node and by `test_the_task_description_names_every_store_the_sweep_prints`.
-    assert "30 stores" in front, front[:200]
-    assert "30 in all" in text, "the skill's body states a count other than 30"
+    assert "31 stores" in front, front[:200]
+    assert "31 in all" in text, "the skill's body states a count other than 31"
     rows = _skill_table_rows(text)
+    # Selected on the row's OWN head cell — the path it is a row about — not across the body.
+    # #4592's snapshot store is the other tenant of this same root, and its acceptance clause
+    # requires its row to state in as many words that the glob reaches neither `facts/` nor
+    # `facts-quarantine-*`, so a body-wide match counts that row too and reads two rows
+    # describing the quarantine store where the table carries one. Matching the path keeps the
+    # guard's actual force: a SECOND row for `facts-quarantine-*/` still reddens here, and the
+    # snapshot row is no longer mistaken for it.
     hits = [(label, body) for label, body in rows.items()
-            if "facts-quarantine-" in body or "facts quarantine" in label.lower()]
+            if "facts-quarantine-" in label]
     assert len(hits) == 1, (f"{len(hits)} rows describe the quarantine store in {skill}; "
                             f"{len(rows)} rows parsed; heads: {sorted(rows)[:3]}")
     body = hits[0][1]
@@ -9961,13 +9994,13 @@ def test_the_injection_canary_count_path_has_no_way_to_change_the_store(rs):
         "function holds — a mode string here is where a read becomes a write")
 
 
-def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prints_twenty_three(
+def test_the_injection_canary_store_prints_twelfth_last_and_survives_the_refusal(
         rs, monkeypatch, capsys):
     """#2862 clause 4, re-pointed by #2924, #3188, #3209, #3379, #3499 and #3789: a refused
-    run prints twenty-four lines and a production run prints 27, with the canary line
-    SEVENTH-LAST in both.
+    run prints twenty-eight lines and a production run prints 31, with the canary line
+    TWELFTH-LAST in both.
 
-    Seventh-last is not a demotion, it is the pin that the append order is intact.
+    Twelfth-last is not a demotion, it is the pin that the append order is intact.
     `test_the_task_description_names_every_store_the_sweep_prints` matches task 79's
     enumeration to the printed lines POSITIONALLY, so a store is added at the END and the
     items above it keep the rule they always had: #2924's ceiling sample store took the last
@@ -9981,7 +10014,7 @@ def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prin
     The refused run is the other half: this store answers to `_TREE`, not to the
     production check, so a run from a worktree or sandbox counts it anyway — the corpus
     is a tracked directory present in every checkout, and refusing the deletions elsewhere
-    says nothing about it. That is why the count is 23 (26 less the three automod rungs that
+    says nothing about it. That is why the count is 28 (31 less the three automod rungs that
     collapse into one refusal line) and why the line still appears after the refusal. The
     ceiling store answers to `DATA_ROOT` and survives the same guard for the same reason;
     `test_the_ceiling_sample_store_prints_sixth_last_and_survives_the_refusal`
@@ -9989,17 +10022,17 @@ def test_the_injection_canary_store_prints_seventh_last_and_the_refused_run_prin
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 30, f"a production run prints 30 store lines: {lines}"
+    assert len(lines) == 31, f"a production run prints 31 store lines: {lines}"
     # #3499 appended the memory-graph store below it, #3789 the safety-denial store below
     # that, #3951 the kg index residue and #4060 the held rounds store, so this line sits
-    # eight from the end.
-    assert lines[-11].split(":")[0].strip().startswith("injection-canary corpus"), lines[-11]
+    # twelve from the end.
+    assert lines[-(12)].split(":")[0].strip().startswith("injection-canary corpus"), lines[-(12)]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 27, (
-        f"a refused run prints twenty-seven store lines plus the refusal: {refused}")
-    assert refused[-11].split(":")[0].strip().startswith("injection-canary corpus"), refused[-11]
+    assert len(refused) == 28, (
+        f"a refused run prints twenty-eight store lines plus the refusal: {refused}")
+    assert refused[-(12)].split(":")[0].strip().startswith("injection-canary corpus"), refused[-(12)]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -10223,17 +10256,17 @@ def test_the_ceiling_sample_store_prints_seventh_last_and_survives_the_refusal(r
     file: a run from a round's worktree declines the loop's three refs and still bounds this
     one, so a box that only ever runs the sweep from a gate cannot let the store grow past
     the horizon while its report says nothing about it. That is the same argument that put
-    the canary line after the refusal, and it is why a refused run prints 23 lines: 26 less
+    the canary line after the refusal, and it is why a refused run prints 28 lines: 31 less
     the three automod rungs that collapse into one refusal line.
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 30, f"a production run prints 30 store lines: {report}"
-    assert report[-10].split(":")[0].strip().startswith("ceiling sample rows"), report[-10]
+    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
+    assert report[-(11)].split(":")[0].strip().startswith("ceiling sample rows"), report[-(11)]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 27, f"a refused run prints twenty-seven store lines: {refused}"
-    assert refused[-10].split(":")[0].strip().startswith("ceiling sample rows"), refused[-10]
+    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
+    assert refused[-(11)].split(":")[0].strip().startswith("ceiling sample rows"), refused[-(11)]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -10426,12 +10459,12 @@ def test_the_capture_store_prints_sixth_last_and_survives_the_refusal(rs, monkey
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 30, f"a production run prints 30 store lines: {report}"
-    assert report[-9].split(":")[0].strip().startswith("canary tool-call captures"), report[-9]
+    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
+    assert report[-(10)].split(":")[0].strip().startswith("canary tool-call captures"), report[-(10)]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 27, f"a refused run prints twenty-seven store lines: {refused}"
-    assert refused[-9].split(":")[0].strip().startswith("canary tool-call captures"), refused[-9]
+    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
+    assert refused[-(10)].split(":")[0].strip().startswith("canary tool-call captures"), refused[-(10)]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -11235,16 +11268,16 @@ def test_the_temp_store_line_prints_third_last_and_survives_the_refusal(rs, monk
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 30, f"a production run prints 30 store lines: {report}"
-    last = report[-7]
+    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
+    last = report[-(8)]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 27, f"a refused run prints twenty-seven store lines: {refused}"
-    assert refused[-7].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-7]
+    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
+    assert refused[-(8)].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-(8)]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -11564,14 +11597,15 @@ def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_regist
     assert len(mg) == 1, f"expected the store's one line among {len(lines)}, got {mg}"
     # #3499 clause 4 pinned this line as the LAST printed store line, which was true until
     # #3789 appended the safety-denial store below it. What that clause was for — the store is
-    # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged,
-    # so the position moves to second-to-last and the reason stays on the line.
-    assert lines.index(mg[0]) == len(lines) - 6, (
-        "the store does not print sixth-to-last, the slot #3499's append left it in once "
+    # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged;
+    # only the offset moves, one place per store appended below it since: #3789, #3951, #4060,
+    # #4205, #4206 and now #4592's snapshot store, which is why this reads seventh-to-last.
+    assert lines.index(mg[0]) == len(lines) - 7, (
+        "the store does not print seventh-to-last, the slot #3499's append left it in once "
         "#3789 appended the safety-denial store, #3951 the kg index residue store, #4060 "
-        "the held rounds store, #4205 the ceiling report store and #4206 the fact write-gate "
-        "journal below it: task 79's numbered enumeration is matched to these "
-        "lines positionally")
+        "the held rounds store, #4205 the ceiling report store, #4206 the fact write-gate "
+        "journal and #4592 the facts-snapshot store below it: task 79's numbered enumeration "
+        "is matched to these lines positionally")
 
 
 def test_an_absent_memory_graph_directory_reports_itself_as_absent_and_is_not_created(rs):
@@ -13054,7 +13088,7 @@ def test_the_skill_row_names_the_shape_record_and_the_substring_the_line_prints_
     # a second count, is what fails here — a store added by someone else moves ONE number, and
     # both of the guards named above move with it.
     flat = text.replace("\n", " ")
-    assert flat.count("30 stores") == 1 and "30 in all" in flat, (
+    assert flat.count("31 stores") == 1 and "31 in all" in flat, (
         "the store counts moved off the shipped 30: the shape record must fold into store 26's "
         "existing line, not become a store of its own")
     assert "29 stores" not in flat and "28 stores" not in flat, (
@@ -13762,10 +13796,10 @@ def test_main_prints_the_index_residue_line_as_the_twenty_eighth_store(rs, capsy
     assert len(kg) == 1, f"expected exactly one index-residue line in {lines}"
     # #4060 appended the held-rounds line below this one, so the kg line is second-to-last
     # now — still the 27th store, and still behind every line task 79 enumerates positionally.
-    assert kg[0] == lines[-4], (
+    assert kg[0] == lines[-(5)], (
         f"the store is not fourth-to-last, so the positional enumeration moved: {lines[-5:]}")
     assert "no store yet" in kg[0], kg[0]
-    assert len(lines) == 30, f"a run prints {len(lines)} store lines: {lines}"
+    assert len(lines) == 31, f"a run prints {len(lines)} store lines: {lines}"
 
     argv.append("--apply")
     rs.main()
@@ -14241,17 +14275,17 @@ def test_the_ceiling_report_store_prints_last_and_survives_the_refusal(rs, _stor
     """
     _ceiling_report(rs, "lloyd-bash-ceiling-8111-aaaa9999.report", days=30)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 30, f"a production run prints 30 store lines: {report}"
-    assert report[-2].split(":")[0].strip().startswith("ceiling report files"), report[-2]
-    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in report[-2], report[-2]
+    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
+    assert report[-(3)].split(":")[0].strip().startswith("ceiling report files"), report[-(3)]
+    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in report[-(3)], report[-(3)]
     assert [ln.split(":")[0].strip() for ln in report[:-1]] == \
         [ln.split(":")[0].strip() for ln in _store_report[:-1]], (
         "appending the 29th line moved one of items 1-28, which task 79's enumeration is "
         "matched to by index")
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 27, f"a refused run prints twenty-seven store lines: {refused}"
-    assert refused[-2].split(":")[0].strip().startswith("ceiling report files"), refused[-2]
+    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
+    assert refused[-(3)].split(":")[0].strip().startswith("ceiling report files"), refused[-(3)]
 def test_the_report_the_writer_actually_writes_is_the_file_this_store_reclaims(rs, tmp_path):
     """#4205: the process boundary the store exists to sit on, crossed for real.
 
@@ -14604,9 +14638,9 @@ def test_the_write_gate_line_is_the_last_store_line_and_survives_the_refusal(
     reason registering the store does anything for a file that had, until now, no bound.
     """
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 30, f"a production run prints 30 store lines: {report}"
-    assert report[-1].split(":")[0].strip().startswith("fact-write-gate rows"), report[-1]
-    assert f">{rs.FACT_WRITE_GATE_ARCHIVE_AGE_DAYS}d" in report[-1], report[-1]
+    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
+    assert report[-(2)].split(":")[0].strip().startswith("fact-write-gate rows"), report[-(2)]
+    assert f">{rs.FACT_WRITE_GATE_ARCHIVE_AGE_DAYS}d" in report[-(2)], report[-(2)]
     assert [ln.split(":")[0].strip() for ln in report[:-1]] == \
         [ln.split(":")[0].strip() for ln in _store_report[:-1]], (
         "appending the 30th line moved one of items 1-29, which task 79's enumeration "
@@ -14614,8 +14648,8 @@ def test_the_write_gate_line_is_the_last_store_line_and_survives_the_refusal(
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 27, f"a refused run prints twenty-seven store lines: {refused}"
-    assert refused[-1].split(":")[0].strip().startswith("fact-write-gate rows"), refused[-1]
+    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
+    assert refused[-(2)].split(":")[0].strip().startswith("fact-write-gate rows"), refused[-(2)]
 
 
 def test_the_write_gate_window_constant_states_the_floor_under_it():
@@ -14795,3 +14829,409 @@ def test_an_unreadable_write_gate_pin_holds_every_update_row(rs, tmp_path):
     assert all(u in live for u in upd) and add not in live, live
     line = rs._fact_write_gate_line(out)
     assert "write_gate pin unreadable in config.yaml: every update row held" in line, line
+
+
+@pytest.fixture()
+def vault_root(rs, tmp_path) -> Path:
+    """Store 18's root in the fixture tree, so a node can name what lives BESIDE a store.
+
+    Both `vault-derived` stores are redirected here — `FACTS_QUARANTINE_ROOT` by the
+    `_FACT_PATH_REDIRECTS` table and `FACTS_SNAPSHOT_ROOT` by its own entry — and a node
+    about the reach of one of them has to be able to seed the other tenant of the directory:
+    the live `facts/` tree, a quarantine run, the `kg-quarantine-*.sqlite` sibling. With the
+    real path, every one of those assertions would be about `~/lloyd-data`.
+    """
+    root = tmp_path / "vault-derived"
+    root.mkdir(exist_ok=True)
+    return root
+
+
+# ---------------------------------------------------------------------------
+# The `facts-snapshot-*` undo trees — the 31st store, the other tenant of the
+# root store 18 walks (#4592).
+#
+# `skills/retag-untagged-facts/SKILL.md` Step 1 takes a `cp -al` snapshot of the whole
+# `facts/` tree before it writes a byte, and Step 4 keeps the newest 7 — but Step 4 is a
+# shell line inside that SKILL.md and NOT in its python script, and the task that would run
+# it (#98) is parked under Alan's 2026-10-17 spent ruling with zero rows in `workers.db`'s
+# `runs` table (`select task_id,count(*) from runs where task_id in ('79','98')` gives
+# `79|25` and no row for 98). So the only pruner of this store was prose in a job that has
+# never run, while the store is created by whoever performs the attended repair. What that
+# left on the box at 2026-11-26: exactly one `facts-snapshot-20261017T143113Z`, 40 days old,
+# 229 MB on disk against 126 MB apparent over 41,375 `.md` files, with `git grep -c
+# facts-snapshot -- scripts/groundskeeper/retention-sweep.py` reading 0. Every attended
+# re-run added another ~230 MB and nothing in the fleet noticed.
+#
+# The bound is a CONJUNCTION and both halves are load-bearing, which is what the first three
+# nodes below measure separately: horizon-only would have deleted the one directory on the
+# box on the first applying run (it is past any horizon AND it is the newest snapshot there
+# is), and keep-only would let the seventh-newest survive into a decade-old tree that is
+# nobody's undo any more. `sweep_pytest_tmpdirs` is this file's one count-bounded store and
+# its `overage = sorted(runs)[:len(runs) - PYTEST_TMP_MAX_DIRS]` is the keep-logic precedent;
+# N is 7 because `tests/test_autonomy_jobs_doc_claims.py` reads 7 out of the retag skill's own
+# command and asserts it, so a second owner with a second number would be the #4480 shape —
+# `test_the_retag_skill_still_owns_the_number_seven` pins that the 7 was not edited.
+#
+# Store 18's guards are carried verbatim because a snapshot tree is the same object and tests
+# already exist for the quarantine's: age comes from the RUN TAG and never from mtime; a name
+# whose tag is not a parseable UTC instant is held and counted apart rather than aged on a
+# guess; an absent root prints `no vault-derived root` and is never created by the walk; a
+# symlink is skipped, never followed.
+# ---------------------------------------------------------------------------
+
+#: Bytes in each seeded snapshot's payload: exactly 2 KiB, so a report line's byte figure is
+#: `n * 2 KiB` with no rounding to reason about.
+_SNAP_BYTES = 2048
+
+#: Nine tag-dated snapshots 40 days before `_SNAP_NOW`, in the order the retag skill's own
+#: `ls -1d` would sort them: the first is the oldest.
+_SNAP_OLD = tuple(f"20261017T1431{i:02d}Z" for i in range(9))
+
+#: Two snapshots inside the 30-day horizon, for the node that measures the horizon half.
+_SNAP_FRESH = ("20261120T000000Z", "20261125T000000Z")
+
+#: The instant every node below pretends is "now": the date the item's measurements were taken
+#: at. Frozen rather than `time.time()` because the tags above are fixed calendar dates — a
+#: real `now` would make the nine 40-day-old snapshots 41 days old tomorrow and slowly move
+#: them across a horizon the nodes claim is 30, so the arithmetic each node states would drift
+#: out of its own meaning.
+_SNAP_NOW = datetime(2026, 11, 26, tzinfo=timezone.utc).timestamp()
+
+
+def _snap_seed(root: Path, tags, *, size: int = _SNAP_BYTES,
+               when: float | None = None) -> list[Path]:
+    """One `facts-snapshot-<tag>Z/` per tag, each holding `size` bytes in one file.
+
+    Shaped like `_seed_quarantine_run` so the two tenants of this root are seeded by the same
+    kind of helper. `when` sets the directory's own mtime, which exists only so a node can
+    prove age does NOT come from it.
+    """
+    made = []
+    for tag in tags:
+        d = root / f"facts-snapshot-{tag}"
+        (d / "facts" / "Entity").mkdir(parents=True)
+        (d / "facts" / "Entity" / "Entity-state.md").write_bytes(b"x" * size)
+        if when is not None:
+            os.utime(d, (when, when))
+        made.append(d)
+    return made
+
+
+def _snap_names(root: Path) -> list[str]:
+    return sorted(p.name for p in root.glob("facts-snapshot-*"))
+
+
+def _snap_line(rs, res) -> str:
+    return rs._facts_snapshot_line(res)
+
+
+def test_nine_old_snapshots_leave_the_newest_seven_and_remove_the_oldest_two(rs):
+    """#4592 clause 1: nine tag-dated snapshots 40 days old → the newest 7 stay, the oldest
+    2 are removed, and the count says which is which.
+
+    All nine are past the horizon, so the keep rail is the only thing deciding, and `kept`
+    equals `kept_newest` — the store's whole keep story in one pair of numbers. The two names
+    removed are the two OLDEST tags: an attended retag keeps its seven most recent undo trees
+    whatever age they are.
+    """
+    root = rs.FACTS_SNAPSHOT_ROOT
+    _snap_seed(root, _SNAP_OLD)
+
+    dry = rs.sweep_facts_snapshot(False, _SNAP_NOW, root=root)
+    assert dry["tag_dated"] == 9 and dry["over_age"] == 9, dry
+    assert dry["kept"] == 7 and dry["kept_newest"] == 7, dry
+    assert [c["name"] for c in dry["candidates"]] == [
+        f"facts-snapshot-{t}" for t in _SNAP_OLD[:2]], [c["name"] for c in dry["candidates"]]
+    assert dry["bytes"] == 2 * _SNAP_BYTES and dry["freed"] == 0, dry
+    assert _snap_names(root) == sorted(f"facts-snapshot-{t}" for t in _SNAP_OLD), \
+        "a dry run deleted"
+
+    gone = rs.sweep_facts_snapshot(True, _SNAP_NOW, root=root)
+    assert gone["removed"] == 2 and gone["freed"] == 2 * _SNAP_BYTES, gone
+    assert _snap_names(root) == sorted(f"facts-snapshot-{t}" for t in _SNAP_OLD[2:]), \
+        _snap_names(root)
+
+
+def test_a_snapshot_inside_the_horizon_is_never_a_candidate_however_the_count_falls_out(rs):
+    """#4592 clause 1's other half: the horizon, measured on its own.
+
+    Eleven snapshots — the nine 40-day-old ones plus two inside the 30-day horizon. The keep
+    rail alone would take four (eleven minus seven); the horizon is what holds the two fresh
+    ones back, and the four taken are still the four oldest. A future retag burst of eight
+    snapshots in a week is the same shape: the fresh ones are nobody's deletion candidate while
+    they are the undo tree of a repair that may still be rolled back.
+    """
+    root = rs.FACTS_SNAPSHOT_ROOT
+    _snap_seed(root, _SNAP_OLD + _SNAP_FRESH)
+
+    res = rs.sweep_facts_snapshot(True, _SNAP_NOW, root=root)
+    assert res["tag_dated"] == 11 and res["over_age"] == 9, res
+    assert res["kept_newest"] == 7 and res["removed"] == 4, res
+    assert [c["name"] for c in res["candidates"]] == [
+        f"facts-snapshot-{t}" for t in _SNAP_OLD[:4]], [c["name"] for c in res["candidates"]]
+    assert _snap_names(root) == sorted(
+        f"facts-snapshot-{t}" for t in _SNAP_OLD[4:] + _SNAP_FRESH), _snap_names(root)
+
+
+def test_the_first_applying_run_keeps_the_one_directory_already_on_the_box(rs):
+    """#4592's pre-flight: eight snapshots ALL past the horizon → exactly one deletion.
+
+    This is the shape of the box today: the single `facts-snapshot-20261017T143113Z` is 40 days
+    old, so it is past any horizon the arm could be given, and it is also the newest snapshot
+    that exists. Had the arm aged on the horizon alone, the first applying run of task #79 would
+    have deleted a month of pre-existing undo content on the very sweep that arrived to bound
+    the store — and nothing else would have noticed, because the tree it protects is invisible
+    to every other store. Eight seeds stand in for "one or more, all old": seven stay, and the
+    one that goes is the OLDEST, which is what makes the existing directory the survivor.
+    """
+    root = rs.FACTS_SNAPSHOT_ROOT
+    _snap_seed(root, _SNAP_OLD[:8])
+
+    res = rs.sweep_facts_snapshot(True, _SNAP_NOW, root=root)
+    assert res["tag_dated"] == 8 and res["over_age"] == 8, res
+    assert res["kept"] == 7 and res["kept_newest"] == 7, res
+    assert res["removed"] == 1, res
+    assert _snap_names(root) == sorted(f"facts-snapshot-{t}" for t in _SNAP_OLD[1:8]), \
+        _snap_names(root)
+
+
+def test_the_snapshot_glob_reaches_neither_the_live_tree_nor_the_quarantine_nor_kg(rs):
+    """#4592 clause 2: with the live `facts/` tree, store 18's quarantine run, the #2557
+    `kg-quarantine-<tag>.sqlite` and `entity-vectors.prev-20260926/` seeded beside old
+    snapshots, an APPLY leaves all four present and the live file's BYTES unchanged.
+
+    This root holds four tenants and this arm bounds one of them. A glob widened to `facts-*`
+    or written as `*snapshot*` would have reached `facts/` and store 18's run directory, and the
+    whole premise of an undo tree is that deleting it is not this arm's decision to make: the
+    quarantine is a 90-day store with its own keep-last-200 (#4060) and the kg residue is left
+    on #2557 by store 18's own docstring. The live file's bytes are asserted and not just its
+    name, because a store that truncates rather than removes is the worse of the two failures.
+    """
+    root = rs.FACTS_SNAPSHOT_ROOT
+    live = root / "facts" / "Entity"
+    live.mkdir(parents=True)
+    (live / "Entity-state.md").write_bytes(b"entity state bytes\n")
+    quarantined = root / "facts-quarantine-20260923T070837Z"
+    quarantined.mkdir()
+    (quarantined / "held.md").write_bytes(b"held\n")
+    (root / "kg-quarantine-20260923T070837Z.sqlite").write_bytes(b"sqlite\n")
+    (root / "entity-vectors.prev-20260926").mkdir()
+    _snap_seed(root, _SNAP_OLD)
+
+    res = rs.sweep_facts_snapshot(True, _SNAP_NOW, root=root)
+    assert res["removed"] == 2 and res["tag_dated"] == 9, res
+    assert (live / "Entity-state.md").read_bytes() == b"entity state bytes\n"
+    assert (quarantined / "held.md").is_file(), "store 18's quarantine run was reached"
+    assert (root / "kg-quarantine-20260923T070837Z.sqlite").is_file(), \
+        "the #2557 sibling was reached"
+    assert (root / "entity-vectors.prev-20260926").is_dir(), \
+        "the dated .prev rename was reached"
+    assert rs.FACTS_SNAPSHOT_GLOB == "facts-snapshot-*", rs.FACTS_SNAPSHOT_GLOB
+
+
+def test_a_snapshot_with_no_parseable_tag_is_held_and_an_absent_root_is_not_created(rs,
+                                                                                    tmp_path):
+    """#4592 clause 3: store 18's guards, carried onto this store and measured on it.
+
+    `facts-snapshot-Z` carries no tag and `facts-snapshot-20261399T999999Z` carries a tag that
+    is not an instant. Both are touched to 2020-01-01 — older than any horizon on this box — and
+    both must survive an APPLY counted apart, because a directory whose name cannot say when it
+    was taken is exactly the case where guessing from mtime would delete real undo content:
+    `cp -al` does not preserve the mtime the retag skill puts in the name, so mtime here says
+    nothing about when the snapshot was taken.
+
+    The symlink half is store 18's third rule: a link aimed at a tree OUTSIDE this root is
+    skipped, never followed, and its target must still exist afterwards — `rmtree` on a linked
+    directory would be a delete of someone else's tree, and the thing a snapshot most plausibly
+    points at is the live `facts/` tree.
+
+    The absent-root half is the fourth: the line prints `no vault-derived root` and the
+    directory stays absent, because a `mkdir` inside a run that is only reporting makes "no
+    snapshots" and "nobody has ever retagged" the same report — and store 18's walker refuses to
+    do it for the same reason.
+
+    The two held counts are asserted SEPARATELY (`untagged` 1, `unparseable` 1) rather than as
+    a sum, because the two names fail differently and a future arm that folded them into one
+    bucket would pass a summed assertion while losing the distinction store 18 keeps.
+    """
+    root = rs.FACTS_SNAPSHOT_ROOT
+    ancient = _SNAP_NOW - 3650 * 86_400.0
+    held = _snap_seed(root, ["Z", "20261399T999999Z"], when=ancient)
+    outside = tmp_path / "someone-elses-tree"
+    (outside / "Entity").mkdir(parents=True)
+    (outside / "Entity" / "Entity-state.md").write_bytes(b"not mine\n")
+    (root / "facts-snapshot-20200101T000000Z").symlink_to(outside)
+
+    res = rs.sweep_facts_snapshot(True, _SNAP_NOW, root=root)
+    assert res["untagged"] == 1 and res["unparseable"] == 1, res
+    assert res["tag_dated"] == 0 and res["over_age"] == 0, res
+    assert res["candidates"] == [] and res["removed"] == 0 and res["freed"] == 0, res
+    assert all(d.is_dir() for d in held), [d.name for d in held if not d.is_dir()]
+    assert (outside / "Entity" / "Entity-state.md").read_bytes() == b"not mine\n", \
+        "a symlinked snapshot was followed"
+
+    absent = tmp_path / "no-such-data-root" / "_pipeline" / "vault-derived"
+    assert not absent.exists()
+    idle = rs.sweep_facts_snapshot(False, _SNAP_NOW, root=absent)
+    assert idle["present"] is False, idle
+    assert "no vault-derived root" in _snap_line(rs, idle), _snap_line(rs, idle)
+    assert not absent.exists(), "the run created the store it was reporting on"
+
+
+def test_the_store_prints_exactly_one_line_naming_each_candidate_with_its_bytes(
+        rs, monkeypatch, capsys):
+    """#4592 clause 4, report half: `main()` grows by exactly ONE store line and it is the
+    last, and the directories it is about are named inline with their bytes.
+
+    `main()` is run whole, so the count is the real one: 31 store lines, exactly one of them
+    this store's. It is APPENDED rather than inserted beside store 18's quarantine line because
+    task #79's numbered enumeration is matched to these lines POSITIONALLY — every item before
+    it keeps the rule it already names, which is #2862's reason inherited through #2924, #3188,
+    #3209, #3379, #3499, #3789, #3951, #4060, #4205 and #4206, the last of which moved the
+    count to 30 the same way. The names and bytes are inline because this is the only store in
+    the report measured in hardlink trees: `229 MB` of shared inodes is not inferable from a
+    directory count, and the operator deciding whether to widen the keep rail needs to see what
+    each candidate is worth.
+    """
+    _snap_seed(rs.FACTS_SNAPSHOT_ROOT, _SNAP_OLD)
+    out = _dry_run_report(rs, monkeypatch, capsys)
+    report = _store_report_lines(out)
+    assert len(report) == 31, report
+    mine = [line for line in report if "facts snapshot dirs" in line]
+    assert len(mine) == 1, mine
+    assert report[-1] == mine[0], "the new store line is not the last one printed"
+    assert mine[0] == (
+        "facts snapshot dirs (facts-snapshot-* >30d, keep newest 7): 2 dir(s), 4 KiB "
+        "candidate — facts-snapshot-20261017T143100Z 2 KiB/1f, "
+        "facts-snapshot-20261017T143101Z 2 KiB/1f; 9 tag-dated, 7 kept, 7 by the keep "
+        "rule"), repr(mine[0])
+
+
+def test_the_store_line_is_word_identical_in_dry_run_and_apply_except_the_tail(rs):
+    """#4592 clause 4's second half: dry and apply differ ONLY in `candidate`/`freed`.
+
+    The rule this file states for every byte-bearing store — store 18's own line puts it as
+    "word-identical in dry and apply except that freed is 0 B here", and #2585's whole point was
+    that an operator who read a dry run and then read the applying run must be able to diff the
+    two by eye and see only what was taken. Both lines come from the same `_facts_snapshot_line`
+    that `main()` prints, over the same tree, so nothing here is a re-implementation of it.
+    """
+    root = rs.FACTS_SNAPSHOT_ROOT
+    _snap_seed(root, _SNAP_OLD)
+    dry = _snap_line(rs, rs.sweep_facts_snapshot(False, _SNAP_NOW, root=root))
+    applied = _snap_line(rs, rs.sweep_facts_snapshot(True, _SNAP_NOW, root=root))
+    # The two leading spaces belong to the renderer: `_facts_snapshot_line` builds the head
+    # with the indent already in it and `main()` prints the string unchanged, exactly as the
+    # other 30 stores do — so the indent is part of the store line, which is the thing clause 4
+    # asks for ("exactly one new INDENTED store line"), and it is pinned here rather than
+    # stripped away. Everything after the verb is the tail the two modes share word for word.
+    head = ("  facts snapshot dirs (facts-snapshot-* >30d, keep newest 7): "
+            "2 dir(s), 4 KiB ")
+    assert dry.startswith(head) and applied.startswith(head), (dry, applied)
+    # One comparison, normalising the ONE word the clause licenses the two modes to differ by:
+    # head, the inline names-and-bytes, and the trailing counts must be byte-identical. The
+    # first cut here asserted `dry.split(" — ")[0] == applied.split(" — ")[0]`, which compared
+    # the two heads INCLUDING that word — so it demanded both `…4 KiB candidate` == `…4 KiB
+    # freed` (red, always) and it was the only thing in the file claiming to pin the operator
+    # diff, which is why an impossible assert is worse than no assert: the clause read as
+    # covered while no run of it could pass.
+    assert (dry.replace(" KiB candidate — ", " KiB MODE — ")
+            == applied.replace(" KiB freed — ", " KiB MODE — ")), (dry, applied)
+    assert dry.endswith("9 tag-dated, 7 kept, 7 by the keep rule"), dry
+    assert applied.endswith("9 tag-dated, 7 kept, 7 by the keep rule"), applied
+    assert dry[len(head):].startswith("candidate — "), dry
+    assert applied[len(head):].startswith("freed — "), applied
+    # both forms name every candidate with its bytes: a freed line that dropped the
+    # names would leave the operator unable to say what the bytes had been
+    for tag in _SNAP_OLD[:2]:
+        assert tag in dry and tag in applied, (tag, dry, applied)
+
+
+def test_the_script_row_and_the_shipped_skill_table_each_gained_one_row(rs):
+    """#4592 clause 4's third half: the script's numbered row states both constants, and the
+    shipped skill's table gained exactly one row naming this store and its glob.
+
+    The script's row lives in the module docstring (the four-column `| glob | bound | policy |`
+    table is the SKILL's, and `test_the_skill_table_names_every_store` is what holds it against
+    the printed lines), so the two are read here as what they are: a numbered entry that must
+    carry `FACTS_SNAPSHOT_MAX_AGE_DAYS = 30` and `FACTS_SNAPSHOT_KEEP = 7` because a row naming
+    a constant without its value is how store 18's horizon drifted from 30 to 90 in prose before
+    #3986 wrote this file, and a table row that must name `facts-snapshot-*` because that cell is
+    what an operator reads as the arm's reach.
+    """
+    doc = rs.__doc__ or ""
+    assert "facts-snapshot-" in doc, "the module docstring gained no row for the store"
+    body = " ".join(doc[doc.index("31. "):].split())
+    assert "FACTS_SNAPSHOT_MAX_AGE_DAYS = 30" in body, body[:400]
+    assert "FACTS_SNAPSHOT_KEEP = 7" in body, body[:400]
+    assert "facts-snapshot-" in body, body[:200]
+
+    skill = rs.vault_root() / "skills" / "retention-sweep" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    text = skill.read_text(encoding="utf-8")
+    rows = _skill_table_rows(text)
+    assert len(rows) == 31, [k[:60] for k in rows]
+    mine = [row for row in rows.values() if "facts-snapshot-*" in row]
+    assert len(mine) == 1, mine
+    assert "FACTS_SNAPSHOT_MAX_AGE_DAYS" in mine[0] and "FACTS_SNAPSHOT_KEEP" in mine[0], mine[0]
+    assert "31 stores" in text and "31 in all" in text, text[:300]
+
+
+def test_the_retag_skill_still_owns_the_number_seven(rs):
+    """#4592 clause 5's other side: the 7 in `skills/retag-untagged-facts/SKILL.md` was NOT
+    moved to match this arm.
+
+    That skill states keep-7 in a shell line, and
+    `tests/test_autonomy_jobs_doc_claims.py` reads 7 back out of it and asserts it against the
+    command's behaviour on a planted tree. Two owners for one policy with two numbers is the
+    #4480 shape, so this arm's `FACTS_SNAPSHOT_KEEP` had to be set to 7 rather than the other
+    way round, and this node is what stops a later round "harmonising" the two by editing the
+    skill.
+    """
+    skill = rs.vault_root() / "skills" / "retag-untagged-facts" / "SKILL.md"
+    if not skill.is_file():
+        pytest.skip(f"the vault skill is not reachable from here: {skill}")
+    text = skill.read_text(encoding="utf-8")
+    assert rs.FACTS_SNAPSHOT_KEEP == 7, rs.FACTS_SNAPSHOT_KEEP
+    assert "head -n -7" in text, "the retag skill's own keep-7 prune line changed"
+
+
+def test_the_snapshot_store_is_bounded_by_the_rules_this_file_states(rs, tmp_path):
+    """The arm's own mechanism: the tag regex, the root identity, and what the walker may read.
+
+    Three rules that the behavioural nodes above can only imply:
+
+    * the tag split is in TWO stages, as store 18's is: the pattern accepts the SHAPE
+      (`20261017T143113Z` matches, a bare `Z` does not and is counted `untagged`), and the
+      instant inside that shape is validated afterwards by `strptime`, which is what rejects
+      month 13 / hour 99 as `unparseable`. One stage alone gets this wrong in opposite
+      directions — a regex that tried to validate calendar validity would be a hand-written
+      calendar, and no second stage at all would age a hand-renamed directory on a shape
+      nobody intended;
+    * the store and store 18 are the SAME directory, so the root is resolved once and this arm
+      cannot be pointed at a lookalike;
+    * neither the walker nor its age function reads an mtime. That is the whole reason a
+      directory renamed by hand into `facts-snapshot-*` cannot be aged on a guess, and a future
+      "just use st_mtime" edit is exactly the edit this node exists to refuse.
+    """
+    assert rs.FACTS_SNAPSHOT_TAG_RE.match("facts-snapshot-20261017T143113Z"), \
+        rs.FACTS_SNAPSHOT_TAG_RE.pattern
+    assert rs.FACTS_SNAPSHOT_TAG_RE.match("facts-snapshot-Z") is None, \
+        "a name with no tag would be parsed rather than counted untagged"
+    dated = tmp_path / "facts-snapshot-20261017T143113Z"
+    dated.mkdir()
+    assert rs._facts_snapshot_age(dated, _SNAP_NOW)[1] == "tag", "a valid tag must be aged"
+    bogus = tmp_path / "facts-snapshot-20261399T999999Z"
+    bogus.mkdir()
+    age, source = rs._facts_snapshot_age(bogus, _SNAP_NOW)
+    assert age is None and source == "unparseable", (age, source)
+    shapeless = tmp_path / "facts-snapshot-Z"
+    shapeless.mkdir()
+    assert rs._facts_snapshot_age(shapeless, _SNAP_NOW)[1] == "untagged"
+    (tmp_path / "facts-snapshot-backup.tgz").write_bytes(b"x")
+    assert rs.FACTS_SNAPSHOT_ROOT == rs.FACTS_QUARANTINE_ROOT, (
+        "the snapshot store is no longer the root store 18 walks")
+    source = inspect.getsource(rs.sweep_facts_snapshot) + inspect.getsource(
+        rs._facts_snapshot_age)
+    assert "st_mtime" not in source and ".st_atime" not in source, source[:200]

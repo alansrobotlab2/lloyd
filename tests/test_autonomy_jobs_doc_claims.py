@@ -9866,8 +9866,19 @@ def test_no_facts_tree_size_survives_in_the_repo_surfaces_without_its_date():
                                                        "the count command"),
             "states a facts-tree size without"),
         "the doc reporting the skill stale again": (
+            # The anchor is only ever a place to INJECT the injected phrase — the finder's
+            # rule for this seed is `"still quotes" in canon`, which reads nothing else. What
+            # #4592 moved twice is this section's tense: with the sweep's store 31 landed the
+            # section no longer calls the store unbounded in the present tense, so first
+            # `is an unbounded store` and then `an unbounded store` matched zero characters and
+            # the seed silently became a no-op — which is exactly what the
+            # `mutated != surfaces[key]` guard below exists to catch. Anchored now on the Step 4
+            # clause, which states what the job does rather than what a vault file says, so it
+            # outlives a re-tense; a future reword that drops THIS phrase reddens the guard
+            # rather than disarming the rail.
             DOC_SURFACE, surfaces[DOC_SURFACE].replace(
-                "is an unbounded store", "(the skill still quotes 40,411) is an unbounded store"),
+                "prunes what it creates",
+                "prunes what it creates (the skill still quotes 40,411)"),
             "reporting on what the skill says"),
         "a docstring quoting a bare tree size": (
             RETAG_TESTS_SURFACE, retag_tests.replace(

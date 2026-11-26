@@ -490,6 +490,23 @@ first, which are exactly the baseline a "did this regress?" comparison needs.
 above honest: it runs the shipped script over a planted `eval/baselines/` and refuses any
 store path this module resolves that lands on or under it.
 
+The rows below are the stores added after the numbered list above stopped being kept up to
+date (4-6, 14 and 24 onwards have no entry there at all); the bounded ones state the constant
+that bounds them, and the two report-only stores say so in as many words. `test_the_script_row_names_the_store_and_both_constants` pins the last one:
+
+31. `$LLOYD_DATA/_pipeline/vault-derived/facts-snapshot-<YYYYMMDD>T<HHMMSS>Z/` — the `cp -al`
+    undo tree `skills/retag-untagged-facts/SKILL.md` Step 1 takes before it rewrites fact front
+    matter, in the SAME root store 18 walks. Deleted only when its run tag puts it past
+    `FACTS_SNAPSHOT_MAX_AGE_DAYS = 30` days AND it is outside the newest
+    `FACTS_SNAPSHOT_KEEP = 7` snapshots — the conjunction is the whole design, because the
+    directory on the box at 2026-11-26 (229 MB on disk / 126 MB apparent over 41,375 `.md`
+    files, 40 days old) is both past any horizon and the newest snapshot there is, so a
+    horizon-only rule would have deleted a month of pre-existing undo content on the sweep that
+    arrived to bound it. 31 is its position in the report, which is what the skill's table and
+    task #79's enumeration count.
+    `tests/test_retention_sweep.py` pins both halves of the rule, the unparseable-tag hold, and
+    that the glob reaches neither `facts/` nor store 18's `facts-quarantine-*`.
+
 Usage:
     retention-sweep.py            # dry run — report only
     retention-sweep.py --apply    # actually delete/gzip
@@ -4293,6 +4310,262 @@ def _facts_quarantine_line(p: dict) -> str:
     return f"{head} — {'; '.join(notes)}" if notes else head
 
 
+# Store 31: the `facts-snapshot-*` undo trees — the other tenant of store 18's root (#4592).
+# The one store this sweep bounds on a CONJUNCTION: a directory goes only when it is BOTH
+# past a horizon AND outside a keep-count.
+# ---------------------------------------------------------------------------
+
+#: The store, spelled out rather than written as `FACTS_QUARANTINE_ROOT` so the two arms
+#: of this root stay redirectable apart: the test fixture registers a store in its
+#: tmp_path by CONSTANT NAME, and two glob that shared one constant could not be aimed at
+#: different trees. Their policies are nothing alike either — 90 days and keep-last-200 for
+#: the quarantine, 30 days and keep-newest-7 here — so one name would invite a reader to
+#: expect them to move together.
+FACTS_SNAPSHOT_ROOT = DATA_ROOT / "_pipeline" / "vault-derived"
+
+#: The glob, and it is this store's ALONE. The same root holds `facts/` — the live tagged
+#: fact tree, the largest directory under the data root — store 18's `facts-quarantine-*/`,
+#: the `kg-quarantine-<tag>.sqlite` sibling store 18's walker names and explicitly does NOT
+#: take (#2557), and `entity-vectors.prev-<YYYYMMDD>/`, the dated rename of a live store
+#: that matches nothing. A glob widened to `facts-*` would reach the live tree and a month
+#: of quarantine content that is a different store's to decide about, so
+#: `test_facts_snapshot_sweep_never_reaches_the_live_tree_the_quarantine_or_kg` pins the
+#: bytes of each of those three beside an APPLY. Bounding this glob does not bound the
+#: root: those siblings are still unbounded, and #2557's item still owns one of them.
+FACTS_SNAPSHOT_GLOB = "facts-snapshot-*"
+
+#: How far back a snapshot is owed at all: 30 days — the same horizon store 18 gives the other
+#: facts tree in this root (`FACTS_QUARANTINE_MAX_AGE_DAYS = 30`, with a 90-day
+#: `FACTS_QUARANTINE_HOLD_RULING_DAYS` on top of it for the #2557 case, which has no analogue
+#: here because no ruling is pending on a snapshot). A quarantined `facts/` tree can be the
+#: only copy of the facts a rebuild superseded; a snapshot is not that. It is `cp -al`'d from the LIVE `facts/` tree a retag is about to
+#: rewrite, so almost every file in it is the same inode the live tree still holds — the
+#: bytes it is really costing are the ones the nightly rewrite has replaced since, which is
+#: what the one directory on the box had grown to: 229 MB on disk against 126 MB apparent
+#: over 41,375 `.md` files at 2026-11-26, 40 days after it was taken. Thirty days is long
+#: enough that a retag performed this month is recoverable this month, and it is the horizon
+#: the sibling store in this same root already runs on, so the two facts trees here are not
+#: aged on two different rules.
+FACTS_SNAPSHOT_MAX_AGE_DAYS = 30
+
+#: How many snapshots survive whatever their age: 7, and the number is not this store's to
+#: choose. `skills/retag-untagged-facts/SKILL.md` Step 4 already keeps the newest 7 of
+#: exactly these directories, and `tests/test_autonomy_jobs_doc_claims.py` reads that 7 out
+#: of the skill's own shell line and asserts it — so a different number here would be one
+#: claim with two owners and two values, which is the #4480 shape this file keeps getting
+#: called out for. The skill's 7 is not edited by this round.
+FACTS_SNAPSHOT_KEEP = 7
+
+FACTS_SNAPSHOT_PREFIX = FACTS_SNAPSHOT_GLOB.removesuffix("*")
+
+#: The same run-tag rule store 18 carries, and for the same reason: a snapshot's mtime is
+#: the mtime of the last file `cp -al` touched in it, so a directory aged on mtime is aged
+#: on the copy, not on the run. A name with no tag, or one whose tag is not a parseable UTC
+#: instant, is HELD and counted apart rather than aged on a guess — the one case where
+#: guessing would delete an undo tree nobody has dated.
+FACTS_SNAPSHOT_TAG_RE = re.compile(
+    re.escape(FACTS_SNAPSHOT_PREFIX) + r"(\d{8}T\d{6}Z)$")
+
+
+def _facts_snapshot_age(path: Path, now) -> tuple[float | None, str]:
+    """(age in days, where it came from) for one snapshot directory.
+
+    `source` is `"tag"`, `"unparseable"` or `"untagged"`, and the only way in is the name:
+    mtime is never consulted, which is why the node that seeds an undated directory touches
+    it to 2020 and still expects it present afterwards. `now` takes a `datetime` or an epoch
+    float, because the call site has a `datetime` and the tests read better passing the
+    instant the file's other frozen dates are datetimes — the same tolerance
+    `facts_quarantine_stamp` has for the same reason.
+    """
+    match = FACTS_SNAPSHOT_TAG_RE.match(path.name)
+    if match is None:
+        return None, "untagged"
+    try:
+        stamp = datetime.strptime(
+            match.group(1), "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None, "unparseable"
+    now_ts = now.timestamp() if isinstance(now, datetime) else float(now)
+    return (now_ts - stamp.timestamp()) / 86_400.0, "tag"
+
+
+def _facts_snapshot_size(path: Path) -> tuple[int, int]:
+    """(bytes, files) under one snapshot tree, having first counted its links.
+
+    `_bytes_under` alone would be the store-18 answer, and it is the wrong one here. That
+    helper refuses an inode it has already seen, and every file in a `cp -al` tree shares an
+    inode with the LIVE `facts/` tree, so on the box's own snapshot it returns 0 — a sweep
+    that reported `0 KiB` for a directory holding 41,375 files is a report nobody can act
+    on. Counting every link is also the honest figure for what the tree occupies: the live
+    tree paid for the inode once, but the directory cannot be deleted until the LAST link
+    goes, and the divergence between the two numbers is exactly what the box measured — 229
+    MB on disk against 126 MB apparent at 2026-11-26 over 41,375 `.md` files.
+    """
+    total = files = 0
+    for dirpath, _dirs, names in os.walk(path):
+        for name in names:
+            try:
+                total += (Path(dirpath) / name).stat().st_size
+            except OSError:
+                continue
+            files += 1
+    return total, files
+
+
+def sweep_facts_snapshot(apply: bool, now: float, *, root: Path | None = None,
+                         keep: int = FACTS_SNAPSHOT_KEEP,
+                         max_age_days: int = FACTS_SNAPSHOT_MAX_AGE_DAYS) -> dict:
+    """Bound the `facts-snapshot-*` undo trees store 18 shares its root with (#4592).
+
+    `skills/retag-untagged-facts/SKILL.md` Step 1 takes one of these before it writes a
+    byte: `cp -al ~/lloyd-data/_pipeline/vault-derived/facts
+    <snapshot>`, 41,375 files last time it ran, an hour of work behind it. Its Step 4 prunes
+    the store down to the newest 7 — as a SHELL LINE in that SKILL.md. There is no python
+    for it, which `config.yaml`'s `data_trip_hold` note says in as many words ("NOT in its
+    python script — so a task-id hold is the only thing can ever cover it"), and the task
+    that would run it (#98) is parked: Alan ruled it spent on 2026-10-17 (round #2905, vault
+    commit c6c3dd93, machine-readable `parked:` key, #3016), and `workers.db`'s `runs` table
+    has ZERO rows for 98 against 25 for #79. So the pruner was prose in a job that had never
+    run, while the store was created by whoever performed the repair the attended task
+    attends — which happened on 2026-10-17 and left 229 MB behind, invisible to every store
+    in this file: `git grep -c facts-snapshot -- scripts/groundskeeper/retention-sweep.py`
+    read 0 until this section. Every attended re-run added another ~230 MB.
+
+    The bound is the CONJUNCTION, and both halves are load-bearing:
+
+    * **horizon only** would delete the one directory on the box on the first applying run
+      — it is 40 days old, so it is past any horizon, and it is also the newest snapshot
+      there is. That is a month of pre-existing undo content gone on the sweep that arrives
+      to protect it, which is the failure the item names and the reason
+      `test_a_forty_day_old_snapshot_inside_the_newest_seven_survives_the_first_apply` seeds
+      eight directories ALL past the horizon and expects exactly one deletion.
+    * **keep-only** would let a directory taken yesterday count against nobody and a
+      directory taken in 2027 sit forever as long as six newer ones existed: an
+      attended-retag burst would keep seven fresh snapshots and the seventh would age into
+      a decade-old tree that is nobody's undo any more.
+
+    So: a directory is a candidate when its tag puts it past `max_age_days` AND it is not
+    among the newest `keep` by tag. Everything else is kept and counted — `kept_newest` is
+    how many the keep rail holds (the newest `keep` of the tag-dated ones, `min(keep,
+    tag_dated)`), and `untagged` / `unparseable` are held apart. Age comes from the RUN TAG,
+    never mtime; a name with no parseable instant is held, not guessed; the root is never
+    created; symlinks are skipped and never followed. `root` defaults to the
+    `vault-derived` directory store 18 already walks, and is a parameter so the test aims it
+    at a tree of tags.
+    """
+    store = Path(root) if root is not None else FACTS_SNAPSHOT_ROOT
+    keep = max(0, int(keep))
+    out = {"apply": bool(apply), "root": store, "present": store.is_dir(),
+           "keep": keep, "max_age_days": int(max_age_days),
+           "tag_dated": 0, "untagged": 0, "unparseable": 0, "not_a_dir": 0,
+           "unreadable": 0, "kept_newest": 0, "over_age": 0, "kept": 0,
+           "candidates": [], "protected": [], "bytes": 0, "freed": 0, "removed": 0}
+    if not out["present"]:
+        return out
+
+    dated: list[tuple[float, Path]] = []
+    try:
+        entries = sorted(store.glob(FACTS_SNAPSHOT_GLOB))
+    except OSError:
+        out["unreadable"] += 1
+        entries = []
+    for path in entries:
+        try:
+            # A symlink is skipped and never followed, exactly as store 18's walker does
+            # it: one aimed at a tree OUTSIDE the data root turns a snapshot prune into a
+            # delete of someone else's directory, and `rmtree` would not notice.
+            if path.is_symlink() or not path.is_dir():
+                out["not_a_dir"] += 1
+                continue
+            age, source = _facts_snapshot_age(path, now)
+        except OSError:
+            out["unreadable"] += 1
+            continue
+        if source == "untagged":
+            out["untagged"] += 1
+            continue
+        if source == "unparseable":
+            out["unparseable"] += 1
+            continue
+        out["tag_dated"] += 1
+        dated.append((age, path))
+
+    out["kept_newest"] = min(keep, len(dated))
+    # The keep window is the newest `keep` by tag; the youngest snapshot has the SMALLEST
+    # age, so the window is the head of the age-ascending sort and the rail cannot be
+    # defeated by nine candidates sorting ahead of two recent directories.
+    protected = {path for _, path in sorted(dated, key=lambda pair: pair[0])[:keep]}
+    out["protected"] = [path.name for _, path in sorted(dated, key=lambda pair: pair[0])
+                        if path in protected]
+    horizon = float(out["max_age_days"])
+    stale = [(age, path) for age, path in dated if age > horizon]
+    out["over_age"] = len(stale)
+    # Oldest first: the list is what a human reads to see what the sweep is taking, and the
+    # first name in it should be the one nobody can object to.
+    for age, path in sorted(stale, key=lambda pair: -pair[0]):
+        if path in protected:
+            continue
+        size, files = _facts_snapshot_size(path)
+        out["candidates"].append({"name": path.name, "path": path, "age": int(age),
+                                  "bytes": size, "files": files})
+        out["bytes"] += size
+    out["kept"] = out["tag_dated"] - len(out["candidates"])
+
+    if apply:
+        for cand in out["candidates"]:
+            try:
+                shutil.rmtree(cand["path"])
+                out["removed"] += 1
+                out["freed"] += cand["bytes"]
+            except OSError as exc:
+                print(f"    ! retention-sweep: could not remove "
+                      f"{cand['path'].name}: {exc.strerror or exc}")
+    return out
+
+
+def _facts_snapshot_line(p: dict) -> str:
+    """The store line for one facts-snapshot pass, word-identical in dry run and apply
+    except that `candidate` reads `freed` and carries what was taken.
+
+    The per-directory names carry bytes AND file counts, because this store is measured in
+    hardlink trees: 229 MB on disk against 126 MB apparent is the same directory, and a
+    count of directories alone says nothing about what a candidate is worth. `freed` is 0
+    until the apply has confirmed each `rmtree` — the rule this file states for every
+    byte-bearing store.
+    """
+    verb = "freed" if p["apply"] else "candidate"
+    count = p["removed"] if p["apply"] else len(p["candidates"])
+    head = (f"  facts snapshot dirs ({FACTS_SNAPSHOT_GLOB} >{p['max_age_days']}d, "
+            f"keep newest {p['keep']}): {count} dir(s), "
+            f"{p['bytes'] / 1024:.0f} KiB {verb}")
+    notes: list[str] = []
+    if p["candidates"]:
+        named = ", ".join(
+            f"{c['name']} {c['bytes'] / 1024:.0f} KiB/{c['files']}f"
+            for c in p["candidates"][:FACTS_QUARANTINE_NAMES_SHOWN])
+        extra = len(p["candidates"]) - FACTS_QUARANTINE_NAMES_SHOWN
+        notes.append(f"{named}" + (f" (+{extra} more)" if extra > 0 else ""))
+        notes.append(f"{p['tag_dated']} tag-dated, {p['kept']} kept, "
+                     f"{p['kept_newest']} by the keep rule")
+    if p["untagged"] or p["unparseable"]:
+        notes.append(f"{p['untagged']} untagged, {p['unparseable']} with a tag that "
+                     "is not an instant — HELD, a snapshot with no date in its name is "
+                     "nobody's to age")
+    if p["not_a_dir"]:
+        notes.append(f"{p['not_a_dir']} not a directory (or a symlink) — skipped, never "
+                     "followed")
+    if p["unreadable"]:
+        notes.append(f"{p['unreadable']} unreadable, left alone")
+    quiet: list[str] = []
+    if not p["candidates"]:
+        quiet.append("nothing to reclaim")
+    if not p["present"]:
+        quiet.append("no vault-derived root")
+    if quiet:
+        notes.append(", ".join(quiet))
+    return f"{head} — {'; '.join(notes)}" if notes else head
+
+
 # Store 17: the dated tool-quality row sets (#2472) — the one store this sweep
 # REPORTS and does not bound.
 # ---------------------------------------------------------------------------
@@ -6788,6 +7061,13 @@ def main() -> int:
     # positional guard reads them — #2862's reason, inherited through #2924, #3188, #3209,
     # #3379, #3499, #3789, #3951, #4060 and #4205 — and this line is the 30th.
     print(_fact_write_gate_line(fact_write_gate))
+    # #4592: the `facts-snapshot-*` undo trees, the other tenant of the root store 18
+    # walks. APPENDED LAST rather than printed beside store 18's line, for the reason #4205
+    # and #4206 both record: task #79's numbered enumeration is matched to these lines
+    # POSITIONALLY, so an inserted line renumbers every store after it and every rule those
+    # items already name. Position costs nothing here that adjacency buys — the two stores
+    # share a root in the code, which is where it matters.
+    print(_facts_snapshot_line(sweep_facts_snapshot(args.apply, now)))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0
