@@ -85,10 +85,20 @@ row — otherwise a caller could change the series' denominator by passing a fla
     python scripts/maintenance/loaded_memory_dose_rate.py [--window-days N]
         [--vault PATH] [--state-dir PATH] [--record]
 
-Exit 0 when no file is under the cut, 1 when at least one is. **The exit code is the
-verdict, not the run's health** — `--record` has already appended its rows by the time
-either code returns, so a red reading is a reading, and a run that appended rows and
-exited 1 must never be re-run to "fix" it.
+Every row also carries `vault`, the root it was measured against, and `--record`
+refuses to run from a linked git worktree at all. Both are about the same hazard:
+`VAULT_ROOT` and `STATE_DIR` resolve off `$HOME` while `app.paths` resolves off the
+imported tree, so a `--record` launched from a round's checkout measures the two
+against different things and appends the result to the live journal, where the
+`(date, file)` key makes it permanent for the day. The refusal prints
+`app.paths.describe_tree()` and exits `app.data_root.CLI_REFUSED` (2), never 1, so a
+scheduler cannot read a run that measured nothing as a red reading (#4311).
+
+Exit 0 when no file is under the cut, 1 when at least one is, 2 when `--record` was
+refused. **The exit code is the verdict, not the run's health** — `--record` has
+already appended its rows by the time either of the first two codes returns, so a red
+reading is a reading, and a run that appended rows and exited 1 must never be re-run
+to "fix" it. Code 2 is the only one that wrote nothing.
 """
 from __future__ import annotations
 
@@ -240,6 +250,19 @@ def dose_row(vault: Path, filename: str, window_days: int = DEFAULT_WINDOW_DAYS,
     A file that is absent from the vault reports `pool: None` and no `headroom_days`
     rather than `pool: 0`: zero bytes is a legitimately-empty memory file, and a
     missing one is a different fact that must not be printed as that fact.
+
+    Every row names the vault it measured in `vault`. `VAULT_ROOT` and `STATE_DIR`
+    are both keyed on `HOME` (`app/data_root.py::vault_root`,
+    `scripts/automod/state.py::STATE_DIR`) and never on the checkout the code was
+    imported from, so a run whose `HOME` is a round's reads that round's
+    `~/obsidian` — which `scripts/automod/worktree.py::ensure_round_home` leaves
+    UNLINKED, unlike `lloyd` and `lloyd-data` — and files three `pool: null` rows
+    beside the live-vault rows of the same series. `refusal_reason()` below stops
+    the worktree-code half of that mixture; this field is what makes the `HOME` half
+    legible afterwards, because nothing else in a row says which vault its `pool`
+    came from (#4311). The path is stored as the caller gave it and NOT `resolve()`d
+    deliberately: a round's `~/obsidian` is a symlink into the live vault, and
+    resolving it would erase the only difference the field exists to record.
     """
     now = now or datetime.now(timezone.utc)
     rel_path = f"{VAULT_SUBDIR}/{filename}"
@@ -255,6 +278,7 @@ def dose_row(vault: Path, filename: str, window_days: int = DEFAULT_WINDOW_DAYS,
         "ts": now.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "date": now.astimezone(timezone.utc).strftime("%Y-%m-%d"),
         "file": filename,
+        "vault": str(vault),
         "window_days": window_days,
         "bytes_in": round(bytes_in, 3),
         "bytes_out": round(bytes_out, 3),
@@ -324,6 +348,31 @@ def record_path(state_dir: Path | None = None) -> Path:
     return (Path(state_dir) if state_dir else _state_dir()) / RECORD_NAME
 
 
+def refusal_reason() -> str | None:
+    """Why `--record` must not run from this checkout, or None when it may.
+
+    `record()` dedups on `(date, file)`, so the first row written for a UTC date is
+    permanent for that date. That is what makes a worktree-anchored `--record`
+    unrecoverable rather than merely wrong. `app.paths` resolves inside the tree the
+    module was imported from, while `VAULT_ROOT` and `STATE_DIR` resolve off `HOME`:
+    a run launched from one of the linked worktrees registered on this box measures
+    `pool` and `bytes_in` against whatever vault `HOME` points at, takes `ceiling`
+    from unmerged worktree code, and files the mixture into the LIVE journal, where
+    the dedup key then refuses to correct it for the rest of the UTC day
+    (SM_20261115_205336 finding 1). The `vault` field makes a row's vault legible
+    after the fact; nothing made the *code*'s tree legible, because a row carried no
+    tree at all — the guard is what keeps that question from ever being asked (#4311).
+
+    The discriminator is `app.paths.IS_WORKTREE` (#733): `.git` as a FILE, which
+    `git worktree add` leaves and the main checkout never has — read off the module
+    this script actually imported, not off `$HOME` and not off a `git rev-parse`
+    guess. A report run (no `--record`) is NOT refused: it writes nothing anywhere,
+    and its stdout already names the vault it read.
+    """
+    from app.paths import IS_WORKTREE, describe_tree
+    return describe_tree() if IS_WORKTREE else None
+
+
 def recorded_keys(path: Path) -> set[tuple[str, str]]:
     """The `(date, file)` pairs already in the journal. A damaged line is skipped,
     not fatal: one torn row must not stop today's reading from being recorded."""
@@ -372,6 +421,7 @@ def format_rows(rows: list[dict]) -> str:
 
 
 def main(argv: list[str] | None = None) -> int:
+    from app.data_root import CLI_REFUSED
     from app.paths import VAULT_ROOT
     # The vault and the state dir both come from the resolvers (#1367), never from
     # `$HOME`: under a gate's `HOME` the vault is a round's symlink and a
@@ -397,6 +447,25 @@ def main(argv: list[str] | None = None) -> int:
                          f"{RECORD_NAME}; a second run on the same UTC date adds "
                          "nothing")
     args = ap.parse_args(argv)
+
+    # Refused BEFORE the first git call, not after the rows are computed: a run that
+    # printed three plausible numbers and then declined to file them would hand the
+    # reader exactly the mixed-tree reading this guard exists to make impossible, just
+    # unjournalled. The line names the tree (`tree=worktree`, #733's `describe_tree()`)
+    # so a caller that hit this knows which checkout it invoked, and the exit code is
+    # `app.data_root.CLI_REFUSED` (2) rather than the alarm's 1, so a scheduler can
+    # tell "the reading is red" from "this run never measured anything" (#4311).
+    if args.record:
+        refused = refusal_reason()
+        if refused is not None:
+            print(f"REFUSED --record: refusing to record from a linked git worktree "
+                  f"(app.paths.IS_WORKTREE). The (date, file) dedup in record() makes "
+                  f"the first row of a UTC date permanent, so a worktree-anchored row "
+                  f"could never be corrected — and its numbers would mix the worktree's "
+                  f"`memory_ceiling` with whatever vault `$HOME` points at. Run it from "
+                  f"the main checkout instead. tree: {refused}")
+            return CLI_REFUSED
+
     now = datetime.now(timezone.utc)
     vault = Path(args.vault)
     state_dir = Path(args.state_dir) if args.state_dir else Path(STATE_DIR)

@@ -22,9 +22,11 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
+import shutil
 import subprocess
 import sys
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -33,6 +35,7 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "maintenance" / "loaded_memory_dose_rate.py"
 SIBLING = ROOT / "scripts" / "maintenance" / "gate_to_land_lag.py"
 
+from app.data_root import CLI_REFUSED  # noqa: E402  (after ROOT is importable)
 from app.prompt_surface import MEMORY_CEILINGS  # noqa: E402  (after ROOT is importable)
 
 
@@ -62,10 +65,12 @@ def gtl():
 NOW = datetime(2026, 11, 15, 12, 0, 0, tzinfo=timezone.utc)
 
 #: The row's contract as the item states it, plus the identity columns a dated
-#: series needs (`ts`, `date`, `file`). Graded as a superset check: an EXTRA key is
-#: an announcement, a MISSING one is a broken row.
-REQUIRED_KEYS = {"ts", "date", "file", "window_days", "bytes_in", "bytes_out",
-                 "net", "pool", "ceiling", "headroom_days"}
+#: series needs (`ts`, `date`, `file`) and, since #4311, `vault` — the root the row
+#: was measured against, which is the only thing in a row that says WHICH vault.
+#: Graded as a superset check: an EXTRA key is an announcement, a MISSING one is a
+#: broken row.
+REQUIRED_KEYS = {"ts", "date", "file", "vault", "window_days", "bytes_in",
+                 "bytes_out", "net", "pool", "ceiling", "headroom_days"}
 
 LOADED = ("SOUL.md", "MEMORY.md", "USER.md")
 
@@ -86,7 +91,7 @@ def _git(repo: Path, *args: str, env: "dict | None" = None) -> str:
 
 
 def make_vault(dirs: Path, steps: "list[tuple[int, dict[str, bytes]]]",
-               name: str = "vault") -> Path:
+               name: str = "vault", base: datetime | None = None) -> Path:
     """A git vault holding `lloyd/<file>`, with each step committed at `days_ago`.
 
     Author AND committer dates are planted and the last one is read back out of git
@@ -94,7 +99,17 @@ def make_vault(dirs: Path, steps: "list[tuple[int, dict[str, bytes]]]",
     clock back would put every commit inside every window, and the rates would then
     be right for the wrong reason — the helper would be reporting the whole history
     as if it were the trailing month.
+
+    `base` is the instant the fixture's `days_ago` counts back from, and defaults to
+    `NOW`, which every in-process call below passes to the code under test. A node
+    that runs the SCRIPT as a child has to pass the real clock instead: argv carries
+    no instant (`--record` is the only flag the daily job uses and there is no
+    `--now`), so the child measures its window from actual `datetime.now` and commits
+    planted against a frozen 2026-11-15 drift out of that window a day at a time.
+    That is why the subprocess nodes here assert shapes and counts, and the one node
+    that pins a printed line byte for byte plants its fixture against `base=now`.
     """
+    base = base or NOW
     repo = dirs / name
     (repo / "lloyd").mkdir(parents=True)
     _git(repo, "init", "--quiet", "--initial-branch=main")
@@ -104,15 +119,82 @@ def make_vault(dirs: Path, steps: "list[tuple[int, dict[str, bytes]]]",
     for days_ago, writes in steps:
         for filename, content in writes.items():
             (repo / "lloyd" / filename).write_bytes(content)
-        stamp = int(NOW.timestamp()) - days_ago * 86_400
+        stamp = int(base.timestamp()) - days_ago * 86_400
         _git(repo, "add", "--all")
         _git(repo, "commit", "--quiet", "--no-verify", "-m", f"day-{days_ago}",
              env={"GIT_AUTHOR_DATE": f"@{stamp} +0000",
                   "GIT_COMMITTER_DATE": f"@{stamp} +0000"})
-    last_stamp = int(NOW.timestamp()) - steps[-1][0] * 86_400
+    last_stamp = int(base.timestamp()) - steps[-1][0] * 86_400
     stored = int(_git(repo, "log", "-1", "--format=%at"))
     assert stored == last_stamp, f"git stored author time {stored}, not {last_stamp}"
     return repo
+
+
+#: What a checkout needs in order to RUN the script: the script itself plus the
+#: modules it imports as a file — `app.paths` (which imports `app.data_root` since
+#: #1415), `app.prompt_surface` for `memory_ceiling`, and `scripts.automod.state` for
+#: `STATE_DIR`, whose own package `__init__` is a docstring.
+#:
+#: This list exists because `#4311`'s guard keys on `app.paths.IS_WORKTREE`, which is
+#: `.git` existing as a FILE — a property of the checkout on disk that no monkeypatch
+#: can hand a subprocess, and `ROOT` cannot serve as either answer because under the
+#: gate `ROOT` IS a linked worktree. So the test names the tree the script is loaded
+#: from by building one. Same construction as
+#: `tests/unit/test_paths_worktree_anchor.py:134-151`; an import added to the script
+#: outside this list fails these nodes loudly with a `ModuleNotFoundError` rather
+#: than quietly measuring the real checkout instead.
+STANDIN_FILES = (
+    "app/__init__.py", "app/paths.py", "app/data_root.py", "app/prompt_surface.py",
+    "scripts/automod/__init__.py", "scripts/automod/state.py",
+    "scripts/maintenance/loaded_memory_dose_rate.py",
+)
+
+
+def make_tree(dirs: Path, *, gitfile: bool, name: str) -> Path:
+    """A checkout holding the script under test, its `.git` a FILE or a DIRECTORY.
+
+    The two spellings are the entire discriminator `app.paths.IS_WORKTREE` reads
+    (#733): `git worktree add` leaves a one-line `gitdir:` file where the main
+    checkout has a directory. The metadata's content is never read, only its form —
+    which is why this needs no live-root computation and no `$HOME` preference.
+    """
+    tree = dirs / name
+    for rel in STANDIN_FILES:
+        dst = tree / rel
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(ROOT / rel, dst)
+    if gitfile:
+        (tree / ".git").write_text("gitdir: /nonexistent/.git/worktrees/dose-fixture\n")
+    else:
+        (tree / ".git").mkdir()
+        (tree / ".git" / "HEAD").write_text("ref: refs/heads/main\n")
+    return tree
+
+
+def run_record(tree: Path, vault: Path, state: Path, window_days: int = 30):
+    """One `--record` invocation from `tree`, exactly as the daily job invokes it.
+
+    `PYTHONPATH` is pinned to the named tree so `import app` cannot fall through to
+    whichever checkout collected this suite — under the gate that is a linked
+    worktree, and the stand-in-main runs below would then be graded against the guard
+    firing for a reason the test never set up.
+    """
+    return subprocess.run(
+        [sys.executable, str(tree / "scripts" / "maintenance"
+                             / "loaded_memory_dose_rate.py"),
+         "--vault", str(vault), "--state-dir", str(state),
+         "--window-days", str(window_days), "--record"],
+        cwd=tree, capture_output=True, text=True,
+        env=dict(os.environ, PYTHONPATH=str(tree)))
+
+
+#: The three grows behind every fixture below: creation 20 days back, +100/+200/+50
+#: 12 days back, USER.md +80 2 days back — 3,180 B of gross inflow over 30 days.
+QUANT_STEPS: "list[tuple[int, dict[str, bytes]]]" = [
+    (20, {"USER.md": body(3000), "MEMORY.md": body(2000), "SOUL.md": body(1000)}),
+    (12, {"USER.md": body(3100), "MEMORY.md": body(2200), "SOUL.md": body(1050)}),
+    (2, {"USER.md": body(3180)}),
+]
 
 
 # ── clause 1: one row per loaded file, seven fields, a window, and the journal ──
@@ -186,18 +268,27 @@ def test_record_appends_one_row_per_file_and_a_same_date_rerun_adds_nothing(tmp_
     `appended=0 / skipped_already_recorded=3` on the second run: a recorder that
     re-appended daily would double the series' tail and the next reader could not
     tell a second reading from a duplicate.
+
+    #4311 clause 2 is the sentence in that first paragraph: from the MAIN CHECKOUT the
+    behaviour is unchanged by the worktree guard, so this node asserts the same
+    `appended=3` then `appended=0 / skipped_already_recorded=3` it asserted before.
+    It now runs the script from a stand-in main checkout instead of from `ROOT`,
+    because `ROOT` is whichever tree collected the suite and, inside a gate, that is a
+    linked worktree — where the guard the item asked for correctly refuses. The tree
+    is the only thing that changed about the invocation; see
+    `test_record_from_a_linked_git_worktree_…` for the other half of that seam.
+
+    Clause 4 is the date assertion: the length-based arm is gone, and a row whose
+    date is not the day the child ran can no longer pass.
     """
-    vault = make_vault(tmp_path, [
-        (20, {"USER.md": body(3000), "MEMORY.md": body(2000), "SOUL.md": body(1000)}),
-        (12, {"USER.md": body(3100), "MEMORY.md": body(2200), "SOUL.md": body(1050)}),
-        (2, {"USER.md": body(3180)}),
-    ])
+    vault = make_vault(tmp_path, QUANT_STEPS)
+    main = make_tree(tmp_path, gitfile=False, name="main-checkout")
     state = tmp_path / "state"
     journal = lmrd.record_path(state)
 
-    r1 = subprocess.run([sys.executable, str(SCRIPT), "--vault", str(vault),
-                         "--state-dir", str(state), "--window-days", "30", "--record"],
-                        cwd=ROOT, capture_output=True, text=True, env=os.environ.copy())
+    started = datetime.now(timezone.utc)
+    r1 = run_record(main, vault, state)
+    ended = datetime.now(timezone.utc)
     out1 = r1.stdout + r1.stderr
     assert r1.returncode == 0, out1
     assert "appended=3" in out1, out1
@@ -207,20 +298,152 @@ def test_record_appends_one_row_per_file_and_a_same_date_rerun_adds_nothing(tmp_
     assert {p["file"] for p in parsed} == set(LOADED)
     for p in parsed:
         assert REQUIRED_KEYS <= set(p), p
-        assert p["date"] == NOW.strftime("%Y-%m-%d") or len(p["date"]) == 10, p
+        # No length-based escape hatch (#4311 clause 4). The arm this replaces —
+        # `or len(p["date"]) == 10` — was satisfied by "1999-01-01", by "yesterday!",
+        # and by any other ten characters, so the node passed on whatever date the row
+        # carried. The child stamps `ts` and `date` from one instant, so the pin is
+        # the pair: the stamp must fall inside the seconds this node spent running the
+        # child (which no stale or fabricated date can do), and `date` must be that
+        # stamp's UTC date (which a locally-formatted date fails across a UTC-day
+        # boundary). There is no clock injection on argv — `NOW` reaches only the
+        # in-process calls above — so the run instant is what "today" means here.
+        stamp = datetime.strptime(p["ts"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        assert started - timedelta(seconds=120) <= stamp <= ended + timedelta(seconds=120), \
+            f"row stamped {stamp}, outside the run window {started}…{ended}: {p}"
+        assert p["date"] == stamp.strftime("%Y-%m-%d"), p
+    assert len({p["date"] for p in parsed}) == 1, "three rows, one UTC date"
 
     assert out1.count(" bytes_in=") == len(LOADED), f"not one line per loaded file\n{out1}"
     for filename in LOADED:
         assert f"file={filename} " in out1, f"{filename} printed no row\n{out1}"
     assert "window_days=30" in out1
 
-    r2 = subprocess.run([sys.executable, str(SCRIPT), "--vault", str(vault),
-                         "--state-dir", str(state), "--window-days", "30", "--record"],
-                        cwd=ROOT, capture_output=True, text=True, env=os.environ.copy())
+    r2 = run_record(main, vault, state)
     out2 = r2.stdout + r2.stderr
     assert r2.returncode == 0, out2
     assert "appended=0" in out2 and "skipped_already_recorded=3" in out2, out2
     assert len([ln for ln in journal.read_text().splitlines() if ln.strip()]) == 3
+
+
+# ── #4311: a row is only trustworthy if it says which tree and vault made it ────
+
+
+def test_record_from_a_linked_git_worktree_refuses_and_writes_no_journal(tmp_path, lmrd):
+    """`--record` from a linked worktree appends nothing, creates nothing, exits
+    non-zero, and names the tree it refused (#4311 clause 1).
+
+    `record()` dedups on `(date, file)`, so the first row of a UTC date is permanent
+    for that date, and `VAULT_ROOT` and `STATE_DIR` both resolve off `$HOME` while
+    `app.paths` resolves off the imported tree (SM_20261115_205336 finding 1). A
+    `--record` launched from a round's checkout therefore measures `pool` and
+    `bytes_in` against one tree and `ceiling` against another, files the mixture in
+    the LIVE journal, and cannot be corrected until the next UTC midnight — with 18
+    linked worktrees registered on this box, that is a Tuesday, not a hypothesis.
+
+    The control is inside the node, because a refusal is exactly as trustworthy as
+    its control: the same script bytes, the same argv, the same vault and a state dir
+    of the same shape, run from a stand-in whose `.git` is a directory, appends three
+    rows. `.git`'s form is the only difference between the two runs, so a guard that
+    fired for any other reason — a bad vault, a bad window, an unrelated crash — fails
+    the control instead of passing on a refusal that means nothing.
+    """
+    vault = make_vault(tmp_path, QUANT_STEPS)
+    worktree = make_tree(tmp_path, gitfile=True, name="linked-worktree")
+    main = make_tree(tmp_path, gitfile=False, name="main-checkout")
+
+    state_wt = tmp_path / "state-worktree"
+    r_wt = run_record(worktree, vault, state_wt)
+    out_wt = r_wt.stdout + r_wt.stderr
+    # 2, and specifically not the alarm's 1: a scheduler that read the refusal as a
+    # red reading would re-run it, which the dedup makes pointless, and would report
+    # a run that measured nothing as a dose that happened to be high.
+    assert r_wt.returncode == CLI_REFUSED == 2, f"refused run exited {r_wt.returncode}\n{out_wt}"
+    assert "REFUSED" in out_wt and "--record" in out_wt, out_wt
+    assert "tree=worktree" in out_wt, f"the refusal must say it refused a worktree\n{out_wt}"
+    named = re.search(r"LLOYD_HOME=(\S+)", out_wt)
+    assert named, f"the refusal must name the tree it refused to record from\n{out_wt}"
+    assert Path(named.group(1)).resolve() == worktree.resolve(), (
+        f"the refusal named {named.group(1)}, not the worktree the script was loaded "
+        f"from ({worktree})")
+    assert "appended=" not in out_wt, f"a refused run must not report appending\n{out_wt}"
+    assert not lmrd.record_path(state_wt).exists(), \
+        "a refused --record must not create the journal"
+    assert not state_wt.exists(), \
+        "a refused --record must not create the state directory either"
+
+    state_main = tmp_path / "state-main"
+    r_main = run_record(main, vault, state_main)
+    out_main = r_main.stdout + r_main.stderr
+    assert r_main.returncode == 0, out_main
+    assert "appended=3" in out_main, \
+        f"the same argv from a main checkout must still record\n{out_main}"
+    assert len([ln for ln in lmrd.record_path(state_main).read_text().splitlines()
+                if ln.strip()]) == 3
+
+
+def test_every_recorded_row_names_the_vault_it_measured_and_the_print_is_unchanged(
+        tmp_path, lmrd):
+    """The row grows a `vault` column; `format_rows` does not (#4311 clause 3).
+
+    Both halves are on purpose. `vault` is what makes a journal row answer "which
+    vault's bytes is this" — the field the round-`HOME` variant of the hazard needs,
+    where `pool` came from the round's `~/obsidian` (left UNLINKED by
+    `worktree.ensure_round_home`, unlike `lloyd` and `lloyd-data`) and read
+    `pool: null` for all three files while the run printed `appended=3`. And the
+    per-file lines stay byte-identical because they are named keys, not columns: a
+    reader greps `bytes_in=` today and gets the same line shape as yesterday's rows,
+    so adding a field to a row must not re-flow the print. The literal below is that
+    line, byte for byte, numbers computed from the fixture and not from the code.
+    """
+    # Anchored to the real clock rather than to `NOW`: the child computes its window
+    # from `datetime.now` and argv carries no instant, so a fixture planted against a
+    # frozen date drifts out of that window a day at a time and the literal below
+    # would rot (`make_vault`'s `base` exists for this node).
+    base = datetime.now(timezone.utc).replace(microsecond=0)
+    vault = make_vault(tmp_path, QUANT_STEPS, base=base)
+    rows = lmrd.dose_rows(vault, 30, base)
+    for row in rows:
+        assert row["vault"] == str(vault), f"{row['file']} row does not name its vault: {row}"
+    # The field is the path as the caller handed it. `resolve()` would erase the one
+    # difference it exists to record: a round's `~/obsidian` is a symlink whose target
+    # is the live vault.
+    assert Path(rows[0]["vault"]) == vault, rows[0]
+    assert next(r for r in rows if r["file"] == "USER.md")["bytes_in"] == 106.0, \
+        "the fixture must really produce the rates the literal below quotes"
+
+    main = make_tree(tmp_path, gitfile=False, name="main-checkout")
+    state = tmp_path / "state"
+    r = run_record(main, vault, state)
+    out = r.stdout + r.stderr
+    assert r.returncode == 0, out
+    disk = [json.loads(ln)
+            for ln in lmrd.record_path(state).read_text().splitlines() if ln.strip()]
+    assert len(disk) == 3, disk
+    assert {p["vault"] for p in disk} == {str(vault)}, \
+        f"every appended row must name the one vault it measured: {disk}"
+
+    per_file = [ln for ln in r.stdout.splitlines() if ln.startswith("file=")]
+    assert len(per_file) == len(LOADED), f"not one per-file line each\n{out}"
+    # Key ORDER and spelling, not a substring hunt. For a line whose numbers move with
+    # the clock, "byte-unchanged" can only mean this: the same eight named keys, in the
+    # same sequence, spelled the same way, so a grep that worked on yesterday's output
+    # works on today's. A field inserted anywhere in the line, a reordering, or a
+    # switch to fixed-width columns all fail it; the `vault` this round added to the
+    # ROW must not appear here.
+    shape = re.compile(
+        r"file=(?:SOUL|MEMORY|USER)\.md "
+        r"bytes_in=-?\d+(?:\.\d+)? bytes_out=-?\d+(?:\.\d+)? net=-?\d+(?:\.\d+)? "
+        r"pool=(?:\d+|null) ceiling=(?:\d+|null) "
+        r"headroom_days=(?:-?\d+(?:\.\d+)?|null) window_days=\d+")
+    for ln in per_file:
+        assert shape.fullmatch(ln), f"the per-file print changed shape: {ln!r}"
+    assert not any("vault=" in ln for ln in per_file), \
+        f"the vault belongs in the row, not the print\n{per_file}"
+    user_line = next(ln for ln in per_file if ln.startswith("file=USER.md "))
+    assert user_line == ("file=USER.md bytes_in=106.0 bytes_out=0.0 net=106.0 "
+                         "pool=3180 ceiling=16384 headroom_days=124.566 "
+                         "window_days=30"), \
+        f"the per-file print changed: {user_line}"
 
 
 def test_the_journal_beside_gate_to_land_lag_and_not_a_new_store(lmrd, gtl):
@@ -402,9 +625,12 @@ def test_an_alarming_run_exits_1_and_leaves_every_loaded_file_byte_identical(tmp
     listing = sorted(p.name for p in (vault / "lloyd").iterdir())
     state = tmp_path / "state"
 
-    r = subprocess.run([sys.executable, str(SCRIPT), "--vault", str(vault),
-                        "--state-dir", str(state), "--window-days", "30", "--record"],
-                       cwd=ROOT, capture_output=True, text=True, env=os.environ.copy())
+    # A stand-in MAIN checkout, because this node records (`--record`) and #4311's
+    # guard refuses a record from a worktree — which is what `ROOT` is under a gate.
+    # The verdict this node pins is 1 for a red READING, so it has to be a tree the
+    # script is allowed to write from; the refusal path is pinned beside it.
+    main = make_tree(tmp_path, gitfile=False, name="main-checkout-alarm")
+    r = run_record(main, vault, state)
     out = r.stdout + r.stderr
 
     assert r.returncode == 1, f"the alarm did not reach the exit code\n{out}"
