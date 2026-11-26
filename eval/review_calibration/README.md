@@ -215,3 +215,21 @@ the aggregate, which stays the last line and still counts every case:
 `scripts/automod/review_tools.py build-cause-corpus` rebuilds the corpus from the ledgers
 and publishes the dated distribution to `~/lloyd-data/eval/review-calibration/`. Growing
 the graded cases themselves to >=12 labelled fixtures is a second round.
+
+### Routing owners — who a cause class sends the fix to (#4281)
+
+A class is only useful if it names where the fix goes. Each of the six has one owner,
+and a change that cites a class changes that owner's surface, never another's:
+
+| cause class | routing owner |
+|---|---|
+| `graded_wrong_input` | the review rung's citation validator and rails — the grader was handed (or cited) a tree other than the graded one, so the fix is in what the rung feeds it and refuses, not in the prompt |
+| `grader_defect` | the grader prompt — the grader read the right tree and answered wrong |
+| `spec_ambiguity` | the clause text — the contract admits two readings; reword the clause (owed-check's `amend_item_clause`) |
+| `grader_wrong_on_approved_work` | the second reader — a reviewed-and-approved landing was refused, which the confirming reader exists to catch |
+| `real_unmet_work` | the author — the grader was right; the round owes the work |
+| `unknown` | no change — an unattributed disagreement routes nothing until it is classified |
+
+`tests/test_automod_review_tools.py` fails if any of the six classes in
+`scripts/automod/review_cause.py::FIXED_CAUSES` has no row here, or a row with an
+empty owner.

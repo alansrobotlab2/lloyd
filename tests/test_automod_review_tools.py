@@ -1216,3 +1216,57 @@ def test_an_error_with_no_case_of_its_kind_is_unmeasured_not_zero():
     cases = [{"name": "a", "expect": {"kind": "pass"}}]
     line = RT.error_rates_line([{"name": "a", "kind": "pass"}], cases)
     assert line == "false met unmeasured (no such case); false refusal 0/1"
+
+
+# ── #4281 clause 4: every cause class names the owner its fix routes to ──────────
+
+#: The owner each class routes to, as #4281's contract names it. The README's table is
+#: graded against this, so a reworded owner is a deliberate edit of both, never a drift.
+_CAUSE_OWNERS = {
+    "graded_wrong_input": "the review rung's citation validator and rails",
+    "grader_defect": "the grader prompt",
+    "spec_ambiguity": "the clause text",
+    "grader_wrong_on_approved_work": "the second reader",
+    "real_unmet_work": "the author",
+    "unknown": "no change",
+}
+
+
+def _routing_rows(readme: str) -> dict[str, str]:
+    """`| `<class>` | <owner> |` rows of the README's routing-owners table, class -> owner."""
+    section = readme.split("### Routing owners", 1)
+    assert len(section) == 2, "the README has no `### Routing owners` table"
+    rows = {}
+    for line in section[1].splitlines():
+        if line.startswith("#"):
+            break
+        cells = [c.strip() for c in line.strip().strip("|").split("|")]
+        if len(cells) >= 2 and cells[0].startswith("`") and cells[0].endswith("`"):
+            rows[cells[0].strip("`")] = cells[1]
+    return rows
+
+
+def test_clause_4_every_cause_class_has_a_routing_owner_in_the_readme():
+    """Every class in `FIXED_CAUSES` has exactly one row in the README's routing table, its
+    owner cell is non-empty and leads with the owner the contract names, and the table
+    names no class outside the fixed six."""
+    rows = _routing_rows((RT.FIXTURE_DIR / "README.md").read_text(encoding="utf-8"))
+    assert set(RC.FIXED_CAUSES) == set(_CAUSE_OWNERS), RC.FIXED_CAUSES
+    assert set(rows) == set(RC.FIXED_CAUSES), (
+        f"the routing table's classes {sorted(rows)} are not the fixed six "
+        f"{sorted(RC.FIXED_CAUSES)}")
+    for cause, owner in _CAUSE_OWNERS.items():
+        assert rows[cause], f"`{cause}` appears in the routing table with no owner beside it"
+        assert rows[cause].startswith(owner), (
+            f"`{cause}` routes to {rows[cause]!r}, not {owner!r}")
+
+
+def test_clause_4_the_owner_guard_refuses_a_class_with_an_empty_owner():
+    """The guard above is not vacuous: a table whose row for one class has an empty owner
+    cell, or that drops a class, is read as exactly that."""
+    table = "### Routing owners\n\n| cause class | routing owner |\n|---|---|\n" + "".join(
+        f"| `{c}` | {'' if c == 'spec_ambiguity' else o} |\n" for c, o in _CAUSE_OWNERS.items()
+        if c != "unknown")
+    rows = _routing_rows(table)
+    assert rows["spec_ambiguity"] == "", rows
+    assert "unknown" not in rows, rows
