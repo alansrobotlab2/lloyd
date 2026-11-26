@@ -3075,3 +3075,115 @@ def test_an_answered_entry_is_not_resurrected_as_a_late_one(isolated):
     p, entries = _owing(isolated, 78, ["one", "two"])
     O.apply_verdict(p, entries, [{"n": 1, "outcome": "settled", "evidence": "seen"}], item_id=78)
     assert [e["what"] for e in O.entries_of(fm_of(p), derived=False)] == ["two"]
+
+
+# ── A prose citation never settles a human_clause (#4368 owed entry 3) ──────────
+#
+# #4368 clause 5 settles a closing item's OWN stranded `human_clauses` under the
+# discharge that closed it, and nothing else. Whether a clause that some discharge
+# merely QUOTES in prose — on another item — is settled too was left as #4368's owed
+# entry 3: a widening only owed-check or Alan may rule on, because #3504 measured
+# that an over-broad sweep costs a reopen per wrongly-retired clause. The two nodes
+# below make today's answer (no) load-bearing. The same-item case is already pinned
+# from the other side (the positive node's four-way equality fails a same-item
+# substring matcher, since #4009's note paraphrases its clauses), so both nodes are
+# cross-item: the discharge that closes item X quotes another item's clause verbatim.
+
+#: A clause short enough to sit whole inside the 600-character discharge evidence
+#: `apply_verdict` hands the settle, so a substring matcher would find it there.
+_CITED_ELSEWHERE = ("Person re-runs the nightly suffix sweep and confirms the "
+                    "hygiene row's gate-approved count reads 0.")
+#: X's own clause — the one the settle is entitled to book.
+_CLOSER_OWN = "Person confirms the twelve applied merges survive the next rebuild."
+
+
+def _closer_quoting(isolated, item_id: int, quoted: str) -> Path:
+    """Item X: one `human_clause` of its own and, as its only debt, a discharged
+    `owed_outside` row whose `done_note` quotes another item's clause verbatim."""
+    return write_item(isolated, item_id, status="draft",
+                      name="Closes on a discharge that quotes another item",
+                      extra={"human_clauses": [_CLOSER_OWN],
+                             "owed_outside": [
+                                 {"what": "its unattended attempts are spent; owed-check "
+                                          "decides whether to close it",
+                                  "needs": "run the apply at a terminal",
+                                  "since": "2026-11-09T18:04:35.553589",
+                                  "done": "2026-11-18T17:09:30.707152",
+                                  "done_note": (f"attended 2026-11-18: apply ran, 12 ops. "
+                                                f"Also done in passing: {quoted}")}]})
+
+
+def _close_on_its_discharge(path: Path, item_id: int) -> dict:
+    (owing,) = [o for o in O.owing_items(now=datetime.now(timezone.utc))
+                if o.item.id == item_id]
+    out = O.apply_verdict(path, owing.entries,
+                          [{"n": 1, "outcome": "close", "evidence": "report ...T010911Z.json",
+                            "ruling": "the discharge answered it; close"}],
+                          item_id=item_id)
+    assert out["moved"] == "closed", f"the fixture's close did not land: {out}"
+    return out
+
+
+def test_a_discharge_quoting_an_open_items_clause_settles_nothing_on_it(isolated):
+    """#4368 owed entry 3, refused reopening: a `human_clause` of an item that does NOT
+    close is not settled because another item's discharge quotes it in prose.
+
+    Item A stays open with that clause; item X closes on a discharge whose note quotes
+    A's clause verbatim. X books exactly its own clause, and A is not touched — no
+    `owed_settled` line of any kind, its bytes unchanged. (`derived_entries` is `[]` on
+    A by design, since only a CLOSED item derives (#2055), so the absence of a settle
+    line is what this arm can assert.)"""
+    write_item(isolated, 4521, name="Carrier for #4520's step")
+    a = write_item(isolated, 4519, status="draft", name="Open item whose clause is quoted",
+                   extra={"human_clauses": [_CITED_ELSEWHERE]})
+    before = a.read_bytes()
+    x = _closer_quoting(isolated, 4520, _CITED_ELSEWHERE)
+
+    out = _close_on_its_discharge(x, 4520)
+
+    assert out["clauses_settled"] == [_CLOSER_OWN], (
+        "the settle booked something other than the closing item's own clause: "
+        f"{out['clauses_settled']}")
+    assert a.read_bytes() == before, "the open item's file was written by another's close"
+    fm_a = fm_of(a)
+    assert not fm_a.get("owed_settled"), f"a settle line landed on the open item: {fm_a}"
+    assert fm_a["status"] == "draft"
+
+
+def test_a_discharge_quoting_a_closed_items_clause_leaves_it_derivable(isolated):
+    """#4368 owed entry 3, refused reopening: a `human_clause` of an item closed over an
+    ordinary `owed` entry stays derivable when a DIFFERENT item's discharge quotes it.
+
+    Item B is closed the #2055 way (an ordinary `owed` entry, no discharge), so its
+    unrecorded clause is derived — the shape
+    `test_a_close_that_rode_on_no_discharge_still_derives_its_clauses` pins. Then item X
+    closes on a discharge whose note quotes B's clause verbatim. A settle widened to
+    prose or substring matching across the board would book B's clause there; what has
+    to hold is that X books only its own, B's file is byte-identical, and the next pass
+    still derives B's clause."""
+    write_item(isolated, 4524, name="Carrier that keeps #4522's step from being orphaned")
+    write_item(isolated, 4525, name="Carrier for #4523's step")
+    b = write_item(isolated, 4522, status="draft",
+                   name="Closed over an ordinary owed entry",
+                   extra={"human_clauses": [_CITED_ELSEWHERE],
+                          "owed": [{"what": "confirm the nightly run reports it",
+                                    "kind": "check", "since": "2026-11-01T00:00:00"}]})
+    (owing,) = [o for o in O.owing_items(now=datetime.now(timezone.utc)) if o.item.id == 4522]
+    closed_b = O.apply_verdict(b, owing.entries,
+                               [{"n": 1, "outcome": "close", "evidence": "run log at 03:12Z",
+                                 "ruling": "the entry is answered; close the item"}],
+                               item_id=4522)
+    assert closed_b["moved"] == "closed" and closed_b["clauses_settled"] == []
+    assert [e["what"] for e in O.derived_entries(fm_of(b))] == [_CITED_ELSEWHERE]
+    before = b.read_bytes()
+
+    x = _closer_quoting(isolated, 4523, _CITED_ELSEWHERE)
+    out = _close_on_its_discharge(x, 4523)
+
+    assert out["clauses_settled"] == [_CLOSER_OWN], (
+        f"another item's clause was settled under this discharge: {out['clauses_settled']}")
+    assert b.read_bytes() == before, "the closed item's file was written by another's close"
+    assert not [r for r in fm_of(b).get("owed_settled") or []
+                if r.get("what") == _CITED_ELSEWHERE], "a settle line for B's clause landed"
+    assert [e["what"] for e in O.derived_entries(fm_of(b))] == [_CITED_ELSEWHERE], \
+        "the quoted clause is no longer derivable on the item that owns it"
