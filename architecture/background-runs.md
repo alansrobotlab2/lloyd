@@ -551,9 +551,11 @@ is not a transcript leaving the listings. The head is resolved by slicing the su
 off the end — `Path(name).stem` on a sidecar leaves `.microcompact-reduced` on the
 id, which is a live transcript's name, and the sweep would then file a live session's
 record as orphaned. An archived orphan is unreadable to `_sidecar_payload`, exactly as
-a co-archived one already is: whether to keep those bytes or delete them past the
-bound is the disposition decision #4109 still carries, and archiving forecloses
-neither.
+a co-archived one already is, and the disposition is settled (#4109's owed-check,
+2026-11-19): an orphan is archived to `<sidecar>.json.gz` at the 30-day bound and
+kept — deletion was refused for no measured gain. That `.gz` spelling is bookkeeping
+too: `is_reduction_sidecar` answers True for it (#4328), so a `*.json.gz` census
+counts it in `sidecars_skipped`, never as an archived session.
 
 ---
 

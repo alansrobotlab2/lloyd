@@ -2295,3 +2295,29 @@ def test_a_sample_shows_the_turns_calls_and_reservoir_reaches_past_the_oldest_we
         f"20 samples drawn from 60 turns spread over 9 days landed on {sorted(days)} — the "
         "sample is scan order again, not a sample")
     assert rep["sample_rule"].startswith("up to 20 per population, reservoir-sampled")
+
+
+def test_an_archived_sidecar_is_skipped_as_bookkeeping_not_counted_as_a_gzipped_session(tmp_path):
+    """#4328 clause 3. The retention sweep archives a reduction sidecar to
+    `<sidecar>.json.gz` (beside its 90-day head, or as an orphan past the 30-day bound) and
+    #4109's ruling keeps it, so the `*.json.gz` glob this census walks will meet one. It is a
+    compaction record with no messages: it belongs in `sidecars_skipped`, never in `gzipped`
+    or `sessions`, exactly as its plain twin does.
+    """
+    import os
+    write_session(tmp_path, "20261103_100000_real_aaaa", captioned_turn())
+    plain = tmp_path / "20261103_100000_real_aaaa.microcompact-reduced.json"
+    plain.write_text(json.dumps({"schema": 1, "cleared_call_ids": ["c-1"],
+                                 "reduced_call_ids": []}), encoding="utf-8")
+    archived = tmp_path / "20261103_090000_real_bbbb.microcompact-reduced.json.gz"
+    with gzip.open(archived, "wt", encoding="utf-8") as fh:
+        json.dump({"schema": 1, "cleared_call_ids": ["c-2"], "reduced_call_ids": []}, fh)
+    for path in (plain, archived):
+        os.utime(path, (NOW.timestamp(), NOW.timestamp()))
+    art = run(tmp_path)
+    assert art["corpus"]["sidecars_skipped"] == 2, (
+        f"the archived sidecar was not counted as bookkeeping: {art['corpus']}")
+    assert art["corpus"]["gzipped"] == 0, (
+        f"the archived sidecar was counted as an archived session: {art['corpus']}")
+    assert art["corpus"]["sessions"] == 1, (
+        f"the corpus counted a compaction record as a session: {art['corpus']}")

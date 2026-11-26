@@ -95,9 +95,16 @@ def test_the_exhibit_marker_is_imported_from_the_writer_not_respelled():
 
 
 def test_is_transcript_path_and_the_predicate_never_disagree():
-    """The exhibit filter agrees with the predicate on both real names, and the
-    predicate is a SUFFIX rule where the exhibit's retired marker was a SUBSTRING rule —
-    which is the drift this node exists to catch.
+    """The exhibit filter agrees with the predicate on every real name, and the predicate is
+    a SUFFIX rule where the exhibit's retired marker was a SUBSTRING rule — which is the
+    drift this node exists to catch.
+
+    #4328 reversed one half of what this node used to pin. The sweep's ARCHIVED sidecar,
+    `X.microcompact-reduced.json.gz`, is permanent bookkeeping since #4109's owed-check ruled
+    an orphan is archived at the 30-day bound and kept (deletion refused for no measured
+    gain), so it is now a sidecar to BOTH the predicate and `is_transcript_path` — counted in
+    the exhibit's `sidecars_skipped`, never as an archived session. The drift witness keeps
+    working on the name that still separates the two rules: an editor's or tool's temp write.
     """
     import app.behaviour_exhibit as be
 
@@ -105,35 +112,34 @@ def test_is_transcript_path_and_the_predicate_never_disagree():
     assert be.is_transcript_path(Path(SIDECAR_NAME)) is False
     assert be.is_transcript_path(Path(HEAD_NAME)) is True
 
+    archived = f"{HEAD_ID}{REDUCTION_SIDECAR_SUFFIX}.gz"   # the sweep's co-archive name
+    assert is_reduction_sidecar(archived) is True, (
+        f"{archived} is the archived sidecar #4109 keeps: bookkeeping, not a transcript")
+    assert be.is_transcript_path(Path(archived)) is False, (
+        "the exhibit filter counts an archived sidecar as an archived session")
+
     # The names that separate the two possible rules. The retired exhibit marker was the
     # SHORT substring `.microcompact-reduced`, tested with `in`; the predicate is the
-    # writer's SUFFIX, tested with `endswith`. A name that ends in something else — an
-    # archive the sweep writes, an editor's temp file — is a sidecar to the substring
-    # rule and not to the suffix rule, so a name list of files both rules answer alike
-    # (`HEAD_NAME`, `SIDECAR_NAME`, `notes.json`, `HEAD_ID`) cannot tell a re-hardened
-    # short marker from the imported suffix. These can. The assertion is on the
-    # predicate's own answer, not on a comparison with `is_transcript_path`, which now
-    # delegates to the predicate: the two cannot disagree by construction, so a loop over
-    # them restates the implementation instead of testing it.
+    # writer's SUFFIX (plain or gzipped), tested with `endswith`. A name that ends in
+    # something else — an editor's temp file — is a sidecar to the substring rule and not
+    # to the suffix rule.
     def short_marker_rule(name: str) -> bool:
         return ".microcompact-reduced" in name
 
     drift_names = [
-        f"{HEAD_ID}.microcompact-reduced.json.gz",   # the sweep's co-archive name
         f"{HEAD_ID}.microcompact-reduced.json.tmp",  # an editor's or tool's temp write
     ]
     for name in drift_names:
         assert is_reduction_sidecar(name) is False, (
-            f"{name} is not the name the reducer writes, so it is not a sidecar")
+            f"{name} is not a name the reducer or the sweep writes, so it is not a sidecar")
         assert be.is_transcript_path(Path(name)) is True, (
             f"the exhibit filter no longer follows the suffix rule on {name}")
-    # The drift witness itself: on these two names the retired rule and the shipped rule
-    # answer differently, which is what makes the asserts above a pin rather than a
-    # restatement. If the predicate is ever widened back to a substring test, this is the
+    # The drift witness itself: on this name the retired rule and the shipped rule answer
+    # differently. If the predicate is ever widened back to a substring test, this is the
     # line that goes red.
     assert [short_marker_rule(n) != is_reduction_sidecar(n)
-            for n in drift_names] == [True, True], (
-        "the short-substring rule and the suffix rule now answer alike on the names that "
+            for n in drift_names] == [True], (
+        "the short-substring rule and the suffix rule now answer alike on the name that "
         "used to separate them — the predicate has been widened back to a substring test")
 
 
@@ -233,3 +239,47 @@ def test_the_sweep_resolves_a_sidecars_head_by_slicing_the_suffix_not_by_path_st
         assert rs._is_reduction_sidecar(rebuilt) is True
         assert rs._is_reduction_sidecar(head) is False, (
             f"{head!r} resolved as a head is itself a sidecar — that is the stem answer")
+
+
+# ── #4328: the archived sidecar spelling is bookkeeping, in both copies of the rule ──
+
+def test_the_archived_sidecar_spelling_is_bookkeeping_and_nothing_else_is_claimed():
+    """#4328 clause 1. The sweep archives a sidecar to `<sidecar>.json.gz` (co-archived beside
+    its 90-day head, or as an orphan past the 30-day bound) and #4109's ruling keeps those
+    bytes, so the `.gz` spelling is a sidecar too. The widening is the dotted suffix plus
+    `.gz` and nothing wider: a real archived transcript, the head, the bare stem and a
+    transcript whose own id carries the marker without the dot stay transcripts.
+    """
+    assert is_reduction_sidecar(SIDECAR_NAME) is True
+    assert is_reduction_sidecar(SIDECAR_NAME + ".gz") is True
+    for name in ("20260101_000000_iv0abc.json.gz", HEAD_NAME, HEAD_ID,
+                 "20261029_092125_microcompact-reduced.json.gz"):
+        assert is_reduction_sidecar(name) is False, (
+            f"{name} carries no dotted sidecar suffix, so the predicate must not claim it")
+
+
+def test_the_sweep_restatement_answers_like_the_writer_on_both_spellings():
+    """#4328 clause 4. The stdlib copy in `retention-sweep.py` must give the same answer as
+    `microcompact.is_reduction_sidecar` on the plain and archived sidecar names and on a real
+    archived transcript — compared as FUNCTIONS, not only as suffix strings, because an
+    app-side-only widening would leave the suffix constants equal while the two rules
+    disagreed — and the script still has no module-level import from `app.` and never
+    imports the harness the predicate lives in. (Its guarded, indented imports of the
+    stdlib-only writer modules — `app.data_root`, `app.voice_turns` and the rest, each
+    inside a `try` with a bare-module fallback — predate #4328 and are the file's
+    documented pattern; the triage's `grep -n "^import \\|^from \\|import app\\."` reads
+    0 of them, and so does this.)"""
+    rs = _load_sweep()
+    for name in (SIDECAR_NAME, SIDECAR_NAME + ".gz", "20260101_000000_iv0abc.json.gz",
+                 HEAD_NAME, HEAD_ID, "20261029_092125_microcompact-reduced.json.gz",
+                 f"{HEAD_ID}.microcompact-reduced.json.tmp"):
+        assert rs._is_reduction_sidecar(name) is is_reduction_sidecar(name), (
+            f"the sweep and the writer disagree on {name!r}")
+    src = (REPO_ROOT / "scripts" / "groundskeeper" / "retention-sweep.py").read_text(
+        encoding="utf-8")
+    top_level = re.findall(r"^(?:from|import)\s+app\b.*$", src, re.MULTILINE)
+    assert top_level == [], f"retention-sweep.py gained a module-level app import: {top_level}"
+    harness = re.findall(r"^\s*(?:from|import)\s+app(?:\.harness|\s+import\s+harness).*$",
+                         src, re.MULTILINE)
+    assert harness == [], (
+        f"retention-sweep.py imports the harness instead of restating the rule: {harness}")

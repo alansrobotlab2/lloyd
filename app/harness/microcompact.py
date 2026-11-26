@@ -1124,5 +1124,11 @@ def is_reduction_sidecar(name: str) -> bool:
     because ``architecture/context-window.md`` cites lines 462 and 620 of this file by
     number and ``tests/test_architecture_coverage_doc_claims.py`` reads them back; an
     insertion at 307 would move both. The suffix it reads is defined there, above.
+
+    The archived spelling, ``<sidecar>`` + ``.gz``, is bookkeeping too (#4328): the
+    retention sweep gzips a sidecar beside its archived head or as an orphan past its
+    30-day bound, and #4109's ruling keeps those bytes, so a ``*.json.gz`` census would
+    otherwise count a compaction record as an archived session. The widening is the
+    dotted suffix plus ``.gz`` and nothing wider.
     """
-    return str(name or "").endswith(REDUCTION_SIDECAR_SUFFIX)
+    return str(name or "").endswith((REDUCTION_SIDECAR_SUFFIX, REDUCTION_SIDECAR_SUFFIX + ".gz"))

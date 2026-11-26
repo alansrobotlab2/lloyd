@@ -5783,7 +5783,7 @@ def _is_reduction_sidecar(name: str) -> bool:
     substring test would be a different rule and a wrong one: a transcript whose own
     id contains the marker is still a transcript.
     """
-    return str(name or "").endswith(SIDECAR_SUFFIX)
+    return str(name or "").endswith((SIDECAR_SUFFIX, SIDECAR_SUFFIX + ".gz"))  # #4328: .gz too
 
 
 def _sidecar_beside(head: Path, sessions_dir: Path) -> list[Path]:
