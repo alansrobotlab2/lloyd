@@ -1448,3 +1448,343 @@ def test_endpoint_run_refuses_to_inherit_a_default_alias_or_file(monkeypatch, tm
             cc.main()
         assert why in str(exc.value), str(exc.value)
     assert not list(tmp_path.glob("*.json"))
+
+
+# ===========================================================================--
+# #4243 — the legibility emitter: one line per task, per arm, from one table
+#
+# The three arms can be run and their rates read; what the measurement doc still
+# had to hand-type were the two things no rate in the report says. First, whether a
+# hatch's NAME alone tells the model what the call does — because a null under
+# `name_only` on a hatch that was already legible from its name is a null on the
+# naming, not a null on the lever. Second, which tools each arm actually took away
+# on the Bash-bearing tasks, where `Bash` is itself one of the hatches. Both come
+# out of the dry run now, for all three arms rather than only `name_only`, so the
+# doc's "command that re-derives every number" re-derives them too.
+# ===========================================================================--
+
+def _leg_map(out: str) -> dict[str, str]:
+    """Index the per-task legibility lines in a dry run's output by task id."""
+    keyed: dict[str, str] = {}
+    for raw in out.splitlines():
+        line = raw.strip()
+        if not line.startswith("cc") or " arm=" not in line:
+            continue
+        tid = line.split()[0]
+        assert tid not in keyed, f"{tid} printed twice: {line!r}"
+        keyed[tid] = line
+    return keyed
+
+
+def _leg_lines(capsys, arm):
+    """Run the real dry run for one arm and return its per-task lines by task id.
+
+    The suite is loaded from the tree, so this is the shipped 22 tasks and not a
+    fixture: a legibility block that printed for a doctored task list would be
+    exactly the hand-authored section this item exists to remove."""
+    assert cc.main(["--dry-run", "--visibility", arm]) == 0
+    return _leg_map(capsys.readouterr().out)
+
+
+def _line_for(lines, task_id):
+    return next(ln for ln in lines if ln.strip().startswith(task_id))
+
+
+@pytest.mark.parametrize("arm", cc.VISIBILITIES)
+def test_leg1_the_dry_run_prints_one_legibility_line_per_task_for_every_arm(capsys, arm):
+    """Clause 1: one line for each of the 22 tasks, naming each hatch tool and
+    whether it is legible from its name — under all three arms, not only
+    `name_only`, which used to be the only arm that said anything about reach."""
+    tasks = cc.load_suite()
+    assert len(tasks) == 22, "the shipped suite is 11 conflict + 11 control"
+    keyed = _leg_lines(capsys, arm)
+    assert set(keyed) == {t["id"] for t in tasks}
+    for t in tasks:
+        line = keyed[t["id"]]
+        assert f"arm={arm}" in line, line
+        hatches = cc.hatch_tools(t)
+        assert hatches, f"{t['id']} declares no hatch, so its line proves nothing"
+        for h in hatches:
+            assert re.search(rf"{re.escape(h)}=(legible|opaque|unlisted)/", line), \
+                f"{t['id']} under {arm} never gave {h} a verdict: {line!r}"
+        # One line, not one per hatch: the verdicts all ride the task's own line.
+        assert line.count(f"arm={arm}") == 1, line
+
+
+def test_leg2_the_verdicts_come_from_one_table_covering_every_named_family():
+    """Clause 2: the verdict is a lookup in `NAME_LEGIBILITY` and nothing else, the
+    table covers the families the item names, and a family it does not cover is
+    reported `unlisted` rather than guessed at."""
+    # name -> (expected verdict, the ONE table entry that must answer for it). Both
+    # halves are asserted through `legibility_from_name`, so nothing here re-implements
+    # the matcher: the table cannot be reshuffled, reordered or partially shadowed by a
+    # later entry without one of these two assertions firing.
+    wanted = {"Bash": (cc.LEGIBLE, "Bash"), "Write": (cc.LEGIBLE, "Write"),
+              "Edit": (cc.LEGIBLE, "Edit"), "Task": (cc.LEGIBLE, "Task"),
+              "http_request": (cc.LEGIBLE, "http_*"), "http_fetch": (cc.LEGIBLE, "http_*"),
+              "http_search": (cc.LEGIBLE, "http_*"),
+              "browser_navigate": (cc.LEGIBLE, "browser_*"),
+              "browser_evaluate": (cc.LEGIBLE, "browser_*"),
+              "mc_navigate": (cc.OPAQUE, "mc_*"),
+              "mc_close_modal": (cc.OPAQUE, "mc_*")}
+    by_pattern = {pattern: legible for pattern, legible, _why in cc.NAME_LEGIBILITY}
+    for name, (verdict, pattern) in wanted.items():
+        got = cc.legibility_from_name(name)
+        assert got["verdict"] == verdict, f"{name}: {got}"
+        assert got["family"] == pattern, f"{name} answered by {got['family']!r}: {got}"
+        # The verdict is the table's own boolean, so the function adds no judgement of
+        # its own: read the flag off the entry the lookup named and compare.
+        assert (cc.LEGIBLE if by_pattern[pattern] else cc.OPAQUE) == verdict, name
+    # An uncovered name is a refusal to claim in either direction — which is what
+    # makes the next assertion a check rather than a comment.
+    assert cc.legibility_from_name("totally_new_tool")["verdict"] == cc.UNLISTED
+    unlisted = sorted({n for t in cc.load_suite() for n in cc.hatch_tools(t)
+                       if cc.legibility_from_name(n)["verdict"] == cc.UNLISTED})
+    assert unlisted == [], f"shipped hatches no NAME_LEGIBILITY entry covers: {unlisted}"
+
+    # And one synthetic task carrying a hatch from every family the item names prints
+    # every one of those verdicts on its single line, through the same function the dry
+    # run calls. All eleven names are hatches on this one task, so there is no skip
+    # list: a name the table covers that stopped reaching the printed line would fail
+    # here rather than silently drop out of a `continue`.
+    task = _vis_task(hatch=tuple(wanted))
+    line = _line_for(cc.format_legibility([task], "name_only"), task["id"])
+    for name, (verdict, _pattern) in wanted.items():
+        assert f"{name}={verdict}/" in line, f"{name} ({verdict}) missing: {line}"
+    # Every family's verdict appears, so the line is not one verdict stamped on all
+    # the hatches: this suite's legible and opaque names are on the same line.
+    assert f"={cc.LEGIBLE}/" in line and f"={cc.OPAQUE}/" in line, line
+
+
+def test_leg3_on_a_bash_bearing_task_the_line_names_what_the_arm_strips(capsys):
+    """Clause 3: on a task whose hatches include `Bash`, that task's line says which
+    hatch tools the requested arm removes from the advertised array — machine-derived
+    per arm, so #3997 clause 5's "which tools were stripped on Bash-bearing tasks"
+    is read off the run instead of typed into the doc."""
+    keyed_by_arm = {arm: _leg_lines(capsys, arm)
+                    for arm in ("described", "name_only", "absent")}
+    task_id = "cc05_conflict_screen_share"
+    task = next(t for t in cc.load_suite() if t["id"] == task_id)
+    # The item's own example, re-read from the tree rather than quoted: hatches
+    # mc_navigate, mc_close_modal, Bash — the one scenario whose hatches are mostly
+    # opaque, and Bash-bearing, so the line has to carry both halves.
+    assert cc.hatch_tools(task) == ["mc_navigate", "mc_close_modal", "Bash"]
+
+    name_only = keyed_by_arm["name_only"][task_id]
+    assert "bash_hatch=yes" in name_only, name_only
+    assert "stripped=[Bash, mc_close_modal, mc_navigate]" in name_only, name_only
+    assert "removed_by_arm=[-]" in name_only, name_only
+    assert "Bash=legible/stripped" in name_only and "mc_navigate=opaque/stripped" in name_only
+
+    absent = keyed_by_arm["absent"][task_id]
+    assert "bash_hatch=yes" in absent, absent
+    assert "stripped=[-]" in absent, absent
+    assert "removed_by_arm=[Bash, mc_close_modal, mc_navigate]" in absent, absent
+
+    described = keyed_by_arm["described"][task_id]
+    assert "bash_hatch=yes" in described, described
+    assert "stripped=[-]" in described and "removed_by_arm=[-]" in described, described
+    assert "Bash=legible/unchanged" in described, described
+
+    # The Bash-bearing roll-up, which is the line the doc quotes: it names the whole
+    # hatch list the arm acts on there, not just Bash.
+    assert cc.main(["--dry-run", "--visibility", "name_only"]) == 0
+    out = capsys.readouterr().out
+    rollup = _line_for(out.splitlines(), "arm=name_only on Bash-bearing tasks:")
+    assert ("stripped=[Bash, Edit, Write, browser_navigate, grant_create, http_fetch, "
+            "http_request, mc_close_modal, mc_navigate, research_propose]") in rollup, rollup
+    assert "removed=[-]" in rollup, rollup
+
+
+def test_leg4_a_hatch_the_sandbox_denies_by_name_is_never_reported_as_stripped():
+    """Clause 4: a hatch in `bench_runner_sdk.STATEFUL_TOOLS` is refused by name by
+    the pinned bench sandbox, so it was never in the advertised array under any arm
+    and `name_only` cannot strip it. The line says `not_strippable` and carries the
+    witness state it will still record (`removed`) beside it, so an all-`removed`
+    hatch is never read as the lever working."""
+    from scripts.autoresearch.bench_runner_sdk import STATEFUL_TOOLS
+
+    denied = ("memory_add", "email_send")
+    assert all(d in STATEFUL_TOOLS for d in denied), "the premise this test rests on"
+    task = _vis_task(hatch=denied + ("Bash",))
+    rec = cc.task_legibility(task, "name_only")
+    line = _line_for(cc.format_legibility([task], "name_only"), task["id"])
+
+    assert rec["bash_bearing"] is True
+    assert rec["stripped"] == ["Bash"], rec
+    assert rec["not_strippable"] == sorted(denied), rec
+    assert rec["removed_by_arm"] == [], "the arm removed nothing here, only the sandbox"
+    assert not set(rec["stripped"]) & set(rec["not_strippable"]), "the two lists are disjoint"
+    for d in denied:
+        # Neither denied hatch appears in the arm's `stripped` list on the printed
+        # line, and each carries its witness state, which is the trap in one string:
+        # the effect is `not_strippable`, the witness still says `removed`.
+        assert f"{d}=unlisted/not_strippable(witness=removed)" in line, line
+    assert "Bash=legible/stripped" in line and "stripped=[Bash]" in line, line
+    assert "not_strippable=[email_send, memory_add]" in line, line
+    # `absent` is the arm that DOES remove names, and it still cannot claim credit
+    # for a removal the sandbox already made.
+    absent = cc.task_legibility(task, "absent")
+    assert absent["removed_by_arm"] == ["Bash"], absent
+    assert absent["not_strippable"] == sorted(denied), absent
+
+
+def test_leg4a_a_hatch_disabled_in_config_is_not_strippable_and_plan_mode_denial_is_not(
+        monkeypatch):
+    """Clause 4's set is the trial's own deny list, not a private copy of one name.
+
+    `build_options` builds `disallowed_tools` from two sources, and a hatch can be
+    un-advertised by either: `STATEFUL_TOOLS` and `mcp_discovery._get_disallowed_tools`,
+    which today answers `mcp_servers.*.disabled_tools` (`email_*`/`discord_*`). The
+    emitter reads the same two, so the day a person disables a hatch name in config the
+    line says `not_strippable` on its own instead of printing `stripped` for a name the
+    trial was never handed — clause 4's misreading, arriving by the config route.
+
+    The second half is the other edge of that read: `_get_disallowed_tools(plan_mode=…)`
+    also returns `Bash`/`Write`/`Edit`, and a visibility trial is not a plan-mode turn,
+    so asking it with `True` would report the suite's most common hatches as
+    un-actionable and deny the lever exists. The recorded call proves which one is asked.
+    """
+    import app.mcp_discovery as mcp_disc
+
+    asked: list[bool] = []
+
+    def fake(plan_mode: bool = False) -> list[str]:
+        asked.append(plan_mode)
+        return ["mc_navigate", "totally_unshipped_tool"]
+
+    monkeypatch.setattr(mcp_disc, "_get_disallowed_tools", fake)
+    denied = cc.trial_denied_names()
+    assert "mc_navigate" in denied and "totally_unshipped_tool" in denied, sorted(denied)
+    assert asked == [False], f"a trial is built with plan_mode=False, got {asked}"
+    from scripts.autoresearch.bench_runner_sdk import STATEFUL_TOOLS
+    assert set(STATEFUL_TOOLS) <= denied, "the sandbox's own denial is still in the set"
+    assert "Bash" not in denied, "plan mode's denial must not leak into a trial's"
+
+    task = next(t for t in cc.load_suite() if t["id"] == "cc05_conflict_screen_share")
+    assert cc.hatch_tools(task) == ["mc_navigate", "mc_close_modal", "Bash"]
+    rec = cc.task_legibility(task, "name_only")
+    line = _line_for(cc.format_legibility([task], "name_only"), task["id"])
+    assert rec["not_strippable"] == ["mc_navigate"], rec
+    assert rec["stripped"] == ["Bash", "mc_close_modal"], rec
+    assert "mc_navigate=opaque/not_strippable(witness=removed)" in line, line
+    assert "stripped=[Bash, mc_close_modal]" in line, line
+
+
+def test_a_chat_only_hatch_is_strippable_because_a_trial_has_no_surface(monkeypatch):
+    """The chat-only names are NOT in the not-strippable set, and this is the reason.
+
+    `agent_mcp.annotations.CHAT_ONLY` holds `mc_navigate`, `mc_close_modal` and
+    `grant_create` — three of this suite's hatches, on cc04 and cc05 — and hides them
+    from a worker turn. Round SM_20261126_090026 read that as a second route to
+    `not_strippable`. It is not: that deny hangs off `RunOptions.surface`, a bench trial
+    never sets one, and `hidden_on_surface("")` hides nothing. So a cc05 trial IS handed
+    those three names with their shipped descriptions and `name_only` really does strip
+    them; folding the chat-only set in would report three real strips as un-actionable
+    and understate the arm's reach — the inverse of the error clause 4 prevents.
+
+    All four links are asserted off the shipped objects rather than restated: what the
+    trial's own options carry, what the trim does with it, what the deny set therefore
+    excludes, and what the line prints for the task that has those hatches.
+    """
+    from agent_mcp.annotations import CHAT_ONLY, hidden_on_surface
+    from scripts.autoresearch.bench_runner_sdk import build_options
+    from app.harness.loop import _surface_hidden
+
+    _patch_off_vault(monkeypatch)
+    options = build_options(model="primary", overlay_dir=Path("/o"), session_id="bench_leg")
+    assert options.surface == "", "a bench trial names no surface, so nothing is trimmed"
+    assert _surface_hidden(options) == set(), _surface_hidden(options)
+    assert hidden_on_surface("") == frozenset()
+
+    chat_only_hatches = sorted(set(CHAT_ONLY) & {n for t in cc.load_suite()
+                                                 for n in cc.hatch_tools(t)})
+    assert chat_only_hatches == ["grant_create", "mc_close_modal", "mc_navigate"], \
+        chat_only_hatches
+    denied = cc.trial_denied_names()
+    assert not (set(chat_only_hatches) & denied), \
+        f"a surface trim is not a deny: {sorted(set(chat_only_hatches) & denied)}"
+
+    line = _line_for(cc.format_legibility(cc.load_suite(), "name_only"),
+                     "cc05_conflict_screen_share")
+    assert "mc_navigate=opaque/stripped" in line, line
+    assert "mc_close_modal=opaque/stripped" in line, line
+    assert "not_strippable=[-]" in line, line
+
+
+def test_the_reach_line_and_the_per_task_lines_read_one_deny_set(capsys, monkeypatch):
+    """The dry run prints the deny set twice — once as the `name_only` reach line, once
+    inside every per-task line — and a reader compares them, so they must come from one
+    measurement. Before this round the reach line intersected `STATEFUL_TOOLS` itself
+    while the task lines consulted the trial's wider list: disable a hatch in config and
+    the same run tells you that hatch is un-advertised on its task's line and strippable
+    on the reach line, and the reach number is the one an arm gets chosen from.
+
+    A config deny is injected rather than waited for: none of today's 22 hatches is
+    disabled (`email_*`/`discord_*` are, and none of them is a hatch), so the agreement
+    would be vacuous at HEAD and this node would pass for the wrong reason.
+    """
+    import app.mcp_discovery as mcp_disc
+    monkeypatch.setattr(mcp_disc, "_get_disallowed_tools",
+                        lambda plan_mode=False: ["mc_navigate", "Write"])
+
+    assert cc.main(["--dry-run", "--visibility", "name_only"]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    reach = _line_for(lines, "name_only cannot strip")
+    reach_denied = set(reach.split(":", 1)[1].strip().strip("-").split(", ")) - {""}
+    task_denied = {h.strip() for line in _leg_map(out).values()
+                   for h in line.split("not_strippable=[")[1].split("]")[0].split(", ")
+                   if h.strip() and h.strip() != "-"}
+    assert reach_denied == {"Write", "mc_navigate"}, reach
+    assert task_denied == {"Write", "mc_navigate"}, (sorted(task_denied), reach)
+    # The reach count is the other number the same set decides: cc07's only hatch is
+    # `Task`, and every other task keeps at least one hatch the arm can still act on,
+    # so denying two names costs no task its separability — asserted so the count is
+    # read off the injected deny and not left at the 22 it would be without one.
+    reach_line = _line_for(lines, "name_only reach:").strip()
+    assert re.match(r"name_only reach: 22/22 tasks", reach_line), reach_line
+
+
+def test_leg4_the_dry_run_says_so_for_every_arm_not_only_the_one_it_was_printed_for(capsys):
+    """The pre-existing reach line spoke only under `name_only`, where it belongs;
+    the per-task `not_strippable` field now has to be there for all three, because a
+    `described` reader is the one most likely to assume every hatch was advertised."""
+    for arm in cc.VISIBILITIES:
+        keyed = _leg_lines(capsys, arm)
+        assert len(keyed) == 22, arm
+        assert all("not_strippable=[" in ln for ln in keyed.values()), arm
+    # cc05's three hatches are all sandbox-offered, so the honest `described` line
+    # reports an unchanged arm and an empty not-strippable list, not a silent field.
+    described = _leg_lines(capsys, "described")["cc05_conflict_screen_share"]
+    assert "not_strippable=[-]" in described and "stripped=[-]" in described, described
+    assert "unchanged" in described, described
+
+
+def test_leg4b_the_witness_state_the_line_predicts_is_the_witness_module_s_own_word():
+    """The per-task line carries a predicted witness state, so prediction and record
+    have to speak one vocabulary — and the vocabulary belongs to
+    `bench_runner_sdk.tool_visibility_record`, which reads the advertised array at the
+    MCP→OpenAI seam. This asks that producer what each array would record and checks
+    the line said the same word; a private synonym here would make the line's
+    `witness=` field decoration."""
+    from scripts.autoresearch.bench_runner_sdk import tool_visibility_record
+
+    def advertised(pairs):
+        return [{"type": "function",
+                 "function": {"name": n, "description": d}} for n, d in pairs]
+
+    def predicted(arm, arm_applied_to):
+        got = cc.task_legibility(_vis_task(hatch=("Bash",)), arm)["hatches"][0]["witness"]
+        want = tool_visibility_record(["Bash"], arm_applied_to)["Bash"]
+        assert got == want, f"{arm}: the line predicts {got!r}, the witness records {want!r}"
+
+    # `described`: shipped description still there. `name_only`: the name stays in
+    # the array and the description is emptied, which is what `stripped` means.
+    predicted("described", advertised([("Bash", SHIPPED_DESC), ("Write", "Create a file")]))
+    predicted("name_only", advertised([("Bash", ""), ("Write", "Create a file")]))
+    # `absent`: the name is gone from a non-empty array, which is `removed` — and an
+    # EMPTY array is `unrecorded`, never `removed`, so the arm cannot confirm itself
+    # off an absence of capture (`tool_visibility_record`'s own rule).
+    predicted("absent", advertised([("Write", "Create a file")]))
+    assert tool_visibility_record(["Bash"], [])["Bash"] == cc.UNRECORDED

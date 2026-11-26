@@ -48,7 +48,7 @@ it to the rate list above, precisely so a reader cannot borrow the wrong `n`:
 missing-argument class: 3 conflict / 3 control trial(s) scored, 0 unmeasurable
 ```
 
-(`scripts/autoresearch/constraint_conflict.py:801-803` builds that line, and it
+(`scripts/autoresearch/constraint_conflict.py:1011-1013` builds that line, and it
 omits the `, 0 unmeasurable` tail when the count is zero — the console output for
 this firing therefore ended at `scored`. `0 unmeasurable` is the JSON's own
 `missing_arg_trials.unmeasurable`, and it is spelled out here because a `0/0`
@@ -56,7 +56,7 @@ in this class means *no task tested it*, not *nothing happened*.)
 
 So: **quoting the 1/3 against `n=66`, or against the shipped baseline's `5/30`,
 is the misread the comment at
-`scripts/autoresearch/constraint_conflict.py:793-799` warns about** — "a reader
+`scripts/autoresearch/constraint_conflict.py:1003-1009` warns about** — "a reader
 who thinks the two are the same denominator reads a 2/3 as a 2/66". The cc11
 denominator is the trials of the scenarios that withhold an argument (3 conflict
 and 3 control here, out of 11 conflict and 11 control tasks at 3 trials per
@@ -104,7 +104,7 @@ loopback port the primary already listens on, and `engine.alias` is null because
 the URL was named on the command line rather than resolved from `config.yaml`.
 Nothing in the artifact records a second serving process, a new GPU, or a rebuilt
 interpreter — the driver is a client, and its only engine-side request is the
-read-only `GET /v1/models` at `scripts/autoresearch/constraint_conflict.py:952`
+read-only `GET /v1/models` at `scripts/autoresearch/constraint_conflict.py:1162`
 that reads the identity fields above. What this doc claims about the checkpoint
 is only what the endpoint reported as its `root`; how the endpoint came to serve
 that checkpoint on 2026-11-19 is a serving-side fact outside this artifact.
@@ -127,7 +127,7 @@ the reason given in *Provenance*:
 **Attribute a `git_sha` per firing:** the measured firing above ran at
 `9353ad43…` and this null one at `5b59f98d…`, four commits' worth of tree apart.
 
-The cause is one slash. `scripts/autoresearch/constraint_conflict.py:952` is
+The cause is one slash. `scripts/autoresearch/constraint_conflict.py:1162` is
 `httpx.get(ident["base_url"].rstrip("/") + "/v1/models", timeout=5).json()["data"][0]`
 — it appends `/v1/models` itself — so passing the API's version prefix in the
 flag builds `http://127.0.0.1:8096/v1/v1/models`, that body has no `data` key,

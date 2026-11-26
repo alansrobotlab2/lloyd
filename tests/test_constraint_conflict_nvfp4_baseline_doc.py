@@ -276,7 +276,7 @@ def test_the_ask_rate_carries_its_own_class_denominator():
 
 def test_the_doc_names_the_denominator_misread_it_invites():
     doc = _doc()
-    assert _within(doc, 240, "n=66", "5/30", "793-799"), (
+    assert _within(doc, 240, "n=66", "5/30", "1003-1009"), (
         "the doc must carry one line saying that quoting the 1/3 against n=66 or "
         "against the shipped 5/30 is the misread the driver's #4128 comment warns "
         "about, and must cite that comment where it stands now")
@@ -364,9 +364,9 @@ def test_the_null_firing_and_the_base_url_rule_are_recorded():
     # The driver half of clause 5: the flag rule the doc states is a property of
     # the code, so it is checked against the code and not the prose.
     append_line = _driver_line_no('+ "/v1/models"')
-    assert append_line == 952, (
-        f"the identity probe moved off constraint_conflict.py:952 (now :{append_line}); "
-        f"the doc cites :952 for the /v1 suffix rule and has to be re-pointed")
+    assert append_line == 1162, (
+        f"the identity probe moved off constraint_conflict.py:1162 (now :{append_line}); "
+        f"the doc cites :1162 for the /v1 suffix rule and has to be re-pointed")
     assert _within(doc, 60, "--base-url http://127.0.0.1:8096", "without the `/v1`"), (
         "the doc must state the rule, not just the value: the flag takes the URL "
         "with no /v1 because the driver appends /v1/models itself")
@@ -375,24 +375,24 @@ def test_the_null_firing_and_the_base_url_rule_are_recorded():
 def test_the_drivers_own_citation_ranges_are_where_the_doc_says():
     """Anti-rot for the two prose citations, checked against the driver.
 
-    `793-799` is the #4128 denominator comment the doc echoes, and `801-803` is the
-    emitter that prints the denominator line the doc quotes. A range that drifts
+    `1003-1009` is the #4128 denominator comment the doc echoes, and `1011-1013` is
+    the emitter that prints the denominator line the doc quotes. A range that drifts
     makes the doc wrong for every future reader who opens the file at the cited
     line, and nothing but this node notices.
     """
     first, last = _driver_comment_block("the same denominator reads a")
-    assert last == 799, f"the #4128 comment block now ends at {last}, not 799"
-    # The doc cites 793, one line above the block's own first line (794): 793 is
+    assert last == 1009, f"the #4128 comment block now ends at {last}, not 1009"
+    # The doc cites 1003, one line above the block's own first line (1004): 1003 is
     # the `lines.append(...)` the comment annotates, and that is how the item's
     # contract names the range. The ±1 is the difference between a pointer and a
     # slip, and it is stated here rather than hidden in a passing assertion.
-    assert abs(first - 793) <= 1, (
-        f"the #4128 comment block now starts at {first}; the doc cites 793-799")
+    assert abs(first - 1003) <= 1, (
+        f"the #4128 comment block now starts at {first}; the doc cites 1003-1009")
     emit = _driver_line_no('lines.append(f"  missing-argument class:')
-    assert 801 <= emit <= 803, (
-        f"the denominator emitter moved to :{emit}; the doc cites 801-803")
+    assert 1011 <= emit <= 1013, (
+        f"the denominator emitter moved to :{emit}; the doc cites 1011-1013")
     assert _within(_doc(), 400, "missing-argument class: 3 conflict",
-                   "801-803"), "the doc must cite the emitter that prints its line"
+                   "1011-1013"), "the doc must cite the emitter that prints its line"
 
 
 # --------------------------------------------------------------------------
