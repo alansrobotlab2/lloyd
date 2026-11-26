@@ -14640,3 +14640,57 @@ def test_the_write_gate_window_constant_states_the_floor_under_it():
     for figure in ("155", "252", "430", "1,019", "2,079"):
         assert figure in block, f"the comment lost the measured figure {figure}: {block[:400]}"
     assert "mtime" in block, "the comment no longer says the window is not the file mtime"
+
+
+def _registered_worktrees_doc() -> str:
+    """`_remove_registered_worktrees`'s docstring, read out of the shipped file's AST."""
+    import ast
+    tree = ast.parse(_SCRIPT.read_text(encoding="utf-8"))
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.FunctionDef) and n.name == "_remove_registered_worktrees")
+    return ast.get_docstring(fn) or ""
+
+
+def test_the_registered_worktree_docstring_cites_remove_worktree_by_symbol_alone():
+    """#4057 clauses 1-2. The pointer at `arch_review.py`'s trio names the symbol, no span.
+
+    It was written with the span 1411-1418 beside the symbol on 2026-10-18, true then; two later
+    commits moved the function +72 lines, so the span landed inside `commit_doc`. A symbol
+    does not rot that way; the operations the trio runs are described in the sentence, so the
+    pointer is usable without any number.
+    """
+    doc = _registered_worktrees_doc()
+    cite = "`workers/sources/arch_review.py::remove_worktree`"
+    assert cite in doc, f"the docstring no longer cites the trio by symbol: {doc[:400]}"
+    assert not re.search(r"remove_worktree:\d+(?:-\d+)?", doc), (
+        "a line span is back beside the symbol — the integer that rotted twice")
+    flat = " ".join(doc.split())
+    assert "git worktree remove --force" in flat, "the first operation is no longer named"
+    assert "`rmtree` ONLY if the directory survives that" in flat, (
+        "the conditional rmtree is no longer named")
+    assert "`git worktree prune`" in flat, "the prune is no longer named"
+    assert (flat.index("git worktree remove --force") < flat.index("`rmtree` ONLY if")
+            < flat.index("`git worktree prune`")), "the trio is no longer in order"
+
+
+#: A `path::symbol:<digits>-<digits>` citation in tracked Python: the shape #4057 found
+#: rotted. No instrument reads Python for line anchors, so a span written beside a symbol
+#: is invisible until a reader follows it into the wrong function.
+_SYMBOL_LINE_SPAN = r"::[a-z_]+:[0-9]+-[0-9]+"
+
+
+def test_no_tracked_python_cites_a_symbol_with_a_line_span():
+    """#4057 clause 3. `git grep -nE '::[a-z_]+:[0-9]+-[0-9]+' -- '*.py'` returns nothing.
+
+    Name the symbol (`file.py::func`) or quote the cited lines' text; never a span beside a
+    symbol, which the symbol already makes redundant and the next edit above it makes false.
+    """
+    repo = _SCRIPT.parents[2]
+    out = subprocess.run(["git", "grep", "-nE", _SYMBOL_LINE_SPAN, "--", "*.py"],
+                         cwd=repo, capture_output=True, text=True)
+    assert out.returncode in (0, 1), f"git grep failed: {out.stderr}"
+    # This module's own pattern literal is written with character classes, not digits, so
+    # it does not match itself; any hit is a real citation.
+    assert out.stdout == "", (
+        "tracked Python cites a symbol with a line span; name the symbol alone:\n"
+        + out.stdout)

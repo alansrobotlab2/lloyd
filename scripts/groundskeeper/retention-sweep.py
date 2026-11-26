@@ -1894,7 +1894,7 @@ def _names_registered(dir: Path, registered: list[str]) -> bool:
 def _remove_registered_worktrees(repo: Path, paths: list[str]) -> tuple[int, str]:
     """Take a forgotten checkout's registration WITH its directory. (#3003 clause 2)
 
-    Runs the trio `workers/sources/arch_review.py::remove_worktree:1411-1418` runs per
+    Runs the trio `workers/sources/arch_review.py::remove_worktree` runs per
     registration, through `automod.worktree`'s own `git`/`prune` helpers: `git worktree
     remove --force` on the path `git worktree list` printed, then `rmtree` ONLY if the
     directory survives that, then `git worktree prune`. Neither `worktree.remove` nor
