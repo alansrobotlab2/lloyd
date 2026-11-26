@@ -5128,7 +5128,16 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: tree nobody edited. `test_the_executable_surface_anchor_is_reachable_from_main` now
 #: refuses that shape, and `01766790` passes it: `git merge-base --is-ancestor 01766790
 #: HEAD` exits 0 and `git show 01766790:eval/run_eval.py` is byte-identical to this tree's.
-RUN_EVAL_CODE_ANCHOR = "01766790"
+#:
+#: The 2026-11-25 hand sweep moves it a sixth time, for behaviour again: #4285's matched
+#: ceiling population (`ceiling_population`, `attach_ceiling_population`, `_matched_halves`,
+#: `_matched_suffix`, and the line-for-line rewiring of `ceiling_context`,
+#: `_normalize_against_ceiling`, `summarize` and `print_table`) and #4297's
+#: `escalate_refused_ceiling` plus its call below the baseline write. No scored query and
+#: no scorer changed. It names `ee8fb7e3`, the #4297 commit, stamped one commit later for
+#: the self-naming reason above. If the sweep lands rewritten (rebased, cherry-picked or
+#: squashed) that sha is not an ancestor of main and must be re-stamped at the landed one.
+RUN_EVAL_CODE_ANCHOR = "ee8fb7e3"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
