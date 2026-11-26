@@ -1915,7 +1915,7 @@ def _witness_findings() -> list[str]:
         return [f"witness: CHECK FAILED ({type(exc).__name__}: {str(exc)[:200]})"]
 
 
-def land(paths: list[str], message: str, *, item_id: int | None = None,
+def _land(paths: list[str], message: str, *, item_id: int | None = None,
          session_id: str | None = None, ack: list[str] | None = None) -> dict:
     """Validate these paths, commit exactly them on the vault's main, ledger it.
 
@@ -3027,6 +3027,36 @@ def skill_contract_findings(paths: list[str]) -> list[dict]:
                                    f"list them under `## Files in this skill`"
                                    + _char_cap_note(VAULT / rel)})
     return rows
+
+
+
+def land(paths: list[str], message: str, *, item_id: int | None = None,
+         session_id: str | None = None, ack: list[str] | None = None) -> dict:
+    """`_land`, bracketed by the in-flight marker its callers read (#4583).
+
+    A land runs synchronously and can outlast the 660 s tool-call ceiling (review, then
+    the code-agreement probe queued behind a running gate's tests lock: #4429 measured
+    1529 s), so its caller times out on a healthy land, and the implement finalizer reads
+    a ledger with no `vault_land` row yet. The marker (`state.vault_land_in_progress`) is
+    what both read instead: written before any work, removed in `finally` whatever the
+    outcome — so a land that raised leaves no marker, and a process that died under it
+    leaves one whose pid is gone, which no reader counts.
+
+    A second call for the same item (or, item-less, the same session) while the first is
+    live is refused with the first one's state rather than run twice: it would grade and
+    commit the same paths again, and the caller asking is almost always the one whose
+    call timed out.
+    """
+    in_flight = S.vault_land_in_progress(item_id=item_id, session_id=session_id)
+    if in_flight is not None:
+        raise VaultRoundError(S.vault_land_in_flight_text(in_flight))
+    S.write_vault_land_marker(item_id=item_id, session_id=session_id,
+                              paths=[str(x) for x in (paths or [])])
+    try:
+        return _land(paths, message, item_id=item_id, session_id=session_id,
+                     **({"ack": ack} if ack is not None else {}))
+    finally:
+        S.clear_vault_land_marker(item_id=item_id, session_id=session_id, pid=os.getpid())
 
 
 if __name__ == "__main__":

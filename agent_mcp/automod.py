@@ -792,13 +792,14 @@ async def list_tools() -> list[Tool]:
             description=("Land a change to the Obsidian vault (~/obsidian) through the "
                          "self-modification loop. The vault is a live tree with no worktree, "
                          "so this runs AFTER you edit: it validates only the paths you name "
-                         "(front matter must parse; a touched skill must still load, a touched "
-                         "autonomy task must still parse, SOUL.md/memory/skill edits must still "
-                         "build the system prompt), commits exactly those paths on the vault's "
+                         "(front matter, skills, tasks and the system prompt must still load), "
+                         "commits exactly those paths on the vault's "
                          "main, and records the sha in the automod ledger. If validation fails "
-                         "the paths are REVERTED (tracked files back to HEAD, new files deleted) "
-                         "and nothing lands. .obsidian/**, .git/** and .trash/** are denied. "
-                         "Requires Inner Voice on the turn, like automod_start."),
+                         "the paths are REVERTED and nothing lands. "
+                         ".obsidian/**, .git/** and .trash/** are denied. "
+                         "Requires Inner Voice on the turn. It can outlast the call timeout "
+                         "(review, then a probe queued behind a running gate): a timed-out land "
+                         "is still running, and calling again reports it, never lands twice."),
             inputSchema={
                 "type": "object",
                 "properties": {

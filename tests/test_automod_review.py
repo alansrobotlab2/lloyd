@@ -6634,3 +6634,52 @@ def test_the_re_ask_comment_names_the_per_head_void_ceiling_and_its_owner():
     # And the numbers it cites are the measurement, not an appeal.
     for figure in ("SM_20261030_035050", "190.2", "497.7", "687.9"):
         assert figure in comment, (figure, comment)
+
+
+# ── #4583: a vault land still running is a landing in flight ────────────────
+#
+# #4599: `vault_review` passed at 15:07:57Z, the implement finalizer wrote "no
+# landing in flight" at 15:18:49Z and moved the item to `draft`, and the land's
+# `vault_land` row arrived at 15:45:08Z — the code-agreement probe had queued behind
+# a running gate's tests lock. The land's own marker is what the finalizer reads now.
+
+
+def test_a_live_vault_land_marker_keeps_the_landing_claim(isolated, monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "VAULT_LAND_DIR", tmp_path / "vault_lands")
+
+    def land_still_running():
+        S.write_vault_land_marker(item_id=415, session_id="s415",
+                                  paths=["skills/x/SKILL.md"])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=land_still_running, surface="vault")
+    assert ev["outcome"]["landed"] is True, ev["outcome"]
+    assert ev.get("outcome_landing_mismatch", "") == "", ev
+
+
+def test_a_dead_vault_land_marker_is_not_a_landing(isolated, monkeypatch, tmp_path):
+    monkeypatch.setattr(S, "VAULT_LAND_DIR", tmp_path / "vault_lands")
+
+    def land_that_died():
+        dead = subprocess.Popen(["true"])
+        dead.wait()
+        S.write_vault_land_marker(item_id=415, session_id="s415", paths=["a.md"],
+                                  pid=dead.pid)
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=land_that_died, surface="vault")
+    assert ev["outcome"]["landed"] is False, ev["outcome"]
+    assert "no landing in flight" in ev["outcome_landing_mismatch"]
+
+
+def test_a_vault_land_in_flight_does_not_vouch_for_a_code_surface_round(
+        isolated, monkeypatch, tmp_path):
+    """#415's rule holds: on `code`, a vault commit is not the landing."""
+    monkeypatch.setattr(S, "VAULT_LAND_DIR", tmp_path / "vault_lands")
+
+    def land_still_running():
+        S.write_vault_land_marker(item_id=415, session_id="s415", paths=["a.md"])
+
+    ev = _implement_turn_isolated(isolated, monkeypatch, LANDING_CLAIM,
+                                  mid_turn=land_still_running, surface="code")
+    assert ev["outcome"]["landed"] is False, ev["outcome"]

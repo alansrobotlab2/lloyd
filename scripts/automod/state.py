@@ -1665,3 +1665,156 @@ def landing_lock(path: Path | None = None) -> dict | None:
     if not rec or not str(rec.get("owner") or "").startswith("land-"):
         return None
     return rec if marker_pid_is_live(rec.get("pid") or 0, rec.get("since")) else None
+
+
+# ---------------------------------------------------------------------------
+# A vault land in flight (#4583)
+# ---------------------------------------------------------------------------
+#
+# `automod_vault_land` runs synchronously inside lloyd-mcp: validate, the second
+# reader's review, the code-agreement probe — which queues behind a running gate's
+# tests lock — then the commit and its `vault_land` row. Measured on #4429:
+# `seconds: 1529` against `budget: 900`, `lock_wait_s: 629`, so the land outlived the
+# 660 s tool-call ceiling and its caller saw a transport error while it was healthy,
+# and #4599's implement finalizer wrote "no landing in flight" eleven minutes before
+# the row arrived. This marker is the in-flight signal both of them lacked: written
+# when `vault_round.land` starts, removed when it returns or raises, keyed by item (or
+# by session for an item-less land). Its owner is the lloyd-mcp process, not an
+# automod child, so liveness is pid + start time, never `identity_is_automod`.
+
+#: None = beside the ledger the marker announces (`LEDGER_PATH.parent / "vault_lands"`),
+#: so whatever isolates a ledger — a test's scratch `LEDGER_PATH` — isolates the marker.
+VAULT_LAND_DIR: Path | None = None
+
+
+def _vault_land_dir() -> Path:
+    return VAULT_LAND_DIR if VAULT_LAND_DIR is not None else LEDGER_PATH.parent / "vault_lands"
+
+
+def _vault_land_key(item_id=None, session_id: str | None = None) -> str | None:
+    if item_id is not None and str(item_id).strip():
+        try:
+            return f"item-{int(item_id)}"
+        except (TypeError, ValueError):
+            return None
+    sid = "".join(c for c in str(session_id or "") if c.isalnum() or c in "_-")
+    return f"session-{sid}" if sid else None
+
+
+def vault_land_marker_path(item_id=None, session_id: str | None = None) -> Path | None:
+    key = _vault_land_key(item_id, session_id)
+    return _vault_land_dir() / f"{key}.json" if key else None
+
+
+def write_vault_land_marker(*, item_id=None, session_id: str | None = None,
+                            paths: list[str] | None = None, pid: int | None = None) -> dict | None:
+    """Record that a vault land for this item (or session) has started. Fail-open."""
+    path = vault_land_marker_path(item_id, session_id)
+    if path is None:
+        return None
+    rec = {"pid": int(pid or os.getpid()), "started_at": time.time(),
+           "started_iso": now_iso(), "item_id": item_id,
+           "session_id": session_id or "", "paths": list(paths or [])}
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(f".tmp{os.getpid()}")
+        tmp.write_text(json.dumps(rec), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError:
+        return None
+    return rec
+
+
+def read_vault_land_marker(item_id=None, session_id: str | None = None) -> dict | None:
+    path = vault_land_marker_path(item_id, session_id)
+    if path is None or not path.exists():
+        return None
+    try:
+        rec = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def clear_vault_land_marker(*, item_id=None, session_id: str | None = None,
+                            pid: int | None = None) -> None:
+    """Remove the marker; with `pid`, only one that process wrote."""
+    path = vault_land_marker_path(item_id, session_id)
+    if path is None:
+        return
+    if pid is not None:
+        rec = read_vault_land_marker(item_id, session_id)
+        if rec is not None and int(rec.get("pid") or 0) != int(pid):
+            return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _vault_land_marker_live(rec: dict) -> bool:
+    pid = rec.get("pid") or 0
+    if not pid_alive(pid):
+        return False
+    started = _marker_time(rec.get("started_at"))
+    began = _proc_start_epoch(pid)
+    if started is None or began is None:
+        return True
+    return began <= started + MARKER_START_SLACK_S
+
+
+def vault_land_in_progress(*, item_id=None, session_id: str | None = None,
+                           events: list[dict] | None = None) -> dict | None:
+    """The live marker for this item's (or session's) vault land, with its stage, or None.
+
+    A marker whose pid is gone — lloyd-mcp restarted under the land — is not a land in
+    flight; it is left on disk for the next writer to overwrite. The returned record
+    carries `elapsed_s`, `stage` (`review` until a `vault_review` row for the item lands
+    after the marker's start, then `committing`: the code-agreement probe and the commit),
+    and, when the gate's tests lock is held, `tests_lock_holder` — the queue the probe is
+    waiting in, which is where #4429's 629 s went.
+    """
+    rec = read_vault_land_marker(item_id, session_id)
+    if rec is None or not _vault_land_marker_live(rec):
+        return None
+    out = dict(rec)
+    started = float(rec.get("started_at") or 0)
+    out["elapsed_s"] = round(max(0.0, time.time() - started), 1)
+    stage = "review"
+    try:
+        rows = events if events is not None else read_events(limit=300)
+        for ev in rows:
+            if (ev.get("event") == "vault_review" and rec.get("item_id") is not None
+                    and ev.get("item_id") == rec.get("item_id")
+                    and float(ev.get("ts") or 0) >= started):
+                stage = f"committing (review {ev.get('kind') or '?'})"
+    except Exception:  # noqa: BLE001 — a stage is a nicety, the marker is the fact
+        pass
+    out["stage"] = stage
+    try:
+        holder = read_lock_payload(GATE_TESTS_LOCK_PATH)
+        # The payload outlives the flock, so only a live holder is a queue.
+        if holder and marker_pid_is_live(holder.get("pid") or 0, holder.get("since")):
+            out["tests_lock_holder"] = {k: holder.get(k) for k in ("owner", "pid", "since")
+                                        if holder.get(k) is not None}
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+def vault_land_in_flight_text(rec: dict) -> str:
+    """One sentence for a caller holding a live marker: what is running, and that a
+    second call now is not safe."""
+    who = (f"item #{rec['item_id']}" if rec.get("item_id") is not None
+           else f"session {rec.get('session_id') or '?'}")
+    lock = rec.get("tests_lock_holder") or {}
+    queue = (f"; the gate's tests lock is held by {lock.get('owner') or lock.get('pid')}, "
+             f"which the code-agreement probe queues behind" if lock else "")
+    return (f"a vault land for {who} is already in flight (started {rec.get('started_iso')}, "
+            f"{rec.get('elapsed_s')} s ago, stage: {rec.get('stage')}{queue}; paths: "
+            f"{', '.join(rec.get('paths') or [])[:300]}). Do not call it again: it will "
+            f"write its own `vault_land` row to promotions.jsonl when it finishes, and "
+            f"`git -C ~/obsidian log -1 -- <path>` shows its commit. A land can outlast the "
+            f"tool-call ceiling, so a timed-out call is usually this one, still running.")

@@ -1229,6 +1229,10 @@ RETIRED_TOOLS = frozenset({
 # 2026-11-26, #4453: `vault_write` gained `mode` (`append`). Paid for by its own
 # `content` description, which restated the tool description's first line ("replaces
 # the file wholesale — read it first if you mean to amend"). 22,494 over 107 tools.
+#
+# 2026-11-26, #4583: `automod_vault_land` says it can outlast the call timeout and that
+# calling again reports the land in flight. Paid for by its own validation parenthetical
+# (now one clause), the revert mechanics and "like automod_start". 22,495 over 107 tools.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 

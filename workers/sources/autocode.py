@@ -2712,7 +2712,13 @@ def _record_run(candidate, triage, run: dict, started: float, *, warm: dict | No
     # `automod_land`": #415's mixed round committed to the vault, never to `main`,
     # and reported `landed: true` from exactly that half.
     round_seen = _landing_seen(round_id, events)
-    seen = round_seen or bool(vault_commits)
+    # #4583: a vault land still running (its review passed, its probe queued behind a
+    # gate's tests lock) has written no `vault_land` row yet. Its live marker is this
+    # turn's landing evidence the way a code round's `land.running` is — #4599 was moved
+    # to `draft` eleven minutes before its row arrived. Vault surface only: on code or
+    # mixed a vault commit is the half #415 reported as a whole landing.
+    vault_in_flight = _vault_land_in_flight(candidate.id, turn_session)
+    seen = round_seen or bool(vault_commits) or vault_in_flight
     # A landing is OWED when the round walked its gate ladder and never reached
     # the land step: the gate means a diff it meant to ship, and the only exit
     # from a gate without a landing is a turn whose budget cut before
@@ -2763,7 +2769,9 @@ def _record_run(candidate, triage, run: dict, started: float, *, warm: dict | No
             session_id=turn_session)
     outcome, landing_mismatch = B.reconcile_outcome_landing(
         outcome, round_id=round_id, item_id=candidate.id, events=landing_events,
-        landing_seen=round_seen, surface=landing_surface, session_id=turn_session)
+        landing_seen=round_seen or (vault_in_flight and landing_surface.strip().lower()
+                                    == "vault"),
+        surface=landing_surface, session_id=turn_session)
     if landing_mismatch:
         logger.warning("backlog #%s: %s", candidate.id, landing_mismatch)
     # A path the round needed and the loop may never write. Recorded on the
@@ -2976,3 +2984,16 @@ async def _run_and_record(item, candidate, triage, budget, started,
                               else backlog_artifact(candidate.id)),
             "session_id": run["session_id"], "stop_reason": run.get("stop_reason"),
             "summary": f"#{candidate.id}: {outcome}"}
+
+
+def _vault_land_in_flight(item_id: int | None, session_id: str | None) -> bool:
+    """Whether a vault land for this item — or, for an item-less land, this turn's
+    session — is still running in lloyd-mcp (#4583). Fail-closed to False: an
+    unreadable marker is not evidence of a landing."""
+    try:
+        from scripts.automod import state as S
+        if item_id is not None and S.vault_land_in_progress(item_id=item_id):
+            return True
+        return bool(session_id) and S.vault_land_in_progress(session_id=session_id) is not None
+    except Exception:  # noqa: BLE001
+        return False
