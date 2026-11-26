@@ -2553,6 +2553,74 @@ def _note_clobber_refusal(path: str, target: Path, pre_bytes: "bytes | None",
         ErrorCode.INVALID_PARAM, path=path)
 
 
+#: `vault_write`'s write modes (#4453). `overwrite` is the default and the only
+#: shape the tool had before; `append` adds `content` after the file's bytes.
+VAULT_WRITE_MODES = ("overwrite", "append")
+
+
+def _append_prospective(path: str, params: dict) -> "tuple[str, bytes | None, dict | None]":
+    """``(mode, pre_image, error)`` for a `vault_write` call (#4453).
+
+    For ``mode: "append"`` the pre-image is read here, after the same containment
+    check the write itself makes, so every content guard can be handed pre-image +
+    fragment — the bytes that would actually land. ``_vault_write`` re-reads the
+    pre-image inside ``commit_lock`` and refuses when it moved in between, so what
+    the guards priced is what is written. A pre-image that is not UTF-8 cannot be
+    appended to as text and is refused rather than guessed at.
+    """
+    mode = params.get("mode") or "overwrite"
+    if mode not in VAULT_WRITE_MODES:
+        return mode, None, _err(f"vault_write: unknown mode {mode!r}; expected one of "
+                                f"{', '.join(VAULT_WRITE_MODES)}", ErrorCode.INVALID_PARAM)
+    if mode != "append":
+        return mode, None, None
+    target = VAULT / path
+    if not target.resolve().is_relative_to(VAULT.resolve()):
+        return mode, None, _err(_vault_escape_message(path, target), ErrorCode.PATH_ESCAPE)
+    pre = _read_pre_bytes(target)
+    if pre is not None:
+        try:
+            pre.decode("utf-8")
+        except UnicodeDecodeError:
+            return mode, None, _err(f"vault_write refused: {path} is not UTF-8 text, so "
+                                    f"it cannot be appended to.", ErrorCode.INVALID_PARAM,
+                                    path=path)
+    return mode, pre, None
+
+
+#: The last append each tool call landed, keyed ``(session, call_id)`` → ``(path,
+#: sha256 of the fragment, result)``. `vault_write` is badged idempotent, and
+#: `MCPPool._retry_safe` re-sends such a call after a transport drop with the same
+#: `lloyd/call_id` — so an append whose first copy DID land must answer the retry
+#: from here rather than add the section twice. Bounded; an in-process caller (no
+#: call id) is never retried by the pool and is not recorded.
+_APPENDS_BY_CALL: "dict[tuple[str, str], tuple[str, str, dict]]" = {}
+_APPENDS_BY_CALL_CAP = 512
+
+
+def _append_call_key() -> "tuple[str, str] | None":
+    from agent_mcp import _task_registry
+    call_id = _task_registry.current_call_id.get()
+    if not call_id:
+        return None
+    return (get_bound_session() or "", call_id)
+
+
+def _removed_line_count(pre_bytes: "bytes | None", content: str) -> int:
+    """How many pre-image lines are absent from ``content``, counted as a multiset.
+
+    0 for a create and for a write that keeps every line; a line the old file held
+    twice and the new file holds once counts once. Reported, never refused on:
+    whole-note rewrites drop lines legitimately (#4453's "deliberately not asked").
+    """
+    if not pre_bytes:
+        return 0
+    from collections import Counter
+    old = Counter(pre_bytes.decode("utf-8", errors="replace").splitlines())
+    new = Counter(content.splitlines())
+    return sum((old - new).values())
+
+
 def _vault_write(params: dict) -> dict:
     path, norm_err = _normalize_vault_path(params.get("path", ""))
     if norm_err:
@@ -2565,6 +2633,15 @@ def _vault_write(params: dict) -> dict:
     if refusal is not None:
         return refusal
     content = params.get("content", "")
+    # #4453: `mode: "append"` turns `content` into a fragment added after the file's
+    # bytes. Every guard below is handed the PROSPECTIVE WHOLE FILE, so the append
+    # route is priced exactly as an overwrite carrying those bytes would be.
+    mode, append_pre, append_err = _append_prospective(path, params)
+    if append_err is not None:
+        return append_err
+    fragment = content
+    if mode == "append":
+        content = append_pre.decode("utf-8") + fragment if append_pre else fragment
     refusal = _bench_assertion_refusal(path, content)
     if refusal is not None:
         return refusal
@@ -2589,6 +2666,14 @@ def _vault_write(params: dict) -> dict:
         content, domain_err, domain_replaced = _guard_knowledge_domain(path, content)
         if domain_err is not None:
             return domain_err
+        if mode == "append" and append_pre and not content.encode("utf-8").startswith(append_pre):
+            # A normalizing guard rewrote the existing bytes (a retired `type:`/`domain:`
+            # spelling in the note's front matter): that is a rewrite, not an append.
+            return _err(f"vault_write refused: appending to {path} would also rewrite "
+                        f"its existing front matter (a retired `type`/`domain` "
+                        f"spelling). Nothing was written. vault_read it and overwrite "
+                        f"it whole (no `mode`) instead.", ErrorCode.INVALID_PARAM,
+                        path=path)
         target = VAULT / path
         if not target.resolve().is_relative_to(VAULT.resolve()):
             return _err(_vault_escape_message(path, target), ErrorCode.PATH_ESCAPE)
@@ -2615,6 +2700,19 @@ def _vault_write(params: dict) -> dict:
         try:
             with commit_lock(target):
                 pre_bytes = _read_pre_bytes(target)
+                call_key = _append_call_key() if mode == "append" else None
+                frag_sha = _sha256_bytes(fragment.encode("utf-8")) if call_key else ""
+                seen = _APPENDS_BY_CALL.get(call_key) if call_key else None
+                if seen is not None and seen[:2] == (path, frag_sha):
+                    # The pool's retry of an append that already landed: answer it,
+                    # do not append the same section a second time.
+                    return {**seen[2], "replayed": True}
+                if mode == "append" and pre_bytes != append_pre:
+                    # The guards above priced pre-image + fragment; another writer
+                    # moved the file since, so those bytes are not what would land.
+                    return _err(f"vault_write refused: {path} changed while this "
+                                f"append was being checked. Nothing was written; call "
+                                f"again.", ErrorCode.LOCK_TIMEOUT, path=path)
                 # #2362 phase B: the diff against the file being replaced, on the
                 # same bytes the ledger is about to record and inside the same
                 # critical section — ahead of the write, so a refusal changes no
@@ -2659,7 +2757,17 @@ def _vault_write(params: dict) -> dict:
         # the item's named sequencing risk and the reason this hook sits on the
         # write's success path rather than on an hour.
         _notify_prompt_surface_write(path)
-        result = {"success": True, "path": path, "bytes": byte_count}
+        result = {"success": True, "path": path, "bytes": byte_count,
+                  # #4453: what this write dropped, so a short emission is visible
+                  # in its own answer rather than only in a later `git diff`.
+                  "removed_lines": _removed_line_count(pre_bytes, content)}
+        if mode == "append":
+            result["mode"] = "append"
+            result["appended_bytes"] = len(fragment.encode("utf-8"))
+            if call_key:
+                if len(_APPENDS_BY_CALL) >= _APPENDS_BY_CALL_CAP:
+                    _APPENDS_BY_CALL.pop(next(iter(_APPENDS_BY_CALL)))
+                _APPENDS_BY_CALL[call_key] = (path, frag_sha, dict(result))
         if headroom:
             # #4121: the notice rides in the SUCCESS result, under the same key the
             # memory tools use, because it refused nothing — the write above landed and
@@ -3732,7 +3840,7 @@ async def list_tools():
         Tool(name="vault_read", description="Use when you know the vault path; to find a note by topic, use vault_search first.\n\nRead a file from the obsidian vault.", inputSchema={
             "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "start_line": {"type": "integer", "description": "1-based first line to return; omit to read from the top"}, "num_lines": {"type": "integer", "description": "How many lines to return from start_line; omit to read to the end"}}, "required": ["path"]}),
         Tool(name="vault_write", description="Use to create a vault file or overwrite one wholesale; to amend an existing note, vault_read it first.\n\nWrite content to a vault file. Audit-logged.", inputSchema={
-            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "content": {"type": "string", "description": "Full file contents. This replaces the file wholesale — read it first if you mean to amend rather than overwrite."}}, "required": ["path", "content"]}),
+            "type": "object", "properties": {"path": {"type": "string", "description": "Vault-relative path, e.g. 'knowledge/agents/foo.md'. Do not prefix with '~/' or an absolute home path."}, "content": {"type": "string", "description": "Full file contents; with mode append, only the text to add."}, "mode": {"type": "string", "enum": ["overwrite", "append"], "description": "append: add content to the end of the file (created if absent)"}}, "required": ["path", "content"]}),
         Tool(name="vault_overview", description="Summarize the obsidian vault: file counts per top-level segment. Use this to orient before searching when you do not know what the vault holds.", inputSchema={
             "type": "object", "properties": {}}),
         Tool(name="vault_search", description="Use to find vault notes by topic when you do not know the path; then vault_read the winner.\n\nSearch the vault's documents by keywords and vector similarity, best first.", inputSchema={

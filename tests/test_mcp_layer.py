@@ -1225,6 +1225,10 @@ RETIRED_TOOLS = frozenset({
 # per state, settles today, queue depth and age, last note — all of which a caller reads
 # out of the reply, while the clause that decides whether to call ("Start here before
 # proposing or reporting on research") stayed. 22,491 over 107 tools.
+#
+# 2026-11-26, #4453: `vault_write` gained `mode` (`append`). Paid for by its own
+# `content` description, which restated the tool description's first line ("replaces
+# the file wholesale — read it first if you mean to amend"). 22,494 over 107 tools.
 INTERNAL_CATALOG_TOKEN_CEILING = 22_500
 
 

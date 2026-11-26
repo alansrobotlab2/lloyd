@@ -1,0 +1,88 @@
+diff --git a/skills/autonomy-data-pipeline/SKILL.md b/skills/autonomy-data-pipeline/SKILL.md
+index ae74154..cc6cf3c 100644
+--- a/skills/autonomy-data-pipeline/SKILL.md
++++ b/skills/autonomy-data-pipeline/SKILL.md
+@@ -189,8 +189,8 @@ All `vault_search` calls must include `agent_id="memory"` and `scope="personal,p
+ - **Git snapshots provide rollback safety**
+ - **DO NOT modify agents/lloyd/SOUL.md,AGENTS.md,MEMORY.md** — those are nightly reflection territory
+ - **DO NOT delete files** — reorganize,merge,or flag for review
+-- **Log all changes** via `vault_write(path="memory/vault-maintenance/YYYY-MM-DD.md")` — the UTC date, one file per day, this run's `## Run HH:MMZ` section appended to it (see Step 4, *Run log*); never a per-run filename
+-- All `memory/` paths: **the Bash lane has no sanctioned vault writer.** A `>` or `>>` redirect into any `~/obsidian/**` path is refused by the harness before the shell sees it, in its own words: "the Obsidian vault tree, which the Bash lane has no sanctioned writer for — use vault_write or automod_vault_land (#3701)". Bash *may* still read vault files and run `git` inside the vault — `git` is in neither of the guard's write-operand tables, so `write_targets` returns `[]` for it and `git -C ~/obsidian diff|status|log|checkout …` is deliberately allowed (`app/harness/protected_paths.py:1400-1404`) — and that is what the append proof below uses. What Bash cannot do is write a vault file, so every vault write goes through `vault_read` + `vault_write` (vault-relative), or `automod_vault_land` for a gated change. `cp`/`mv`/`tee` into the vault is not a way round that: those shapes are unrefused today only because the ruling on refusing them is still owed, and they land bytes with no audit row behind them.
++- **Log all changes** via `vault_write(path="memory/vault-maintenance/YYYY-MM-DD.md", mode="append")` — the UTC date, one file per day, `content` = this run's `## Run HH:MMZ` section only, appended to it (see Step 4, *Run log*); never a whole-file re-emission, never a per-run filename
++- All `memory/` paths: **the Bash lane has no sanctioned vault writer.** A `>` or `>>` redirect into any `~/obsidian/**` path is refused by the harness before the shell sees it, in its own words: "the Obsidian vault tree, which the Bash lane has no sanctioned writer for — use vault_write or automod_vault_land (#3701)". Bash *may* still read vault files and run `git` inside the vault — `git` is in neither of the guard's write-operand tables, so `write_targets` returns `[]` for it and `git -C ~/obsidian diff|status|log|checkout …` is deliberately allowed (`app/harness/protected_paths.py:1400-1404`) — and that is what the append proof below uses. What Bash cannot do is write a vault file, so every vault write goes through `vault_read` + `vault_write` (vault-relative; the run log through `mode="append"`), or `automod_vault_land` for a gated change. `cp`/`mv`/`tee` into the vault is not a way round that: those shapes are unrefused today only because the ruling on refusing them is still owed, and they land bytes with no audit row behind them.
+ 
+ 
+ Folded 2026-11-22 (#4307): every section above whose text is not here is in the sibling named under its heading, and `tests/test_skill_sibling_reachability.py` holds that to be true.
+diff --git a/skills/autonomy-data-pipeline/step4-run-log.md b/skills/autonomy-data-pipeline/step4-run-log.md
+index 57424e9..3624c3e 100644
+--- a/skills/autonomy-data-pipeline/step4-run-log.md
++++ b/skills/autonomy-data-pipeline/step4-run-log.md
+@@ -17,8 +17,8 @@ timestamp: '2026-11-21T18:10:16-08:00'
+ Every pass logs to exactly one file: `memory/vault-maintenance/YYYY-MM-DD.md`, the
+ date being the **UTC** date the run started (`date -u +%Y-%m-%d`). The task runs
+ 6x/day, so the first run of the day creates the file and each later run
+-`vault_read`s it and writes it back with **its own `## Run HH:MMZ` section
+-appended** — never overwriting an earlier run's section, and never a second file
++adds **its own `## Run HH:MMZ` section** to its end with `vault_write(mode="append")`
++— never overwriting an earlier run's section, and never a second file
+ for the same day. Do not write `vault-maintenance-YYYY-MM-DD-runHHMM.md` or any
+ other per-run name: two spellings on one day split the record across files that
+ do not name each other, and "did a pass already run today?" then depends on which
+@@ -31,12 +31,11 @@ merge or delete them.
+ 
+ #### How the append is made, and how it is proved
+ 
+-`vault_write` has no append mode: its `content` argument is required and documented as
+-"Full file contents. This replaces the file wholesale" (`agent_mcp/vault.py:3304`). So an
+-append is a read-modify-write of the **whole** day's file — 20-50 KB in practice
+-(`memory/vault-maintenance/2026-11-08.md` measured 30,040 B and `2026-11-05.md` 47,728 B) —
+-and a slip while re-emitting those bytes silently rewrites an earlier run's section, which
+-nothing downstream notices. Four steps, in this order:
++`vault_write` has an append route (#4453): `mode: "append"` adds `content` after the file's
++existing bytes, priced through every guard on the prospective whole file, and creates the file
++when it is absent. Use it. Re-emitting the whole day file (20-50 KB in practice) is how the
++2026-11-21 run lost 170 lines of another run's section: the emission came back half as long
++and was written as the file. Four steps, in this order:
+ 
+ 1. **Pre-write witness copy, outside the vault, before you write anything:**
+ 
+@@ -48,15 +47,18 @@ nothing downstream notices. Four steps, in this order:
+ 
+    Reading *out* of the vault is allowed — the guard refuses vault **writes** (#3701, see
+    Guardrails below). `~/lloyd-data` is the destination because it is durable (btrfs on this
+-   box); `/tmp` is **tmpfs** here, so a `/tmp` copy survives a bad rewrite but not a reboot.
++   box); `/tmp` is **tmpfs** here, so a `/tmp` copy survives a bad write but not a reboot.
+    The vault's git history is the second, cross-reboot backstop (step 4). On a run that
+    creates the day file there is nothing to copy — skip this step, and say so, because the
+    restore below then has no witness to use.
+-2. **`vault_read` the whole day file** — vault-relative
+-   `memory/vault-maintenance/<YYYY-MM-DD>.md`, with no `start_line`/`num_lines` (a partial
+-   read is how an append loses the head of the file) — then **`vault_write` it back with the
+-   previous bytes followed by this run's `## Run HH:MMZ` section**. Never a `>`/`>>` redirect
+-   into it, and never a per-run filename, for the two reasons above.
++2. **Append this run's section, and only it:**
++   `vault_write(path="memory/vault-maintenance/<YYYY-MM-DD>.md", mode="append",
++   content="\n## Run HH:MMZ\n…")` — `content` is your section alone, never the earlier
++   runs' bytes. The success result must carry `"mode": "append"` and `"removed_lines": 0`;
++   a result with no `mode` key came from an aggregator that predates #4453 and **replaced the
++   file with your section** — restore from the witness (below) at once. Never a `>`/`>>`
++   redirect into the file, never a whole-file `vault_write` of it, and never a per-run
++   filename, for the reasons above.
+ 3. **Prove it was an append, before anything commits it:**
+ 
+    ```bash
+@@ -77,10 +79,10 @@ stale anyway". Recover in this order:
+ 
+ - `git -C ~/obsidian diff -- memory/vault-maintenance/<date>.md | head -60` to see what
+   actually changed.
+-- Put the pre-write copy back **through `vault_write`**: `cat` the witness file from Bash
+-  (reading `~/lloyd-data` is unrefused) and write those bytes to the vault path — that is the
+-  sanctioned lane, and it needs no `cp`/`mv` into the vault, whose refusal is a ruling this
+-  item does not make. Then redo step 2 from a fresh `vault_read`.
++- Put the pre-write copy back **through `vault_write`** (a whole-file write, no `mode`): `cat`
++  the witness file from Bash (reading `~/lloyd-data` is unrefused) and write those bytes to the
++  vault path — that is the sanctioned lane, and it needs no `cp`/`mv` into the vault, whose
++  refusal is a ruling this item does not make. Then redo step 2.
+ - If the witness is gone (a reboot, with the copy in `/tmp`), `git -C ~/obsidian checkout --
+   memory/vault-maintenance/<date>.md` restores the committed version — `git` is in none of the
+   guard's write-operand tables, so the guard that refuses a redirect leaves it alone — and
