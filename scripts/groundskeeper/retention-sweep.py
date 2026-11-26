@@ -506,6 +506,12 @@ that bounds them, and the two report-only stores say so in as many words. `test_
     task #79's enumeration count.
     `tests/test_retention_sweep.py` pins both halves of the rule, the unparseable-tag hold, and
     that the glob reaches neither `facts/` nor store 18's `facts-quarantine-*`.
+32. `$LLOYD_DATA/tmp/` — its ENTRIES only, collected under `--apply` once their newest mtime is
+    `DATA_ROOT_TMP_MAX_AGE_HOURS = 24` hours old; the data root and every top-level name in it
+    are never candidates, a symlink is held, another uid's entry is not counted, the root is
+    never emptied of files in one run (the guardian's emptied-folder trip), and an absent
+    root is never created. The same line reports `DATA_ROOT_HELD_NAMES` (`_scratch`, `scratch`,
+    `_tmp_reviewprobe`) — REPORT-ONLY by standing ruling, never collected (#4427).
 
 Usage:
     retention-sweep.py            # dry run — report only
@@ -6761,6 +6767,255 @@ def _fact_write_gate_line(p: dict) -> str:
             f"{p['bytes']} B out){tail}{arch}")
 
 
+# Store 32: <DATA_ROOT>/tmp/ entries, plus three HELD top-level scratch names (#4427).
+#
+# Every other store in this file is rooted somewhere BELOW a named sub-store of the data
+# root (`_pipeline/tmp`, `session-cwd/`, `vault-derived/`) or outside it (`/tmp`). This one
+# sits one level from the data root itself, which is why its first rule is about the
+# root: THE DATA ROOT IS NEVER A CANDIDATE, and neither is any top-level name in it. Only
+# the ENTRIES of `<DATA_ROOT>/tmp/` are walked, and the walk refuses outright unless that
+# directory is a direct, non-symlinked child of the data root — so no constant edit, no
+# empty name and no `.` can turn this arm into a sweep of the root. That is defence in
+# depth for a new deleter, not a repair of the 2026-11-19 trip: no store in this file was
+# rooted at `<DATA_ROOT>` or `<DATA_ROOT>/tmp` when the guardian saw `tmp` (77 files)
+# vanish, and the writer of that residue is unmeasured (#4427's triage).
+#
+# `<DATA_ROOT>/tmp/` was ABSENT when the item was triaged (2026-11-20):
+# `tests/conftest.py::_test_scratch_dir` has refused a TMPDIR under the live root since
+# 19717ab3 (2026-11-17), and nothing in the tree names the path as a write target. It was
+# re-created anyway by 2026-11-26 — three backlog-keyed files an action turn wrote by hand
+# (`4532-msg.txt`, `4532-msg2.txt`, `section-1707.md`, 2026-11-23..25) — which is the
+# re-created root this bound exists for. An absent root is reported as absent and never
+# created (#2354).
+#
+# THE THREE HELD NAMES ARE A STANDING RULING, NOT A PENDING INVESTIGATION. `_scratch`,
+# `scratch` and `_tmp_reviewprobe` are backlog-keyed action-turn scratch whose writers are
+# readable from their own names (`_scratch/2878-redcheck`, `scratch/probe_1149_post.py`,
+# `_tmp_reviewprobe/test_probe_2552.py`). Ruled 2026-11-26 on #4427 (the sweep coordinator,
+# under Alan's delegation): they are REPORT-ONLY PERMANENTLY — counted and dated on every
+# run, never collected by this sweep under any mode or age. A future arm that wants to
+# collect one of them needs a new ruling, not a finding. The further top-level names the
+# triage listed (`recovered`, `ww_diag`, `egress-arms`, `quarantine`, `tmp-owed`,
+# `ksweep-*`, `3907-*`) were ruled OUT of this store's scope the same day and are not named
+# here at all.
+# ---------------------------------------------------------------------------
+
+#: The data root as THIS store reads it. Equal to `DATA_ROOT`, and a constant of its own
+#: only so the test fixture can aim the arm at a seeded tree: the root is the parent of the
+#: store, never a candidate, and `sweep_data_root_tmp` refuses to walk unless its tmp
+#: directory is a direct child of exactly this path.
+DATA_ROOT_TMP_PARENT = DATA_ROOT
+
+#: The one child of the data root whose ENTRIES this store may collect.
+DATA_ROOT_TMP_NAME = "tmp"
+
+#: An entry of `<DATA_ROOT>/tmp/` is collected once its NEWEST mtime — the entry's own
+#: lstat mtime for a file, the newest lstat mtime anywhere in the tree for a directory — is
+#: at least this many hours old. 24 h, because the root is a TMPDIR stand-in: nothing a
+#: process puts in a TMPDIR is owed past the day it was written, and a directory a writer
+#: is still filling carries a fresh mtime somewhere inside it, which is why the age is the
+#: tree's newest rather than the top directory's own (a deep write never touches that).
+DATA_ROOT_TMP_MAX_AGE_HOURS = 24
+
+#: REPORT-ONLY, PERMANENTLY (standing ruling 2026-11-26, #4427 — see the block above).
+#: Each gets a segment on this store's report line every run: its file count and oldest
+#: mtime, or `absent`. Nothing under any of them is ever removed, in either mode.
+DATA_ROOT_HELD_NAMES = ("_scratch", "scratch", "_tmp_reviewprobe")
+
+
+def _tree_newest_and_bytes(path: Path) -> tuple[float, int, int]:
+    """(newest lstat mtime, total lstat bytes, non-directory entries) of one entry, never
+    following a symlink.
+
+    A file answers for itself. A directory answers for everything under it, walked with
+    `os.walk(followlinks=False)` and measured with `lstat`, so a symlink inside a tree is
+    one small inode here and its target is neither read nor counted — the same object
+    `shutil.rmtree` will remove, which unlinks a link and never descends through it.
+    """
+    st = path.lstat()
+    newest, total, files = st.st_mtime, 0, 0
+    if not path.is_dir() or path.is_symlink():
+        return newest, st.st_size, 1
+    for dirpath, dirnames, filenames in os.walk(path, followlinks=False):
+        for names, is_file in ((dirnames, False), (filenames, True)):
+            for name in names:
+                try:
+                    sub = os.lstat(os.path.join(dirpath, name))
+                except OSError:
+                    continue
+                newest = max(newest, sub.st_mtime)
+                if is_file:
+                    total += sub.st_size
+                    files += 1
+    return newest, total, files
+
+
+def _held_name_census(path: Path) -> dict:
+    """What one held name holds, read-only: `absent`, a symlink (never followed), or its
+    file count and oldest file mtime. Nothing here opens a file or changes a byte."""
+    try:
+        st = path.lstat()
+    except OSError:
+        return {"name": path.name, "state": "absent"}
+    if path.is_symlink():
+        return {"name": path.name, "state": "symlink"}
+    if not path.is_dir():
+        return {"name": path.name, "state": "present", "files": 1, "oldest": st.st_mtime}
+    files, oldest = 0, None
+    for dirpath, _dirs, filenames in os.walk(path, followlinks=False):
+        for name in filenames:
+            try:
+                mtime = os.lstat(os.path.join(dirpath, name)).st_mtime
+            except OSError:
+                continue
+            files += 1
+            oldest = mtime if oldest is None else min(oldest, mtime)
+    return {"name": path.name, "state": "present", "files": files, "oldest": oldest}
+
+
+def sweep_data_root_tmp(apply: bool, now: float, *, parent: "Path | None" = None,
+                        max_age_hours: "int | None" = None) -> dict:
+    """Bound `<DATA_ROOT>/tmp/`'s entries and report the three held names (#4427).
+
+    A candidate is a direct entry of the tmp root — file or directory — that is owned by
+    the uid running this sweep, is not a symlink, and whose newest mtime is at least
+    `max_age_hours` old — except that the newest file-bearing aged entry is held whenever
+    taking it would leave the root with no file at all (the guardian's emptied-folder
+    trip; see the comment in the body). A symlink is held and counted, never followed and
+    never removed;
+    an entry owned by another uid is neither counted nor touched. A dry run unlinks nothing:
+    `apply` is the only route to `shutil.rmtree` / `unlink`.
+
+    The data root is never a candidate and no top-level data-root name is ever unlinked:
+    the walk runs only when the tmp root is a direct child of `parent` that is a real
+    directory, so a tmp name of `""` or `"."`, or a tmp root that is a symlink to
+    somewhere else, is refused and reported, and the arm then touches nothing. An absent
+    tmp root is reported and never created.
+    """
+    parent = Path(parent) if parent is not None else DATA_ROOT_TMP_PARENT
+    hours = DATA_ROOT_TMP_MAX_AGE_HOURS if max_age_hours is None else int(max_age_hours)
+    root = parent / DATA_ROOT_TMP_NAME
+    out = {"apply": bool(apply), "root": root, "state": "present", "horizon_hours": hours,
+           "entries": 0, "held_fresh": 0, "held_link": 0, "held_last": 0, "stale": 0,
+           "removed": 0,
+           "refused": 0, "bytes": 0, "freed": 0,
+           "held": [_held_name_census(parent / name) for name in DATA_ROOT_HELD_NAMES]}
+    if _abs_path(root).parent != _abs_path(parent) or root.name in ("", ".", ".."):
+        out["state"] = "not-a-child"           # never walk the data root or above it
+        return out
+    if root.is_symlink():
+        out["state"] = "symlink"               # held, never followed
+        return out
+    if not root.is_dir():
+        out["state"] = "absent"                # reported, never created
+        return out
+    try:
+        entries = list(root.iterdir())
+    except OSError:
+        out["state"] = "unreadable"
+        return out
+    uid = os.getuid()
+    cutoff = now - hours * 3600
+    stale: list[tuple[float, Path, int, int]] = []
+    files_kept = 0
+    for entry in sorted(entries):
+        try:
+            st = entry.lstat()
+        except OSError:
+            continue                            # vanished mid-walk
+        if st.st_uid != uid:
+            continue                            # not ours: not counted, never touched
+        out["entries"] += 1
+        if entry.is_symlink():
+            out["held_link"] += 1               # never followed, never removed
+            continue
+        try:
+            newest, size, files = _tree_newest_and_bytes(entry)
+        except OSError:
+            continue
+        if newest > cutoff:
+            out["held_fresh"] += 1
+            files_kept += files
+            continue
+        stale.append((newest, entry, size, files))
+    # NEVER EMPTY `tmp/` OF ITS FILES IN ONE RUN. The guardian's data-root tripwire
+    # (`agent-services/guardian/vaultwatch.py::evaluate`, `TOPDIR_MIN_FILES` = 20) halts
+    # promotions when a top-level folder it counted at 20+ files reads 0 — "emptied" — and
+    # its 24 h lifetime excuse cannot cover a folder whose entries this arm only takes
+    # once they are 24 h old. That is the 2026-11-19 `tmp (77 files) vanished` halt in the
+    # one shape this store could produce, so when every file under the root is in an aged
+    # entry the NEWEST file-bearing aged entry is held for the next run. Only the symlinks
+    # and other uids' entries are left out of `files_kept`: holding one entry too many is
+    # the cheap side of the error.
+    if stale and files_kept == 0:
+        bearing = [row for row in stale if row[3] > 0]
+        if bearing:
+            last = max(bearing, key=lambda row: row[0])
+            stale.remove(last)
+            out["held_last"] += 1
+    for _newest, entry, size, _files in stale:
+        out["stale"] += 1
+        out["bytes"] += size
+        if not apply:
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry)
+            else:
+                entry.unlink()
+        except OSError as exc:
+            out["refused"] += 1
+            print(f"  ! skip {entry.name}: {exc}", file=sys.stderr)
+            continue
+        out["removed"] += 1
+        out["freed"] += size
+    return out
+
+
+def _data_root_tmp_line(p: dict) -> str:
+    """One report line, word-identical in dry run and apply except the verb.
+
+    The tmp root's census and its bytes first, then one segment per held name — so the
+    three report-only names are on every run's report without each costing a store line of
+    its own (every indented line `main()` prints is a store, and these three are one
+    ruling's subject, not three stores).
+    """
+    label = f"  data-root tmp ({DATA_ROOT_TMP_NAME}/ entries >{p['horizon_hours']}h)"
+    state = p["state"]
+    if state == "absent":
+        head = f"no {DATA_ROOT_TMP_NAME}/ root (absent, never created here)"
+    elif state == "symlink":
+        head = f"{DATA_ROOT_TMP_NAME}/ is a symlink — held, never followed"
+    elif state == "not-a-child":
+        head = "REFUSED: the tmp root is not a direct child of the data root"
+    elif state == "unreadable":
+        head = f"{DATA_ROOT_TMP_NAME}/ unreadable, left alone"
+    else:
+        head = (f"of {p['entries']} uid-owned entr(ies), "
+                f"{p['held_fresh']} held <{p['horizon_hours']}h")
+        if p["held_link"]:
+            head += f", {p['held_link']} symlink(s) held (never followed)"
+        if p["held_last"]:
+            head += ", 1 aged entry held so tmp/ is never emptied"
+    n = p["removed"] if p["apply"] else p["stale"]
+    verb = "deleted" if p["apply"] else "would delete"
+    unit = "freed" if p["apply"] else "candidate"
+    size = p["freed"] if p["apply"] else p["bytes"]
+    tail = f" ({p['refused']} would not remove, left in place)" if p["refused"] else ""
+    held = []
+    for h in p["held"]:
+        if h["state"] == "absent":
+            held.append(f"{h['name']} absent")
+        elif h["state"] == "symlink":
+            held.append(f"{h['name']} symlink (never followed)")
+        else:
+            oldest = ("-" if h["oldest"] is None else datetime.fromtimestamp(
+                h["oldest"], timezone.utc).strftime("%Y-%m-%d"))
+            held.append(f"{h['name']} {h['files']:,} file(s) oldest {oldest}")
+    return (f"{label}: {head} — {n} {verb}, {size / 1024:.0f} KiB {unit}{tail}; "
+            f"held, never collected: {', '.join(held)}")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--apply", action="store_true",
@@ -7068,6 +7323,12 @@ def main() -> int:
     # items already name. Position costs nothing here that adjacency buys — the two stores
     # share a root in the code, which is where it matters.
     print(_facts_snapshot_line(sweep_facts_snapshot(args.apply, now)))
+    # #4427: `<DATA_ROOT>/tmp/` entries and the three held scratch names, APPENDED LAST for
+    # the positional reason every store since #2862 records, and outside the refusal guard
+    # like the data-root stores above it: the guard declines a production checkout's refs,
+    # and this arm reaches only entries under the root `resolve_data_root_for_tree` already
+    # decided this tree may reach (#1415). This line is the 32nd.
+    print(_data_root_tmp_line(sweep_data_root_tmp(args.apply, now)))
     if refusal and args.apply:
         return NOT_PRODUCTION_EXIT
     return 0

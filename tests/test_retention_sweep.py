@@ -284,6 +284,12 @@ def rs(tmp_path, monkeypatch):
         # already creates, which is the production topology: the journal sits beside the facts
         # tree, both of them beside the store `app/paths.py` resolves.
         ("FACT_WRITE_GATE_JOURNAL", "vault-derived/fact-write-gate.jsonl", False),
+        # Store 32 (#4427): the data root AS THAT STORE READS IT — the parent of `tmp/` and
+        # of the three held names. Created, because the store's whole contract is about the
+        # top-level names of a data root a node seeds; its `tmp/` child is deliberately NOT
+        # created, since an absent `<DATA_ROOT>/tmp` is the state the box is in and the
+        # store's absent-root clause is that the sweep never makes one.
+        ("DATA_ROOT_TMP_PARENT", "data-root", True),
     ):
         if hasattr(mod, attr):
             monkeypatch.setattr(mod, attr, tmp_path / sub)
@@ -2030,14 +2036,14 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     rows = _skill_table_rows(text)
 
     report = _store_report
-    assert len(report) == 31, f"the sweep prints {len(report)} store lines: {report}"
+    assert len(report) == 32, f"the sweep prints {len(report)} store lines: {report}"
     _assert_table_rows_match_report(rows, report, "skills/retention-sweep/SKILL.md")
     # "29 stores", not "29 unbounded-growth stores": the 28th store is held by ruling and
     # measured, so the skill's description bounds 28 of the 29 and a phrase that said
     # otherwise would be a count paid for with a falsehood (#4060).
-    assert "31 stores" in text, (
-        "the skill's description states a store count other than 30")
-    assert "31 in all" in text, "the skill's body states a store count other than 31"
+    assert "32 stores" in text, (
+        "the skill's description states a store count other than 32")
+    assert "32 in all" in text, "the skill's body states a store count other than 32"
 
     pair_row = next((ln for store, ln in rows.items()
                      if "groundskeeper-queue.json" in store), None)
@@ -2148,8 +2154,8 @@ def test_the_skill_says_twenty_stores_and_its_table_has_a_row_per_report_line(
     # an undo tree past its horizon and outside the newest 7 is a reclaim the refusal does
     # not exist to stop, so it prints from a worktree too. Re-derive it by counting the
     # stores that print outside `if refusal`, never by copying the previous number.
-    assert "twenty-eight store lines plus that line" in flat, (
-        "the skill does not say that a refusal run reports twenty-eight stores by design: "
+    assert "twenty-nine store lines plus that line" in flat, (
+        "the skill does not say that a refusal run reports twenty-nine stores by design: "
         "the three automod rungs collapse into one refusal line, and every data-root "
         "store — #3789's safety denials, #4205's ceiling reports, #4206's fact write-gate "
         "journal and #4592's facts-snapshot trees among them — prints there anyway")
@@ -2316,6 +2322,9 @@ _STORE_COUNT_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six
                       # the 31 lines the sweep prints rather than raising
                       # `unrecognised store-count numeral`.
                       "31": 31,
+                      # #4427 added the thirty-second store (`<DATA_ROOT>/tmp/` entries, with the
+                      # three report-only held scratch names on the same line).
+                      "32": 32,
 
                       "1": 1, "2": 2, "3": 3, "4": 4,
                       "5": 5, "6": 6, "7": 7, "8": 8, "9": 9, "10": 10, "11": 11,
@@ -2379,7 +2388,7 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
     # unread report files), #4206 the thirtieth (the fact write-gate's decision journal) and
     # #4592 the thirty-first (the `facts-snapshot-*` undo trees sharing store 18's root), so
     # the census this guard compares prose against moved 24 → 25 → 26 → 27 → 28 → 29 → 30 → 31.
-    assert len(_store_report) == 31, (
+    assert len(_store_report) == 32, (
         f"the sweep prints {len(_store_report)} store lines, not the 31 its report "
         f"has had since #4592 added the facts-snapshot store: {_store_report}")
 
@@ -2481,6 +2490,11 @@ def test_the_line_rule_counts_both_automod_stores_the_suffix_test_missed(
                     # renderer, as the three above do, so a wording change moves here first.
                     rs._facts_snapshot_line(
                         rs.sweep_facts_snapshot(False, time.time())
+                    ).split(":")[0].strip(),
+                    # #4427's data-root tmp store ends on the held-names segment
+                    # (`… _tmp_reviewprobe absent`), never on a suffix, in either mode.
+                    rs._data_root_tmp_line(
+                        rs.sweep_data_root_tmp(False, time.time())
                     ).split(":")[0].strip()]), (
         "these store lines are invisible to an endswith(('freed','candidate',"
         "'removed (keep last 200)')) rule, which is how #1835's drift happened: "
@@ -2553,7 +2567,7 @@ def test_a_run_outside_the_production_checkout_reports_twenty_eight_stores_and_o
     out = _dry_run_report(rs, monkeypatch, capsys, refused=True)
     report = _store_report_lines(out)
 
-    assert len(report) == 28, f"a refusal run should report twenty-seven stores: {report}"
+    assert len(report) == 29, f"a refusal run should report twenty-nine stores: {report}"
     assert any("tool-quality rows" in ln for ln in report), (
         f"the reported-only store vanished from a refused run, so a sandbox reader cannot "
         f"tell a store that never deletes from a store that went missing: {report}")
@@ -2765,7 +2779,7 @@ def test_the_task_description_names_every_store_the_sweep_prints(
 
     items = _assert_description_names_the_reported_stores(description, _store_report,
                                                           "autonomy/79-retention-sweep.md")
-    assert len(items) == len(_store_report) == 31, (
+    assert len(items) == len(_store_report) == 32, (
         f"the guard compared {len(items)} items against {len(_store_report)} lines")
 
     # Clause 5 of #1835: the two stores the self-modification loop leaves behind it are
@@ -8887,8 +8901,8 @@ def test_the_skill_carries_one_row_for_the_quarantine_store_naming_its_age_const
     # typography while the thing it is for — does the skill count what the sweep prints —
     # went ungraded. The count itself is checked against the printed lines by the
     # table-row node and by `test_the_task_description_names_every_store_the_sweep_prints`.
-    assert "31 stores" in front, front[:200]
-    assert "31 in all" in text, "the skill's body states a count other than 31"
+    assert "32 stores" in front, front[:200]
+    assert "32 in all" in text, "the skill's body states a count other than 32"
     rows = _skill_table_rows(text)
     # Selected on the row's OWN head cell — the path it is a row about — not across the body.
     # #4592's snapshot store is the other tenant of this same root, and its acceptance clause
@@ -10022,17 +10036,17 @@ def test_the_injection_canary_store_prints_twelfth_last_and_survives_the_refusal
     """
     _canary_store(Path(rs.INJECTION_CANARY_DIR).parents[2], windows=2)
     lines = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(lines) == 31, f"a production run prints 31 store lines: {lines}"
+    assert len(lines) == 32, f"a production run prints 32 store lines: {lines}"
     # #3499 appended the memory-graph store below it, #3789 the safety-denial store below
     # that, #3951 the kg index residue and #4060 the held rounds store, so this line sits
     # twelve from the end.
-    assert lines[-(12)].split(":")[0].strip().startswith("injection-canary corpus"), lines[-(12)]
+    assert lines[-(13)].split(":")[0].strip().startswith("injection-canary corpus"), lines[-(13)]
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _canary_lines(_canary_run(rs, monkeypatch, capsys, False))
-    assert len(refused) == 28, (
-        f"a refused run prints twenty-eight store lines plus the refusal: {refused}")
-    assert refused[-(12)].split(":")[0].strip().startswith("injection-canary corpus"), refused[-(12)]
+    assert len(refused) == 29, (
+        f"a refused run prints twenty-nine store lines plus the refusal: {refused}")
+    assert refused[-(13)].split(":")[0].strip().startswith("injection-canary corpus"), refused[-(13)]
 
 
 # ── #2924 store 19 (the 21st printed line): the ceiling's sample rows ──────────
@@ -10261,12 +10275,12 @@ def test_the_ceiling_sample_store_prints_seventh_last_and_survives_the_refusal(r
     """
     _ceiling_seed(rs, [_ceiling_row(3.0, unit="live.unit")])
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
-    assert report[-(11)].split(":")[0].strip().startswith("ceiling sample rows"), report[-(11)]
+    assert len(report) == 32, f"a production run prints 32 store lines: {report}"
+    assert report[-(12)].split(":")[0].strip().startswith("ceiling sample rows"), report[-(12)]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
-    assert refused[-(11)].split(":")[0].strip().startswith("ceiling sample rows"), refused[-(11)]
+    assert len(refused) == 29, f"a refused run prints twenty-nine store lines: {refused}"
+    assert refused[-(12)].split(":")[0].strip().startswith("ceiling sample rows"), refused[-(12)]
 
 
 # ── #3188 store 20 (the 22nd printed line): the canary fold's tool-call captures ──
@@ -10459,12 +10473,12 @@ def test_the_capture_store_prints_sixth_last_and_survives_the_refusal(rs, monkey
     """
     _capture(rs, "kv-bfloat16", days=40)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
-    assert report[-(10)].split(":")[0].strip().startswith("canary tool-call captures"), report[-(10)]
+    assert len(report) == 32, f"a production run prints 32 store lines: {report}"
+    assert report[-(11)].split(":")[0].strip().startswith("canary tool-call captures"), report[-(11)]
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
-    assert refused[-(10)].split(":")[0].strip().startswith("canary tool-call captures"), refused[-(10)]
+    assert len(refused) == 29, f"a refused run prints twenty-nine store lines: {refused}"
+    assert refused[-(11)].split(":")[0].strip().startswith("canary tool-call captures"), refused[-(11)]
 
 
 # ── #3209 store 21 (the 23rd printed line): the per-session Bash scratch dirs ──────────
@@ -11268,16 +11282,16 @@ def test_the_temp_store_line_prints_third_last_and_survives_the_refusal(rs, monk
     # "one candidate" rather than "the one candidate was held because it is the newest".
     monkeypatch.setattr(rs, "TMP_SCRATCH_KEEP_DIRS", 0)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
-    last = report[-(8)]
+    assert len(report) == 32, f"a production run prints 32 store lines: {report}"
+    last = report[-(9)]
     assert last.split(":")[0].strip().startswith("/tmp scratch dirs"), last
     assert "1 would delete" in last, last
     assert "inode(s) candidate" in last, last
     assert victim.is_dir(), "the dry run deleted"
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
-    assert refused[-(8)].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-(8)]
+    assert len(refused) == 29, f"a refused run prints twenty-nine store lines: {refused}"
+    assert refused[-(9)].split(":")[0].strip().startswith("/tmp scratch dirs"), refused[-(9)]
 
 
 def test_the_temp_root_constant_is_the_system_temp_dir_and_is_registered(rs, tmp_path,
@@ -11600,7 +11614,7 @@ def test_the_memory_graph_horizon_is_one_constant_quoted_in_the_store_and_regist
     # registered and prints in the appended tail, not inserted among items 1-24 — is unchanged;
     # only the offset moves, one place per store appended below it since: #3789, #3951, #4060,
     # #4205, #4206 and now #4592's snapshot store, which is why this reads seventh-to-last.
-    assert lines.index(mg[0]) == len(lines) - 7, (
+    assert lines.index(mg[0]) == len(lines) - 8, (
         "the store does not print seventh-to-last, the slot #3499's append left it in once "
         "#3789 appended the safety-denial store, #3951 the kg index residue store, #4060 "
         "the held rounds store, #4205 the ceiling report store, #4206 the fact write-gate "
@@ -13088,10 +13102,10 @@ def test_the_skill_row_names_the_shape_record_and_the_substring_the_line_prints_
     # a second count, is what fails here — a store added by someone else moves ONE number, and
     # both of the guards named above move with it.
     flat = text.replace("\n", " ")
-    assert flat.count("31 stores") == 1 and "31 in all" in flat, (
+    assert flat.count("32 stores") == 1 and "32 in all" in flat, (
         "the store counts moved off the shipped 30: the shape record must fold into store 26's "
         "existing line, not become a store of its own")
-    assert "29 stores" not in flat and "28 stores" not in flat, (
+    assert "31 stores" not in flat and "29 stores" not in flat and "28 stores" not in flat, (
         "a stale store count survived the #4205/#4206 recount beside this change's row")
 
 # ─────────────── #3815: the microcompact reduction sidecar ───────────────
@@ -13796,10 +13810,10 @@ def test_main_prints_the_index_residue_line_as_the_twenty_eighth_store(rs, capsy
     assert len(kg) == 1, f"expected exactly one index-residue line in {lines}"
     # #4060 appended the held-rounds line below this one, so the kg line is second-to-last
     # now — still the 27th store, and still behind every line task 79 enumerates positionally.
-    assert kg[0] == lines[-(5)], (
+    assert kg[0] == lines[-(6)], (
         f"the store is not fourth-to-last, so the positional enumeration moved: {lines[-5:]}")
     assert "no store yet" in kg[0], kg[0]
-    assert len(lines) == 31, f"a run prints {len(lines)} store lines: {lines}"
+    assert len(lines) == 32, f"a run prints {len(lines)} store lines: {lines}"
 
     argv.append("--apply")
     rs.main()
@@ -14275,17 +14289,17 @@ def test_the_ceiling_report_store_prints_last_and_survives_the_refusal(rs, _stor
     """
     _ceiling_report(rs, "lloyd-bash-ceiling-8111-aaaa9999.report", days=30)
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
-    assert report[-(3)].split(":")[0].strip().startswith("ceiling report files"), report[-(3)]
-    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in report[-(3)], report[-(3)]
+    assert len(report) == 32, f"a production run prints 32 store lines: {report}"
+    assert report[-(4)].split(":")[0].strip().startswith("ceiling report files"), report[-(4)]
+    assert f">{rs.CEILING_REPORT_MAX_AGE_DAYS}d" in report[-(4)], report[-(4)]
     assert [ln.split(":")[0].strip() for ln in report[:-1]] == \
         [ln.split(":")[0].strip() for ln in _store_report[:-1]], (
         "appending the 29th line moved one of items 1-28, which task 79's enumeration is "
         "matched to by index")
 
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
-    assert refused[-(3)].split(":")[0].strip().startswith("ceiling report files"), refused[-(3)]
+    assert len(refused) == 29, f"a refused run prints twenty-nine store lines: {refused}"
+    assert refused[-(4)].split(":")[0].strip().startswith("ceiling report files"), refused[-(4)]
 def test_the_report_the_writer_actually_writes_is_the_file_this_store_reclaims(rs, tmp_path):
     """#4205: the process boundary the store exists to sit on, crossed for real.
 
@@ -14638,9 +14652,9 @@ def test_the_write_gate_line_is_the_last_store_line_and_survives_the_refusal(
     reason registering the store does anything for a file that had, until now, no bound.
     """
     report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
-    assert len(report) == 31, f"a production run prints 31 store lines: {report}"
-    assert report[-(2)].split(":")[0].strip().startswith("fact-write-gate rows"), report[-(2)]
-    assert f">{rs.FACT_WRITE_GATE_ARCHIVE_AGE_DAYS}d" in report[-(2)], report[-(2)]
+    assert len(report) == 32, f"a production run prints 32 store lines: {report}"
+    assert report[-(3)].split(":")[0].strip().startswith("fact-write-gate rows"), report[-(3)]
+    assert f">{rs.FACT_WRITE_GATE_ARCHIVE_AGE_DAYS}d" in report[-(3)], report[-(3)]
     assert [ln.split(":")[0].strip() for ln in report[:-1]] == \
         [ln.split(":")[0].strip() for ln in _store_report[:-1]], (
         "appending the 30th line moved one of items 1-29, which task 79's enumeration "
@@ -14648,8 +14662,8 @@ def test_the_write_gate_line_is_the_last_store_line_and_survives_the_refusal(
 
     monkeypatch.setattr(rs, "automod_rung_refusal", lambda tree=None: _REFUSAL_SENTENCE)
     refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
-    assert len(refused) == 28, f"a refused run prints twenty-eight store lines: {refused}"
-    assert refused[-(2)].split(":")[0].strip().startswith("fact-write-gate rows"), refused[-(2)]
+    assert len(refused) == 29, f"a refused run prints twenty-nine store lines: {refused}"
+    assert refused[-(3)].split(":")[0].strip().startswith("fact-write-gate rows"), refused[-(3)]
 
 
 def test_the_write_gate_window_constant_states_the_floor_under_it():
@@ -15096,10 +15110,10 @@ def test_the_store_prints_exactly_one_line_naming_each_candidate_with_its_bytes(
     _snap_seed(rs.FACTS_SNAPSHOT_ROOT, _SNAP_OLD)
     out = _dry_run_report(rs, monkeypatch, capsys)
     report = _store_report_lines(out)
-    assert len(report) == 31, report
+    assert len(report) == 32, report
     mine = [line for line in report if "facts snapshot dirs" in line]
     assert len(mine) == 1, mine
-    assert report[-1] == mine[0], "the new store line is not the last one printed"
+    assert report[-2] == mine[0], "the #4592 store line is not second-to-last (#4427 appended below it)"
     assert mine[0] == (
         "facts snapshot dirs (facts-snapshot-* >30d, keep newest 7): 2 dir(s), 4 KiB "
         "candidate — facts-snapshot-20261017T143100Z 2 KiB/1f, "
@@ -15171,11 +15185,11 @@ def test_the_script_row_and_the_shipped_skill_table_each_gained_one_row(rs):
         pytest.skip(f"the vault skill is not reachable from here: {skill}")
     text = skill.read_text(encoding="utf-8")
     rows = _skill_table_rows(text)
-    assert len(rows) == 31, [k[:60] for k in rows]
+    assert len(rows) == 32, [k[:60] for k in rows]
     mine = [row for row in rows.values() if "facts-snapshot-*" in row]
     assert len(mine) == 1, mine
     assert "FACTS_SNAPSHOT_MAX_AGE_DAYS" in mine[0] and "FACTS_SNAPSHOT_KEEP" in mine[0], mine[0]
-    assert "31 stores" in text and "31 in all" in text, text[:300]
+    assert "32 stores" in text and "32 in all" in text, text[:300]
 
 
 def test_the_retag_skill_still_owns_the_number_seven(rs):
@@ -15235,3 +15249,257 @@ def test_the_snapshot_store_is_bounded_by_the_rules_this_file_states(rs, tmp_pat
     source = inspect.getsource(rs.sweep_facts_snapshot) + inspect.getsource(
         rs._facts_snapshot_age)
     assert "st_mtime" not in source and ".st_atime" not in source, source[:200]
+
+
+# ---------------------------------------------------------------------------
+# Store 32 (#4427): `<DATA_ROOT>/tmp/` entries, and the three HELD top-level scratch names.
+#
+# The data root itself is never a candidate and no top-level name in it is ever unlinked —
+# only the ENTRIES of `<DATA_ROOT>/tmp/` are collected, aged on their newest mtime at 24 h,
+# and only under --apply. `_scratch`, `scratch` and `_tmp_reviewprobe` are report-only by a
+# standing ruling (2026-11-26): each gets a segment on the line every run and nothing under
+# them is ever removed. Every node below seeds the fixture's redirected data root
+# (`rs.DATA_ROOT_TMP_PARENT` → `tmp_path/data-root`); none of them reads `~/lloyd-data`.
+# ---------------------------------------------------------------------------
+
+_DRT_BYTES = 2048
+
+
+def _drt_main(rs, monkeypatch, capsys, *, apply: bool) -> list[str]:
+    """`main()` once over the fixture's stores; its store lines, in printed order."""
+    monkeypatch.setattr("sys.argv", ["retention-sweep.py"] + (["--apply"] if apply else []))
+    assert rs.main() == 0
+    return _store_report_lines(capsys.readouterr().out)
+
+
+def _drt_line(report: list[str]) -> str:
+    mine = [ln for ln in report if ln.startswith("data-root tmp")]
+    assert len(mine) == 1, report
+    return mine[0]
+
+
+def _drt_age(path: Path, hours: float) -> None:
+    """Backdate `path` and, for a directory, everything under it, without following links."""
+    ts = time.time() - hours * 3600
+    if path.is_dir() and not path.is_symlink():
+        for dirpath, dirnames, filenames in os.walk(path):
+            for name in dirnames + filenames:
+                os.utime(os.path.join(dirpath, name), (ts, ts), follow_symlinks=False)
+    os.utime(path, (ts, ts), follow_symlinks=False)
+
+
+def _drt_top_names(root: Path) -> list[str]:
+    return sorted(p.name for p in root.iterdir())
+
+
+def test_the_data_root_tmp_line_prints_every_run_and_only_apply_takes_an_aged_entry(
+        rs, monkeypatch, capsys):
+    """#4427 clause 1: one line for `<DATA_ROOT>/tmp` in dry run AND apply, carrying the
+    entry count and the candidate/freed bytes; an entry whose newest mtime is >= 24 h old
+    goes only under --apply, and one younger than 24 h survives both modes.
+
+    The aged directory is aged on its NEWEST mtime, so a directory whose own mtime is old
+    but which a writer touched an hour ago deep inside is held — that is the case a
+    top-directory-mtime rule would collect mid-write.
+    """
+    tmp = rs.DATA_ROOT_TMP_PARENT / "tmp"
+    (tmp / "old-dir" / "deep").mkdir(parents=True)
+    (tmp / "old-dir" / "deep" / "f.bin").write_bytes(b"x" * _DRT_BYTES)
+    _drt_age(tmp / "old-dir", 48)
+    (tmp / "old-file.bin").write_bytes(b"x" * _DRT_BYTES)
+    _drt_age(tmp / "old-file.bin", 24 + 1 / 60)
+    (tmp / "young-file.bin").write_bytes(b"x" * _DRT_BYTES)
+    _drt_age(tmp / "young-file.bin", 23)
+    (tmp / "busy-dir").mkdir()
+    (tmp / "busy-dir" / "fresh.bin").write_bytes(b"x")
+    _drt_age(tmp / "busy-dir", 72)
+    os.utime(tmp / "busy-dir" / "fresh.bin", None)     # written just now, deep inside
+
+    dry = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=False))
+    assert dry.startswith("data-root tmp (tmp/ entries >24h): of 4 uid-owned entr(ies), "
+                          "2 held <24h — 2 would delete, 4 KiB candidate;"), dry
+    assert _drt_top_names(tmp) == ["busy-dir", "old-dir", "old-file.bin", "young-file.bin"], \
+        "the dry run unlinked something"
+
+    applied = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))
+    assert applied.startswith("data-root tmp (tmp/ entries >24h): of 4 uid-owned entr(ies), "
+                              "2 held <24h — 2 deleted, 4 KiB freed;"), applied
+    assert _drt_top_names(tmp) == ["busy-dir", "young-file.bin"], _drt_top_names(tmp)
+    assert tmp.is_dir(), "the tmp root itself was removed"
+
+
+def test_an_absent_data_root_tmp_is_reported_and_never_created(rs, monkeypatch, capsys):
+    """#4427 clause 2: an absent `<DATA_ROOT>/tmp` prints as absent, and neither a dry run
+    nor --apply creates it — the #2354 rule, and the box's real state as filed."""
+    tmp = rs.DATA_ROOT_TMP_PARENT / "tmp"
+    assert not tmp.exists()
+    for apply in (False, True):
+        line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=apply))
+        assert "no tmp/ root (absent, never created here)" in line, line
+        assert not tmp.is_dir(), f"apply={apply} created the root it reports on"
+        assert not tmp.exists()
+
+
+def test_the_data_root_and_its_top_level_names_are_never_candidates(rs, monkeypatch, capsys):
+    """#4427 clause 3: with aged top-level names in the data root and --apply, none of them
+    is unlinked — with `tmp/` missing, with `tmp/` present and empty (the root itself is not
+    an entry of itself), and with the tmp name rewritten to the root (`""`, `.`) or above it
+    (`..`), where the arm refuses to walk at all."""
+    root = rs.DATA_ROOT_TMP_PARENT
+    for name in ("recovered", "sessions", "_scratch"):
+        (root / name).mkdir()
+        (root / name / "x.bin").write_bytes(b"x" * _DRT_BYTES)
+    (root / "workers.db?mode=ro").write_bytes(b"")
+    for p in list(root.iterdir()):
+        _drt_age(p, 24 * 90)
+    before = _drt_top_names(root)
+
+    _drt_main(rs, monkeypatch, capsys, apply=True)                 # tmp/ missing
+    assert _drt_top_names(root) == before, _drt_top_names(root)
+
+    (root / "tmp").mkdir()
+    _drt_age(root / "tmp", 24 * 90)
+    line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))   # tmp/ empty
+    assert "of 0 uid-owned entr(ies)" in line and "0 deleted" in line, line
+    assert _drt_top_names(root) == sorted(before + ["tmp"]), _drt_top_names(root)
+
+    for bad in ("", ".", ".."):
+        monkeypatch.setattr(rs, "DATA_ROOT_TMP_NAME", bad)
+        res = rs.sweep_data_root_tmp(True, time.time(), parent=root)
+        assert res["state"] == "not-a-child" and res["removed"] == 0, (bad, res)
+        assert "REFUSED" in rs._data_root_tmp_line(res), rs._data_root_tmp_line(res)
+        line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))
+        assert "REFUSED: the tmp root is not a direct child of the data root" in line, line
+        assert _drt_top_names(root) == sorted(before + ["tmp"]), (bad, _drt_top_names(root))
+        assert all((root / n / "x.bin").is_file()
+                   for n in ("recovered", "sessions", "_scratch")), bad
+
+
+def test_a_tmp_symlink_is_held_unfollowed_and_a_foreign_uid_entry_is_not_counted(
+        rs, monkeypatch, capsys, tmp_path):
+    """#4427 clause 4: inside `<DATA_ROOT>/tmp`, a symlink — to a directory or a file — is
+    held, never followed and never removed, and its target's bytes are unchanged; an aged
+    directory that CONTAINS a link is removed without the link's target being reached; a
+    `tmp` that is itself a symlink is not walked; and an entry owned by another uid is
+    neither counted nor removed."""
+    tmp = rs.DATA_ROOT_TMP_PARENT / "tmp"
+    tmp.mkdir()
+    outside = tmp_path / "someone-elses-tree"
+    outside.mkdir()
+    (outside / "keep.bin").write_bytes(b"not mine\n")
+    (tmp / "dir-link").symlink_to(outside)
+    (tmp / "file-link").symlink_to(outside / "keep.bin")
+    (tmp / "holder").mkdir()
+    (tmp / "holder" / "inner-link").symlink_to(outside)
+    for p in tmp.iterdir():
+        _drt_age(p, 48)
+    # A young file, so the never-empty hold (its own node below) does not decide this one.
+    (tmp / "young.bin").write_bytes(b"y")
+
+    line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))
+    assert "of 4 uid-owned entr(ies), 1 held <24h, 2 symlink(s) held (never followed)" in line, \
+        line
+    assert "1 deleted" in line, line
+    assert (tmp / "dir-link").is_symlink() and (tmp / "file-link").is_symlink()
+    assert not (tmp / "holder").exists()
+    assert (outside / "keep.bin").read_bytes() == b"not mine\n", "a symlink was followed"
+
+    # `tmp` itself a symlink: held, not walked, its target untouched.
+    shutil.rmtree(tmp)
+    (outside / "aged.bin").write_bytes(b"x")
+    _drt_age(outside / "aged.bin", 48)
+    tmp.symlink_to(outside)
+    line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))
+    assert "tmp/ is a symlink — held, never followed" in line, line
+    assert (outside / "aged.bin").is_file() and tmp.is_symlink()
+
+    # Another uid's entry: neither counted nor removed.
+    tmp.unlink()
+    tmp.mkdir()
+    (tmp / "theirs").mkdir()
+    (tmp / "theirs" / "f.bin").write_bytes(b"x" * _DRT_BYTES)
+    _drt_age(tmp / "theirs", 48)
+    real_uid = os.getuid()          # captured BEFORE the patch: `rs.os` IS this `os`
+    monkeypatch.setattr(rs.os, "getuid", lambda: real_uid + 1)
+    res = rs.sweep_data_root_tmp(True, time.time())
+    assert res["entries"] == 0 and res["stale"] == 0 and res["removed"] == 0, res
+    assert (tmp / "theirs" / "f.bin").is_file()
+
+
+def test_the_three_held_names_are_reported_every_run_and_never_collected(
+        rs, monkeypatch, capsys):
+    """#4427 clause 5: `_scratch`, `scratch` and `_tmp_reviewprobe` each get a segment on the
+    line in both modes — file count and oldest mtime, or `absent` — and nothing under them is
+    removed by --apply however old. They are report-only by STANDING RULING (2026-11-26),
+    not pending a finding, so this node also pins that the held list is exactly those three:
+    widening it, or moving one of them into a collected root, is a new ruling."""
+    assert rs.DATA_ROOT_HELD_NAMES == ("_scratch", "scratch", "_tmp_reviewprobe")
+    root = rs.DATA_ROOT_TMP_PARENT
+    (root / "_scratch" / "2878-redcheck" / "obsidian").mkdir(parents=True)
+    (root / "_scratch" / "2878-redcheck" / "obsidian" / "a.idx").write_bytes(b"x" * 10)
+    (root / "_scratch" / "3021-preapply").mkdir()
+    (root / "_scratch" / "3021-preapply" / "b.md").write_bytes(b"y")
+    (root / "scratch").mkdir()
+    (root / "scratch" / "probe_1149_post.py").write_bytes(b"print(1)\n")
+    sept = datetime(2026, 9, 18, 12, tzinfo=timezone.utc).timestamp()
+    octo = datetime(2026, 10, 19, 12, tzinfo=timezone.utc).timestamp()
+    for p in (root / "_scratch").rglob("*"):
+        os.utime(p, (sept, sept))
+    os.utime(root / "scratch" / "probe_1149_post.py", (octo, octo))
+    # A tmp/ entry beside them, aged, so the apply below really deletes something.
+    (root / "tmp").mkdir()
+    (root / "tmp" / "gone.bin").write_bytes(b"x")
+    _drt_age(root / "tmp" / "gone.bin", 48)
+    (root / "tmp" / "young.bin").write_bytes(b"y")       # so the never-empty hold stays out
+    held_files = sorted(str(p) for n in ("_scratch", "scratch")
+                        for p in (root / n).rglob("*"))
+
+    for apply in (False, True):
+        line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=apply))
+        assert line.endswith("; held, never collected: _scratch 2 file(s) oldest 2026-09-18, "
+                             "scratch 1 file(s) oldest 2026-10-19, _tmp_reviewprobe absent"), line
+        assert sorted(str(p) for n in ("_scratch", "scratch")
+                      for p in (root / n).rglob("*")) == held_files, f"apply={apply}"
+    assert not (root / "tmp" / "gone.bin").exists(), "the apply collected nothing at all"
+    assert not (root / "_tmp_reviewprobe").exists(), "the census created an absent held name"
+
+
+def test_the_data_root_tmp_store_prints_last_and_survives_the_refusal(rs, monkeypatch, capsys):
+    """The 32nd line is APPENDED (task #79's enumeration is positional) and prints outside
+    the refusal guard — a data-root store, not one of the loop's three rungs — and the module
+    docstring's row 32 names the constant that bounds it and the held names."""
+    report = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys))
+    assert len(report) == 32 and report[-1].startswith("data-root tmp"), report[-1]
+    refused = _store_report_lines(_dry_run_report(rs, monkeypatch, capsys, refused=True))
+    assert len(refused) == 29 and refused[-1].startswith("data-root tmp"), refused[-1]
+    body = " ".join((rs.__doc__ or "")[(rs.__doc__ or "").index("32. "):].split())
+    assert "DATA_ROOT_TMP_MAX_AGE_HOURS = 24" in body, body[:300]
+    assert "`_scratch`, `scratch`, `_tmp_reviewprobe`" in body, body[:400]
+    assert rs.DATA_ROOT_TMP_MAX_AGE_HOURS == 24 and rs.DATA_ROOT_TMP_NAME == "tmp"
+
+
+def test_the_data_root_tmp_store_never_empties_the_folder_the_guardian_counts(
+        rs, monkeypatch, capsys):
+    """The guardian's data-root tripwire halts promotions when a top-level folder it counted
+    at `TOPDIR_MIN_FILES` (20) or more reads 0 files ("emptied"), and its 24 h lifetime
+    excuse cannot cover entries this arm only takes at 24 h — the 2026-11-19 `tmp (77 files)
+    vanished` halt in the one shape this store could cause. So when every file under `tmp/`
+    is in an aged entry, the NEWEST file-bearing aged entry is held: 25 aged files go down
+    to 1, never to 0, and a second apply over that one file takes nothing.
+    """
+    tmp = rs.DATA_ROOT_TMP_PARENT / "tmp"
+    tmp.mkdir()
+    for i in range(25):
+        (tmp / f"f{i:02d}.bin").write_bytes(b"x" * _DRT_BYTES)
+        _drt_age(tmp / f"f{i:02d}.bin", 48 + i)          # f00 is the newest
+    (tmp / "empty-dir").mkdir()
+    _drt_age(tmp / "empty-dir", 30)                       # newest of all, but holds no file
+
+    line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))
+    assert "1 aged entry held so tmp/ is never emptied" in line, line
+    assert "25 deleted" in line, line                    # 24 files + the empty dir
+    assert _drt_top_names(tmp) == ["f00.bin"], _drt_top_names(tmp)
+
+    line = _drt_line(_drt_main(rs, monkeypatch, capsys, apply=True))
+    assert "0 deleted" in line and "never emptied" in line, line
+    assert (tmp / "f00.bin").is_file()

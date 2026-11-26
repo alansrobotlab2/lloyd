@@ -1222,7 +1222,7 @@ a task whose `skill_name` is that skill — the only route by which the orphan g
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|
 | #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
-| #79 | daily | yes | Retention over the 31 stores it now bounds (24 on 2026-10-27, 28 on 2026-11-12; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 31 lines measured 2026-11-26): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
+| #79 | daily | yes | Retention over the 32 stores it now bounds (24 on 2026-10-27, 28 on 2026-11-12, 31 on 2026-11-26; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 32 lines measured 2026-11-26, the 32nd being `<DATA_ROOT>/tmp/` with the three held scratch names, #4427): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 | #90 | daily | own series only | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
@@ -1357,7 +1357,7 @@ leave unread. #36's queue held 31,291 items and nothing read it back (below).
 The retention sweep has since deleted it: store 10 unlinks `groundskeeper-queue.json`
 and `groundskeeper-writes.jsonl` from the `_pipeline` store directory past
 `GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`
-(`scripts/groundskeeper/retention-sweep.py:667`), added by `d24c7ecd` (#1574) —
+(`scripts/groundskeeper/retention-sweep.py:673`), added by `d24c7ecd` (#1574) —
 measured 2026-10-26 and again 2026-10-29, `ls ~/lloyd-data/_pipeline/groundskeeper*`
 returns no such file, so #36 no longer produces anything at all and the group's
 no-consumer case is one member deep. #70's findings are advisory and reach #83
