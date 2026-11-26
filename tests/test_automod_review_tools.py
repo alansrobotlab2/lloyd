@@ -1385,7 +1385,12 @@ def test_4281_twelve_labelled_cases_each_traced_to_its_corpus_row_graded_by_a_st
         raise AssertionError("calibrate reached the live grader")
     monkeypatch.setattr(RV, "grade", _no_live_grading)
     monkeypatch.setattr(RV, "item_contract", lambda item_id, ledger=None: {
-        "id": item_id, "title": f"#{item_id}", "body": "", "clauses": ["one", "two"]})
+        # #4605: these rows name demands. `names_a_demand` is the filter the real
+        # contract reader applies before a clause reaches a grader, so placeholders
+        # here would calibrate the grader against a contract no item can have — and
+        # the fixture sweep in tests/test_clause_budget.py drops them regardless.
+        "id": item_id, "title": f"#{item_id}", "body": "",
+        "clauses": ["the flag defaults to off", "a test pins the default"]})
     repo = _alternate_repo(tmp_path)
     present = {n for n, c in raw.items()
                if _has_commit(repo, c["parent"]) and _has_commit(repo, c["commit"])}
@@ -1404,6 +1409,45 @@ def test_4281_twelve_labelled_cases_each_traced_to_its_corpus_row_graded_by_a_st
     for r in rows:
         ok, why = RT.compare(raw[r["name"]], {"kind": r["kind"], **r["result"]})
         assert (r["ok"], r["why"]) == (ok, why), r["name"]
+
+
+def test_4605_the_calibrate_stub_contract_is_collected_and_kept():
+    """#4605: the clause rows the calibration stub fakes are ones the real reader keeps,
+    and the sweep that enforces that can still SEE them.
+
+    The stub stands in for `RV.item_contract` because a calibration case's own item may
+    be closed or re-worded by the time its commit is checked out, so its clause rows are
+    fixture data like any other — and `B.names_a_demand` is the filter both contract
+    readers apply before a clause reaches a grader. Two placeholders at that site (`one`,
+    `two`) are what left main red at 6fa35415: `tests/test_clause_budget.py`'s sweep
+    refuses a clause fixture row naming no demand, because a row the reader drops leaves
+    the graded item holding a shorter contract than the test believes while every
+    assertion still passes. Three arms, one per way this could quietly come back. The
+    first re-runs that collector over THIS file and insists it still collects as many
+    rows from the calibrate node as `_met()` returns verdicts for — a fixture whose rows
+    the collector cannot reach is invisible to the guard, which is what hoisting the rows
+    behind a `list(NAME)` call would have done. The second insists every clause row this
+    file writes names a demand. The third keeps the discriminator live rather than
+    asserting a constant: the two placeholders are still refused.
+
+    Fixed by naming demands, as the sweep's migration precedent asks, and not by booking
+    an exemption — `test_the_fixture_sweep_is_not_neutered` re-checks every entry of
+    `CLAUSE_FIXTURE_ROWS_UNDER_TEST` against the rows the node it names still holds.
+    """
+    import test_clause_budget as CB
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    rows = CB._clause_rows_from_source(src)
+    stub_node = ("test_4281_twelve_labelled_cases_each_traced_to_its_corpus_row_"
+                 "graded_by_a_stub")
+    stub_rows = [row for node, _, row in rows if node == stub_node]
+    assert len(stub_rows) == len(_met()["clauses"]), (
+        f"the sweep collects {len(stub_rows)} clause row(s) at the calibrate stub, not "
+        f"the {len(_met()['clauses'])} verdicts _met() grades — the rows moved somewhere "
+        "the sweep cannot see them")
+    assert [row for _, _, row in rows if not B.names_a_demand(row)] == []
+    for placeholder in ("one", "two"):
+        assert not B.names_a_demand(placeholder), placeholder
 
 
 def test_4281_the_label_check_fails_when_one_label_is_mutated():
