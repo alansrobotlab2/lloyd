@@ -671,6 +671,10 @@ describe('the Sources panel names the span its rollup rests on (#4108)', () => {
     // A stamp the client cannot parse costs the date clause, not the hours.
     expect(windowSpanText(257.81, 7, 'not-a-stamp')).toBe(
       'Sources rollup covers 257.8h of the 7d window')
+    // #4315: the subject is a fourth argument whose default is the Sources wording
+    // above, so the Autonomy fleet strip borrows the phrase without a second copy.
+    expect(windowSpanText(724.2, 7, '2026-10-20T02:35:22.596540+00:00', 'Fleet rollup')).toBe(
+      'Fleet rollup covers 724.2h of the 7d window (oldest input 2026-10-20)')
   })
 
   it('a payload that covers its window prints no span claim at all', () => {

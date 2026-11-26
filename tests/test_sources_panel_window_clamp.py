@@ -235,7 +235,7 @@ def _contract_pairs() -> list[tuple[tuple, str, bool]]:
                 args.append(tok.strip("'"))
             else:
                 args.append(float(tok))
-        while len(args) < 3:
+        while len(args) < 4:
             args.append(None)
         out.append((tuple(args), m.group(3), m.group(2) == "toBe"))
     return out
@@ -257,7 +257,7 @@ def _utc_day(stamp) -> str:
         return ""
 
 
-def _phrase(clamp_hours, days, oldest_input) -> str:
+def _phrase(clamp_hours, days, oldest_input, subject=None) -> str:
     """The Python half of the dual implementation — `windowSpanText`'s rules.
 
     Deliberately written from the helper's stated rules rather than read off its
@@ -267,11 +267,12 @@ def _phrase(clamp_hours, days, oldest_input) -> str:
     if clamp_hours is None:
         return ""
     oldest = _utc_day(oldest_input) if oldest_input else ""
-    base = f"Sources rollup covers {_hours_text(clamp_hours)}h of the {int(days)}d window"
+    subject = "Sources rollup" if subject is None else subject
+    base = f"{subject} covers {_hours_text(clamp_hours)}h of the {int(days)}d window"
     return f"{base} (oldest input {oldest})" if oldest else base
 
 
-def _ts_render(clamp_hours, days, oldest_input) -> str:
+def _ts_render(clamp_hours, days, oldest_input, subject=None) -> str:
     """The helper's OWN templates, rendered — the other half of the same comparison.
 
     `_phrase` is blind to a change in `WorkersWindowNote.tsx`: it is a second
@@ -286,12 +287,17 @@ def _ts_render(clamp_hours, days, oldest_input) -> str:
                     src, re.S)
     base = re.search(r"const base = `([^`]*)`", src)
     with_oldest = re.search(r"return oldest \? `([^`]*)` : base", src)
-    assert day and base and with_oldest, (
+    # #4315: the subject is a parameter now, and its DEFAULT is read off the
+    # signature, so the Sources wording is still pinned by the helper's own bytes.
+    default = re.search(r"subject: string = '([^']*)'", src)
+    assert day and base and with_oldest and default, (
         "the helper's phrase is no longer (day label) + (base with hours and window) + "
         "(oldest input): the contract has moved and this reader is stale")
     if clamp_hours is None:
         return ""
-    text = base.group(1).replace("${hours}", _hours_text(clamp_hours)).replace(
+    text = base.group(1).replace(
+        "${subject}", default.group(1) if subject is None else subject).replace(
+        "${hours}", _hours_text(clamp_hours)).replace(
         "${dayLabel(days)}", day.group(1).replace("${days}", str(int(days))))
     oldest = _utc_day(oldest_input) if oldest_input else ""
     return with_oldest.group(1).replace("${base}", text) \
@@ -536,7 +542,8 @@ def _move_note_below_the_cards(s: str) -> str:
     (NOTE, lambda s: _apply(s, " of the ${dayLabel(days)} window", ""),
      test_the_two_halves_of_the_contract_agree),
     # clauses 2/3 — the prose moves, and the two files would split.
-    (NOTE, lambda s: _apply(s, "Sources rollup covers ", "Rollup covers "),
+    (NOTE, lambda s: _apply(s, "subject: string = 'Sources rollup'",
+                            "subject: string = 'Rollup'"),
      test_the_two_halves_of_the_contract_agree),
     # clauses 2/3 — `toFixed` instead of a tenth: `11.04` starts printing `11.0h`.
     # The executed half of this is the vitest node that asserts `11h`; what the
@@ -563,3 +570,65 @@ def test_the_mirror_becomes_red_when_the_pair_stops_reaching_the_panel(
     finally:
         path.write_text(original, encoding="utf-8")
     assert _read(path) == original, f"{path.name} was not restored after its mutation"
+
+
+# ── #4315: the Autonomy fleet strip borrows the note ─────────────────────────
+
+AUTONOMY_PAGE = REPO / "web" / "src" / "components" / "pages" / "AutonomyPage.tsx"
+
+
+def _autonomy_fleet_block() -> str:
+    """The `fleet: { … }` member of `export interface AutonomyHealth`, brace-aware."""
+    src = _read(API)
+    masked = _mask(src)
+    head = masked.index("export interface AutonomyHealth {")
+    at = masked.index("fleet:", head)
+    open_at = masked.index("{", at)
+    return src[open_at:_balanced(masked, open_at)]
+
+
+def test_the_autonomy_client_declares_the_keys_the_route_emits_into_fleet():
+    """#4315 clause 4: `app.autonomy.compute_health` splices `_health_window_fields`
+    into its `fleet` block, and the Autonomy client must declare exactly those keys —
+    character for character — and the fleet strip must read them by those names. A
+    rename on the route moves the emitted set and reddens this node; a rename on the
+    client alone leaves a key undeclared and reddens it the same way."""
+    from app.autonomy import _health_window_fields
+
+    now = dt.datetime(2026, 11, 19, 7, 16, tzinfo=dt.timezone.utc)
+    emitted = set(_health_window_fields(now, days=90, oldest_input=OLDEST, observed=True))
+    assert emitted == set(_health_window_fields(now, days=7, oldest_input=None,
+                                                observed=True))
+    fleet = _autonomy_fleet_block()
+    assert emitted == set(PAIR), (
+        f"_health_window_fields now emits {sorted(emitted)}, not {sorted(PAIR)}")
+    for key, tname in zip(PAIR, ("string", "number")):
+        assert re.search(rf"^\s*{key}\?:\s*{tname}\s*\|\s*null;", fleet, re.M), (
+            f"AutonomyHealth.fleet does not declare `{key}?: {tname} | null`:\n{fleet}")
+    assert re.search(r'"fleet":\s*\{[\s\S]*?\*\*_health_window_fields\(',
+                     _read(REPO / "app" / "autonomy.py")), (
+        "compute_health no longer splices `_health_window_fields` into `fleet`")
+    page = _read(AUTONOMY_PAGE)
+    start, end = _region(page, "HealthStrip")
+    strip = _mask(page[start:end])
+    for key in sorted(emitted):
+        assert f"f.{key}" in strip, f"HealthStrip does not read `f.{key}` off the payload"
+
+
+def test_the_sources_half_is_untouched_by_the_fleet_note():
+    """#4315 clause 5: the Background page still renders exactly ONE note, above the
+    source cards, with no subject of its own — so its phrase is still the default
+    `Sources rollup covers …` — and no source card renders either clamp key."""
+    page = _mask(_read(PAGE))
+    assert page.count("<WorkersWindowNote") == 1, page.count("<WorkersWindowNote")
+    body = _panel_body()
+    offset, attrs = _note_in(body)
+    assert "subject" not in attrs, attrs
+    assert offset < _mask(body).index("sources.map("), "the note left panel level"
+    assert _phrase(257.81, 7, OLDEST) == _ts_render(257.81, 7, OLDEST) == (
+        "Sources rollup covers 257.8h of the 7d window (oldest input 2026-10-13)")
+    start, end = _region(_read(PAGE), "SourceCard")
+    card = _mask(_read(PAGE)[start:end])
+    for key in PAIR:
+        assert key not in card, f"SourceCard renders `{key}`"
+    assert not any(k in _mask(_read(ROW)) for k in PAIR), "SourceHealthRow reads the pair"

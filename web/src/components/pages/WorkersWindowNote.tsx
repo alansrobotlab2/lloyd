@@ -44,29 +44,33 @@ function oldestDay(stamp: string | null | undefined): string {
  * real clamp for a window that held no row reaching the tallies, so a falsy test would
  * print nothing for exactly the payload with the least evidence behind it. `days` is
  * the request the route echoed, so the phrase always names the label the reader is
- * already looking under. */
+ * already looking under. `subject` names whose rollup it is: the Sources panel's by
+ * default, `Fleet rollup` for the Autonomy fleet strip (#4315), which reads the same
+ * pair off `/api/autonomy/health`'s `fleet` block. */
 export function windowSpanText(
   clampHours: number | null | undefined,
   days: number,
   oldestInput?: string | null,
+  subject: string = 'Sources rollup',
 ): string {
   if (clampHours == null) return ''
   const hours = Math.round(clampHours * 10) / 10
   const oldest = oldestDay(oldestInput)
-  const base = `Sources rollup covers ${hours}h of the ${dayLabel(days)} window`
+  const base = `${subject} covers ${hours}h of the ${dayLabel(days)} window`
   return oldest ? `${base} (oldest input ${oldest})` : base
 }
 
 /** The note itself: nothing at all when the payload covers its window, one muted line
  *  when it does not. */
 export function WorkersWindowNote({
-  clampHours, days, oldestInput,
+  clampHours, days, oldestInput, subject,
 }: {
   clampHours: number | null | undefined
   days: number
   oldestInput?: string | null
+  subject?: string
 }) {
-  const text = windowSpanText(clampHours, days, oldestInput)
+  const text = windowSpanText(clampHours, days, oldestInput, subject)
   if (text === '') return null
   return (
     <div className="rounded border border-border px-3 py-1.5 text-[10px] text-muted-foreground">

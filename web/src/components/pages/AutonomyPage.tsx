@@ -16,6 +16,7 @@ import {
   AlertTriangle,
 } from "lucide-react";
 import { api, type AutonomyTask, type AutonomyHealth } from "../../api";
+import { WorkersWindowNote } from "./WorkersWindowNote";
 import {
   evidenceCellState, fleetEvidenceState, noBundleState,
 } from "./autonomyHealth";
@@ -48,7 +49,7 @@ function fmtHours(h: number): string {
   return h >= 10 ? h.toFixed(0) : h.toFixed(1);
 }
 
-function HealthStrip({ health, showAll, onToggle }: {
+export function HealthStrip({ health, showAll, onToggle }: {
   health: AutonomyHealth;
   showAll: boolean;
   onToggle: () => void;
@@ -82,6 +83,12 @@ function HealthStrip({ health, showAll, onToggle }: {
         <span className="text-[11px] font-medium text-foreground/90">
           Fleet health · {health.days}d
         </span>
+        {/* #4315: `days` is the request; the route clamps it to the store's own
+            history, and this states the span it actually measured — nothing at all
+            when the pair is null (the window is covered). */}
+        <WorkersWindowNote subject="Fleet rollup" days={health.days}
+                           clampHours={f.window_clamped_to_hours}
+                           oldestInput={f.oldest_input} />
         <span className={chip}>{f.runs} runs</span>
         <span className={`${chip} ${f.fail_rate > 0.1 ? "text-red-400" : "text-emerald-400"}`}>
           {(f.fail_rate * 100).toFixed(0)}% failed

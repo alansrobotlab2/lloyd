@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
 import apiSource from "../../api.ts?raw";
+import type { AutonomyHealth } from "../../api";
 import pageSource from "./AutonomyPage.tsx?raw";
+import { HealthStrip } from "./AutonomyPage";
+import { WorkersWindowNote } from "./WorkersWindowNote";
 
 // The autonomy tab's `refute` / `no-bundle` columns are the half of #713 that
 // gets read: `compute_health` has returned `refuted_or_insufficient_rate` per
@@ -250,5 +255,64 @@ describe("Kanban drop stays a status change with no insertion index (#3816, #392
       expect(dropHandler, `handleDrop uses ${banned}`).not.toContain(banned);
       expect(columnDrop, `KanbanColumn drop uses ${banned}`).not.toContain(banned);
     }
+  });
+});
+
+// #4315: the fleet strip's `Fleet health · {days}d` label is the REQUEST; the route
+// clamps it to the store's own history (`_health_window_fields`), so the strip says
+// what span it measured, with #4108's shared note, and says nothing when the pair is
+// null. Rendered with `renderToStaticMarkup` — no DOM package in this runner.
+describe("the fleet strip states its measured span (#4315)", () => {
+  const CLAMP = 724.2;
+  const OLDEST = "2026-10-20T02:35:22.596540+00:00";
+  const LINE = "Fleet rollup covers 724.2h of the 7d window (oldest input 2026-10-20)";
+
+  const health = (clamp: number | null, oldest: string | null): AutonomyHealth => ({
+    days: 7,
+    fleet: {
+      runs: 231, failures: 3, fail_rate: 0.013, gpu_hours: 12.5, wasted_hours: 0.2,
+      empty_runs: 0, timeout_runs: 0, active_tasks: 10, failed_tasks: [],
+      paused_tasks: [], window_clamped_to_hours: clamp, oldest_input: oldest,
+    },
+    tasks: [],
+  } as unknown as AutonomyHealth);
+
+  const strip = (h: AutonomyHealth) => renderToStaticMarkup(
+    createElement(HealthStrip, { health: h, showAll: false, onToggle: () => {} }));
+
+  it("the shared note with the Fleet subject renders one line, and nothing on a null clamp", () => {
+    const shown = renderToStaticMarkup(createElement(WorkersWindowNote, {
+      clampHours: CLAMP, days: 7, oldestInput: OLDEST, subject: "Fleet rollup" }));
+    expect(shown).toContain(LINE);
+    expect(shown.match(/covers/g)?.length).toBe(1);
+    expect(renderToStaticMarkup(createElement(WorkersWindowNote, {
+      clampHours: null, days: 7, oldestInput: null, subject: "Fleet rollup" }))).toBe("");
+    expect(renderToStaticMarkup(createElement(WorkersWindowNote, {
+      clampHours: undefined, days: 7, subject: "Fleet rollup" }))).toBe("");
+  });
+
+  it("the strip renders the note beside its label from the fetched payload, silent when null", () => {
+    const clamped = strip(health(CLAMP, OLDEST));
+    expect(clamped).toContain("Fleet rollup covers 724.2h of the 7d window");
+    expect(clamped).toContain(LINE);
+    // Beside the label: after the `Fleet health · 7d` span, ahead of the first chip.
+    const label = clamped.indexOf("Fleet health");
+    const note = clamped.indexOf("Fleet rollup covers");
+    expect(label).toBeGreaterThan(-1);
+    expect(note).toBeGreaterThan(label);
+    expect(note).toBeLessThan(clamped.indexOf("231 runs"));
+    const covered = strip(health(null, null));
+    expect(covered).not.toContain("rollup covers");
+    expect(covered).toContain("Fleet health");
+  });
+
+  it("adds no second health request: the page still asks the route once", () => {
+    expect(pageSource.match(/api\.autonomyHealth\(/g)?.length).toBe(1);
+    expect(pageSource).not.toMatch(/\bfetch\(/);
+    const stripSrc = pageSource.slice(pageSource.indexOf("export function HealthStrip"),
+      pageSource.indexOf("\n}\n", pageSource.indexOf("export function HealthStrip")));
+    expect(stripSrc).toContain("clampHours={f.window_clamped_to_hours}");
+    expect(stripSrc).toContain("oldestInput={f.oldest_input}");
+    expect(stripSrc).not.toMatch(/api\./);
   });
 });
