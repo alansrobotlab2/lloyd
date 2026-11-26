@@ -1105,12 +1105,13 @@ monitor rule it shares with #60, stated under
 
 Three jobs that decide what future effort goes to — what gets researched, what
 reaches `up_next` on the kanban at `~/obsidian/backlog/`, and how the board reads
-when it is counted. Nothing in the fleet measures how well they decide. The board-side half is
-measured since #904 — `scripts/automod/board_decisions.py`, surfaced through
-`board_health.decisions` (dashboard backlog panel, the steward's
-`<board_health>` block) and `round board-decisions`: every promotion into
-`up_next` joined to the ledger event that made it and to its terminal state,
-per-day counts, and retirements later reversed. It sees #35 only when a round
+when it is counted. Nothing in the fleet measures how well they decide end to
+end. The board-side half is measured since #904 —
+`scripts/automod/board_decisions.py`, surfaced through `board_health.decisions`
+(dashboard backlog panel, the steward's `<board_health>` block) and
+`round board-decisions`: every promotion into `up_next` joined to the ledger
+event that made it and to its terminal state, per-day counts, and retirements
+later reversed. It sees #35 only when a round
 picks its promotion up (`unrecorded`, since the MCP store writes no ledger
 row); #65 has no such join — the registry writes no ledger event and
 `scripts/automod/board_decisions.py` reads the board's ledger alone, so no
@@ -1144,11 +1145,14 @@ quarantine rule that keeps the loop from eating what it files.
 **No job retires a closed item off the board, and that gap was closed by a ruling,
 not by an owner.** #77's
 census on 2026-09-26 counted 1,488 `status: done` files of 1,507; the same tally on
-2026-10-26 is 3,315 done of 3,345 (99.1% terminal, and still no `archived/`
-directory — `backlog/data/` is the only subdirectory), with 367 completed in the
-seven days before that date, so ~52 a day are arriving. Nothing
-moves one out: `scripts/groundskeeper/retention-sweep.py` prunes logs, sessions and
-run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
+2026-10-26 was 3,315 done of 3,345, and on 2026-11-26 it is 4,489 done of 4,532
+files (99.1% terminal, and still no `archived/` directory — `backlog/data/` is the
+only subdirectory), with 342 completed in the seven days before that date, so ~49 a
+day are arriving. The tally is line-scoped, not file-scoped: 4,536 status lines over
+4,532 files on 2026-11-26, two of them body prose read as statuses, so the printed
+`done` sits one above the file-true count and the pile's size is the order, not the
+figure. Nothing moves one out: `scripts/groundskeeper/retention-sweep.py` prunes
+logs, sessions and run records, never a backlog file; `app/backlog_move.py` is a status-move *recorder*
 ("One definition of 'record a backlog status move'") and never touches a path; the
 only writer in the tree that removes a backlog file is `backlog_task_delete`
 (`app/routers/backlog.py:931`), which deletes rather than archives and is wired to
