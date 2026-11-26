@@ -192,6 +192,14 @@ def _witness_artifact(source, artifact_dir: str = B.WITNESS_ARTIFACT_DIR, *,
     at the bytes its own last run wrote rather than spawning a fresh copy each pass,
     and for a retired name that is the whole fix: the second demand asks for the
     extract the first one published, not a second copy of it.
+
+    The `day` in that stem is ruled (#4022's owed-check, 2026-11-19; made checkable by
+    #4262): a filename's date is the READING / demand date — the day the demand was
+    emitted — and never the instant the bytes were captured. The capture instant lives
+    INSIDE the artifact (a `witness_meta` table in a SQLite extract) or in its sibling
+    witness note, and `scripts/maintenance/witness_naming_report.py` lists the dated
+    artifacts that declare it in neither place. Capture-date equality is deliberately
+    NOT checked: a name dated a day before its capture is correct under the ruling.
     """
     src = B._witness_target(source)
     name = src.name
@@ -999,6 +1007,14 @@ def _over_bound_extract_demand(path, artifact_dir: str = B.WITNESS_ARTIFACT_DIR,
     anyway. Nothing committed is renamed — the harm being undone is a MISSING witness, so a
     demand that made its path true by MOVING bytes would be a worse bug than the one it
     fixes.
+
+    The date in the name this demands is ruled (#4022's owed-check, 2026-11-19; checkable
+    by #4262): a filename's date is the READING / demand date, never a capture date. The
+    capture instant lives INSIDE the artifact — "as at the reading" above is a claim the
+    extract has to carry in its own `witness_meta` table or sibling witness note — and
+    capture-date equality is deliberately NOT checked, by this note or by
+    `scripts/maintenance/witness_naming_report.py`, which reports only an artifact that
+    declares its capture instant nowhere.
     """
     target = B._witness_target(path)
     # #3942: ONE listing of `backlog/data`, taken before the destination is chosen, so the
