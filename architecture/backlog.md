@@ -722,7 +722,7 @@ that a merge never loses text.
 | `GET /api/backlog/boards` | Board list with counts, icons and colours for the board tabs. |
 | `GET /api/backlog/tasks` | Rows for the board, optionally filtered by `board_id`/`status`/`q`. Each row carries `description_snippet` — the first 300 characters of the body — and **no `description`**; whole bodies were 91 % of a 9.2 MB response for the two lines a card renders (#1021, #1199). |
 | `GET /api/backlog/task/{id}` | One item with `description` = its **complete** body. The only editing source: `task-update` replaces the whole body with whatever `description` it is sent, so a row is not one. |
-| `POST /api/backlog/task-update` | Move, rename, retag, re-board. A `description` **shorter than the body on disk is ignored** (still 200) unless `force_body_replace` is set — the guard that makes the snippet safe to ship. |
+| `POST /api/backlog/task-update` | Move, rename, retag, re-board — and the guardian's all-clear close. A `description` **shorter than the body on disk is ignored** (still 200) unless `force_body_replace` is set — the guard that makes the snippet safe to ship. |
 | `POST /api/backlog/task-create` | The UI's create — and the guardian's. |
 | `POST /api/backlog/task-delete` | Unlink the file. The only destructive path. |
 
@@ -762,6 +762,15 @@ title/body): sending the wrong keys does not error — the endpoint defaults
 `name` to "New Task" and returns 2xx — so the alert would read as delivered
 while filing a task that says nothing. It checks the returned name for exactly
 that reason.
+
+The guardian's second write is the close. On an all-clear,
+`agent-services/guardian/notify.py::_post_board_close` POSTs to `task-update`
+(`BACKLOG_UPDATE_PATH`) for each still-open row the list read returned, with the
+body `{"id": …, "status": "done"}` and nothing else: `done` (`BACKLOG_CLOSED_STATUS`)
+is the one status the route accepts outside the open set, and a `description` key
+would replace the item's whole body. The route books that close like any board
+edit — see Access rules for the reason it records. (`voiceloss.py` posts the same
+route to refresh its one open row's body; that is an edit, never a close.)
 
 ## OKF conformance at birth
 
@@ -911,6 +920,12 @@ most active is the worst possible reading of "bounded".
   nothing else, so a tag is the one change the log does not narrate, and a save
   that posts the status it already has (`TaskModal` posts the whole form on every
   edit) records no move at all.
+- The board route's reason is a constant: `app/routers/backlog.py`'s `task-update`
+  handler books every move it receives with the fixed reason `set from Mission
+  Control` and reads no reason from the request, so a guardian all-clear close
+  arriving over that route is recorded as a Mission Control edit — a human
+  click, in the item's own log. A caller-supplied reason would be a change to that
+  handler, not to this page.
 - Every write is still a whole-file replace of one item, but since **#3036** it
   is a **locked and atomic** one; "no lock and no atomic replace anywhere in the
   five writers" (#891) is what this page claimed until 2026-11-12 and is now

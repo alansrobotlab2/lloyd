@@ -838,3 +838,55 @@ def test_the_refresh_narration_records_the_refutation_of_that_expiry_hole():
     assert "one open item" in entry, (
         "the annotation does not say why the accumulation cannot happen, which is "
         "the half a future review needs to stop re-deriving it")
+
+
+def _route_table_row(route: str) -> str:
+    """One row of the `## HTTP routes` table, by its route cell, folded onto one line."""
+    rows = [ln for ln in _section("## HTTP routes").splitlines()
+            if ln.startswith(f"| `{route}` |")]
+    assert len(rows) == 1, f"expected exactly one table row for {route!r}, found {len(rows)}"
+    return " ".join(rows[0].split())
+
+
+def test_the_page_states_both_guardian_writes_and_how_the_close_is_booked():
+    """The guardian writes the board twice — a filing and an all-clear close — and the
+    close arrives over the board route, so it is booked as a Mission Control edit.
+
+    Row-scoped for the table, section-scoped for the prose, and cross-checked against
+    the code with `git grep`: renaming the guardian's constants or the route's reason
+    turns this red rather than leaving the page describing a seam that moved. The new
+    prose names code, never an item number — a closed item is not an owner.
+    """
+    update_row = _route_table_row("POST /api/backlog/task-update")
+    assert "guardian" in update_row, f"the task-update row names no guardian write: {update_row}"
+    assert "The UI's create — and the guardian's" in _route_table_row(
+        "POST /api/backlog/task-create")
+
+    routes = " ".join(_section("## HTTP routes").split())
+    assert "notify.py::_backlog_task" in routes
+    at = routes.index("The guardian's second write is the close.")
+    close = routes[at:routes.index("that is an edit, never a close.)", at)]
+    for needle in ("notify.py::_post_board_close", "`task-update`", '"status": "done"',
+                   "BACKLOG_UPDATE_PATH", "BACKLOG_CLOSED_STATUS"):
+        assert needle in close, f"the close paragraph lost {needle!r}: {close}"
+
+    access = " ".join(_section("## Access rules").split())
+    at = access.index("The board route's reason is a constant")
+    booked = access[at:access.index("not to this page.", at)]
+    assert "`set from Mission Control`" in booked, booked
+    assert "guardian all-clear close" in booked and "Mission Control edit" in booked, booked
+    # Beside, not instead of, the attribution rule the older node pins.
+    assert "Every status move is attributed" in access
+
+    for prose in (close, booked):
+        assert not re.search(r"#\d+", prose), f"the new prose cites an item number: {prose}"
+
+    for path, pattern in (
+            ("agent-services/guardian/notify.py",
+             'BACKLOG_UPDATE_PATH = "/api/backlog/task-update"'),
+            ("agent-services/guardian/notify.py", 'BACKLOG_CLOSED_STATUS = "done"'),
+            ("agent-services/guardian/notify.py", "def _post_board_close("),
+            ("app/routers/backlog.py", '"set from Mission Control"')):
+        hit = _grep_source(path, pattern)
+        assert hit.returncode == 0 and hit.stdout.strip(), (
+            f"{pattern!r} is gone from {path}; the page describes a seam that moved")
