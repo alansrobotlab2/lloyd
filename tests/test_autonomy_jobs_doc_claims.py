@@ -11286,3 +11286,138 @@ def test_the_act_on_bound_is_stated_once_in_the_definition_and_copied_into_no_ro
     assert any("index" in s.lower() for s in earned), (
         "the earns/denies sentence no longer names the index, so it reads as a general "
         "remark about tiers instead of the answer to the arm argument")
+
+
+# ── #3877: any tree-size figure that names its root carries its date ──────────────
+#
+# #3408 dated the facts-tree size in the retag surfaces above and left the widening owed:
+# the same undated figure lived on in skills no rail read. `skills/groundskeeper-survey/`
+# sized "the facts tree" a sixth low with no date (77,470 files measured 2026-11-07), and
+# `skills/nightly-reflection-config/` timed an `rg` over `~/obsidian/backlog` beside an
+# undated count of its `.md` files. The ruling (#3408's owed-check, on #3877) is to
+# widen, keyed on a NAMED ROOT, so the deltas a review flagged (a count that "ran N files
+# stale", a sweep that "deleted N files") stay out: a size is a claim about a tree, and
+# a sentence that names no tree is not one. The seeds below spell both deltas out.
+#
+# A named root is a path under `~/lloyd-data` or `~/obsidian` (either spelling of home,
+# or `$DATA_ROOT`/`$LLOYD_DATA`), or "facts tree", which names exactly one root
+# (`~/lloyd-data/_pipeline/vault-derived/facts`) in this corpus's own words. Broader
+# nouns ("vault", "store", "corpus") were measured over every skill and task file on
+# 2026-11-25 and add only sentences that are not tree sizes, so they are not keys.
+# The figure shape and the date shape are the retag rail's own (`_TREE_SIZE_FIGURE`,
+# `_ISO_MEASUREMENT_DATE`), and so is the grain (`_prose_chunks`: sentence for markdown,
+# line for a repo `tests/` file); none of the retag-scoped functions above is changed.
+
+_NAMED_TREE_ROOT = re.compile(
+    r"~/(?:lloyd-data|obsidian)\b"
+    r"|/home/[A-Za-z0-9_.-]+/(?:lloyd-data|obsidian)\b"
+    r"|\$\{?(?:DATA_ROOT|LLOYD_DATA)\b"
+    r"|\bfacts[ -]tree\b", re.I)
+
+
+def _vault_skill_and_task_surfaces() -> dict[str, str]:
+    """Every `~/obsidian/skills/*/SKILL.md` and `~/obsidian/autonomy/*.md`, by vault path."""
+    vault = Path.home() / "obsidian"
+    paths = sorted((vault / "skills").glob("*/SKILL.md")) + sorted(
+        (vault / "autonomy").glob("*.md"))
+    return {str(p.relative_to(vault)): p.read_text(encoding="utf-8") for p in paths}
+
+
+def _undated_named_root_tree_size_defects(texts: dict[str, str]) -> list[str]:
+    """Each tree-size figure in a unit that names a root and carries no ISO date."""
+    defects: list[str] = []
+    for name, text in texts.items():
+        grain = "line" if name.startswith("tests/") else "sentence"
+        for chunk in _prose_chunks(name, text):
+            if not _NAMED_TREE_ROOT.search(chunk) or _ISO_MEASUREMENT_DATE.search(chunk):
+                continue
+            for m in _TREE_SIZE_FIGURE.finditer(chunk):
+                defects.append(
+                    f"{name} sizes a named tree at {m.group(0)!r} with no measurement date "
+                    f"in the same {grain}, so nothing tells a reader when it stopped being "
+                    f"true: {chunk[:160]!r}")
+    return defects
+
+
+def test_the_named_root_tree_size_finder_ignores_deltas_and_reads_dates():
+    """#3877 clauses 2-4, on text this node writes: the finder fires on an undated size
+    of a named tree, at the grain it claims, and on nothing else.
+
+    The two deltas are the false-positive class the ruling keyed on a root to keep out,
+    and they stay quiet here whatever the vault says. The live-tree half runs over the
+    repo surfaces the retag rail already reads (§Canonicalize, this file and
+    `tests/test_retag_untagged_facts.py`), which are in the round's own tree, so the gate
+    grades it; the vault half is the `@live_vault` node below.
+    """
+    clean = {
+        "skills/x/SKILL.md": (
+            "Measured 2026-11-25: `cd ~/lloyd-data/_pipeline/vault-derived && find facts "
+            "-type f | wc -l` gives 84,726 files. Repairs ran and the count ran 3,816 files "
+            "stale. The sweep deleted 4,000 files. A ~63k-file pile with no root is not a "
+            "size of anything this rail can name."),
+    }
+    assert _undated_named_root_tree_size_defects(clean) == [], (
+        "the finder fired on a dated size or on a root-less delta: "
+        f"{_undated_named_root_tree_size_defects(clean)}")
+
+    seeds = {
+        "a root-named size with its date stripped": (
+            {"skills/x/SKILL.md": "Run in `~/obsidian/backlog` (3,800 `.md` files) it hangs."},
+            "'3,800 `.md` files'"),
+        "the facts tree sized with no date": (
+            {"skills/x/SKILL.md": "The scan walks a ~63,000-file facts tree for an hour."},
+            "'63,000-file'"),
+        "a k-rounded size of a data-root path": (
+            {"autonomy/9-x.md": "The store at $DATA_ROOT/sessions holds 12k files today."},
+            "'12k files'"),
+        "a date one sentence away does not excuse the figure": (
+            {"skills/x/SKILL.md": "Counted 2026-11-25. The tree at ~/lloyd-data/facts "
+                                  "holds 84,726 files."},
+            "'84,726 files'"),
+        "a test-file docstring line is graded line by line": (
+            {"tests/test_x.py": '"""Doc.\n\n~/obsidian/backlog holds 3,800 files.\n'
+                                'Dated 2026-11-25 on the next line.\n"""\n'},
+            "same line"),
+    }
+    for label, (texts, expect) in seeds.items():
+        defects = _undated_named_root_tree_size_defects(texts)
+        assert any(expect in d for d in defects), (
+            f"the seed {label!r} produced {defects}, in which nothing names {expect!r} — "
+            "the finder is not reading what this seed planted")
+
+    assert _undated_named_root_tree_size_defects(_repo_surfaces()) == [], (
+        "a repo surface sizes a named tree with no date beside it: "
+        f"{_undated_named_root_tree_size_defects(_repo_surfaces())}")
+
+
+@live_vault
+def test_every_skill_and_task_dates_a_tree_size_that_names_its_root():
+    """#3877 clauses 1-4: the widening itself, over every skill and every task file.
+
+    `@live_vault` like the retag node above: `~/obsidian/skills/` and
+    `~/obsidian/autonomy/` are trees a round does not control, so the gate deselects this
+    node and the run named in the round report judges it. The seeds mutate the two
+    sentences #3877 dated and must come back red, which is the proof the finder reads the
+    live files it claims to and not only the text the node above writes.
+    """
+    surfaces = _vault_skill_and_task_surfaces()
+    assert len(surfaces) >= 200, (
+        f"only {len(surfaces)} skill and task files were read — the globs stopped "
+        "matching, and a rail over an empty corpus is green by construction")
+    defects = _undated_named_root_tree_size_defects(surfaces)
+    assert defects == [], "\n".join(defects)
+
+    groundskeeper = "skills/groundskeeper-survey/SKILL.md"
+    reflection = "skills/nightly-reflection-config/SKILL.md"
+    seeds = {
+        "the groundskeeper facts-tree size with its date stripped": (
+            groundskeeper, re.sub(r"\b20\d\d-\d\d-\d\d\b", "recently", surfaces[groundskeeper])),
+        "the backlog size in the rg timing with its date stripped": (
+            reflection, re.sub(r"\b20\d\d-\d\d-\d\d\b", "recently", surfaces[reflection])),
+    }
+    for label, (key, mutated) in seeds.items():
+        assert mutated != surfaces[key], f"the seed {label!r} perturbed nothing"
+        found = _undated_named_root_tree_size_defects({key: mutated})
+        assert found, (
+            f"{label!r} produced no defect, so the rail does not read {key} the way it "
+            "claims to")
