@@ -5151,10 +5151,27 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: line-for-line — the guard gains one call, the two attaches gain one call each, and two
 #: literal `0.80` become `lac.AGREEMENT_VETO` — so 1784-1785, 2210 and 2974 still hold and
 #: every `architecture/` line citation still reads. No scored query and no scorer changed.
-#: It names `985f44ea`, the #4603 commit, stamped one commit later for the self-naming
-#: reason above; `git diff --name-only HEAD~1 HEAD -- eval/run_eval.py` is empty here. A
-#: landing that arrives rebased or squashed must re-stamp it at the landed sha.
-RUN_EVAL_CODE_ANCHOR = "985f44ea"
+#: It named `985f44ea`, the #4603 commit, stamped one commit later for the self-naming
+#: reason above; `git diff --name-only HEAD~1 HEAD -- eval/run_eval.py` is empty there. The
+#: sentence that closed it is the one that came due: the landing arrived on `main` SQUASHED,
+#: as `af6d7213`, which rewrote the sha both of that round's commits had carried. So
+#: `985f44ea` was reachable from nothing but that round's rotating ref — the exact #4580
+#: shape the node below refuses — and `test_the_executable_surface_anchor_is_reachable_from_main`
+#: was red on `main` with no round's diff present: measured in this round's worktree at base
+#: `af6d7213`, `pytest -m "not live_vault and not fault_injection"
+#: tests/test_eval_corpus_guard.py` returned 1 failed, 84 passed, that node alone.
+#:
+#: #4606 moves it a ninth time, and moves only the stamp. No line of `eval/run_eval.py`
+#: differs between `af6d7213` and this tree, so the executable projection, both corpus
+#: function bodies, and the file's 3,482-line total are all `af6d7213`'s own bytes — this
+#: round changes no harness code, it repairs the name that points at them. It names
+#: `af6d7213`, the landed commit itself, which is why this re-stamp is complete in ONE commit
+#: where the last three needed a second: a stamp naming an ALREADY-landed sha cannot be
+#: rewritten by the landing of the commit that carries it, which is what made the eighth
+#: stamp fragile. Verify: `git merge-base --is-ancestor af6d7213 HEAD` exits 0;
+#: `git show af6d7213:eval/run_eval.py` is byte-identical to this tree's copy;
+#: `git log -1 --format=%h af6d7213` prints the short sha this constant carries.
+RUN_EVAL_CODE_ANCHOR = "af6d7213"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
@@ -5389,6 +5406,71 @@ def test_the_executable_surface_anchor_is_reachable_from_main():
         f"`{RUN_EVAL_CODE_ANCHOR}` resolves but is not an ancestor of HEAD, so it exists "
         "only on a ref that the ledger rotates and `git gc` will eventually prune — "
         "re-stamp RUN_EVAL_CODE_ANCHOR at the landed commit that carries these bytes")
+
+
+def test_the_green_this_item_demands_is_a_pass_and_not_a_dodge():
+    """#4606 clause 2, pinned rather than asserted by the author: this file's node count is
+    its own, the named node carries no marker at all, and the gate's selection keeps every
+    node the file has.
+
+    Four ways to make a red node stop being red without fixing it, and the item forbids each:
+    `skip`, `skipif` or `xfail`; a `live_vault` or `fault_injection` mark, which the gate's
+    `-m "not live_vault and not fault_injection"` would drop; deleting or renaming the node;
+    and a file-wide mark, which drops all 86 at once. So the node checks three facts:
+
+    - the named def is parsed out of this file's own source and has NO decorator, so there is
+      no marker for the one node this item is about to hide behind;
+    - the gate's selection collects the same 86 nodes as no selection at all, which is what a
+      run that deselects nothing looks like — 86 is this file's full node count as of this
+      round and was 85 at the base the item was filed at, so a deletion moves the first
+      number and a deselected mark the second;
+    - the named node id is in the selected list, so "green" cannot mean "absent".
+
+    The two conditional `pytest.skip` calls elsewhere in this file are precondition readings
+    (an unreadable deployed collection list, an unreachable served count), not dodges, and
+    this node neither permits nor forbids them: it counts collection, which happens before
+    any of them could fire.
+    """
+    import ast
+
+    named = "test_the_executable_surface_anchor_is_reachable_from_main"
+    defs = [n for n in ast.parse(Path(__file__).read_text(encoding="utf-8")).body
+            if isinstance(n, ast.FunctionDef) and n.name == named]
+    assert len(defs) == 1, f"{named} is defined {len(defs)} times in this file"
+    assert not defs[0].decorator_list, (
+        f"{named} now carries {len(defs[0].decorator_list)} decorator(s): a skip, an xfail "
+        "or a mark the gate's selection drops would make this item green without its fix")
+
+    def _collected(*selection: str) -> int:
+        ran = subprocess.run(
+            [sys.executable, "-m", "pytest", "-q", "--collect-only", *selection,
+             str(Path(__file__))],
+            cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+        out = ran.stdout + ran.stderr
+        # `no tests collected` is the file-wide-marker case: every node deselected. Read it
+        # as zero so the mismatch message below names the count that moved, which is the
+        # fact a reader has to act on, rather than "reported no count".
+        if "no tests collected" in out:
+            return 0
+        found = re.search(r"(\d+) tests? collected", out)
+        assert found, f"collection under {selection or 'no selection'} printed no summary " \
+                      f"line at all: {out[-300:]}"
+        return int(found.group(1))
+
+    selected = _collected("-m", "not live_vault and not fault_injection")
+    assert (selected, _collected()) == (86, 86), (
+        "this file must collect 86 nodes and the gate's selection must keep all 86: a "
+        "deleted node moves the second number, a mark the selection drops moves the first, "
+        "and a node added here has to be counted here the way "
+        "`test_the_harness_stays_line_count_neutral_for_cited_prose` counts the harness")
+    listed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "--collect-only", "-m",
+         "not live_vault and not fault_injection", str(Path(__file__))],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=600)
+    assert f"::{named}" in listed.stdout, (
+        "the node this item names is not in the gate's selection, so a green file would "
+        "not be evidence that it passes")
+
 
 # ── #3505: `indexed_paths` prices the walk with a dated figure, not a memory ────
 #
