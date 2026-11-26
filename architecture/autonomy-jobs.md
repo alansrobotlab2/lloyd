@@ -989,10 +989,10 @@ asymmetry is the group's defining property, not an accident of scheduling.
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
 | #48 | daily | #24 | Name-shape clustering; **applies** the `CASE`/`PUNCT` shape merges unattended (`--apply --tiers CASE,PUNCT`). The apply is **one store transaction** — the aliases and every edge rewrite — followed by a fact-file half that runs outside that transaction and is **resumable**: each variant's dir outcome is journalled into the apply report as it completes, and a kill in the gap is finished by `--resume <the apply report>`, which replays only the pending `dir_operations`. Suffix pairs never apply on schedule: they need a unanimous definition-based verdict from the semantic gate *and* a human to pass the tier |
-| #67 | weekly | — | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. 8–20 min/run measured 2026-10-26 (its four runs in the store,
-507–1,176 s, against `timeout_seconds: 3000`). Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
+| #67 | weekly | — | LLM-judges the pairs string rules cannot — differently-spelled names, abbreviations, path variants. 9–17 min/run measured 2026-11-25 (its five runs in the store,
+547–989 s, against `timeout_seconds: 3000`). Writes `semantic-proposals-latest.jsonl` for #48's review list; strict guard rails downgrade questionable merges to alias-only |
 | #84 | daily | — | Fact-quality pass: reads the corrections log and recent-write drift, pairs contradictions, reports which claims an independent reason condemns |
-| #98 | daily | #24 | Repair the one fact-tag defect the rail can count: records stored with an empty `entity`, which silently drop out of entity recall while looking healthy in the file. Snapshots the facts tree with `cp -al` **first**, then `retag_untagged_facts.py --apply` — **entity tags only**, never a text, date or provenance edit — then reads the rail's own count back and prunes snapshots keeping the newest 7. **Filed and not yet armed:** `status: draft`, so no run exists and none of its numbers is a measurement. `preferred_hours: [3]` — one hour ahead of #60's `[4]`, both read as machine-local hours, which is the frame `_is_preferred_hour` compares — is what orders it against the report; its `depends_on: 24` is an ordering *statement* only, since #24 runs six times a day |
+| #98 | daily | #24 | Repair the one fact-tag defect the rail can count: records stored with an empty `entity`, which silently drop out of entity recall while looking healthy in the file. Snapshots the facts tree with `cp -al` **first**, then `retag_untagged_facts.py --apply` — **entity tags only**, never a text, date or provenance edit — then reads the rail's own count back and prunes snapshots keeping the newest 7. **Parked by ruling, not awaiting arming:** Alan ruled it spent on 2026-10-17 — a one-shot runner for a finite population — so `status: draft` is its terminal state, the `parked:` key (#3016) is what tells the watchdog that gap is a decision and not a stall, and none of its numbers is a measurement. `preferred_hours: [3]` — one hour ahead of #60's `[4]`, both read as machine-local hours, which is the frame `_is_preferred_hour` compares — is what orders it against the report; its `depends_on: 24` is an ordering *statement* only, since #24 runs six times a day |
 
 **#48 moves fact files unattended, and only for the tiers that are mechanical.**
 Step 3 of `skills/entity-resolution-sweep/SKILL.md` — the prompt the scheduler
@@ -1006,22 +1006,36 @@ CASE,PUNCT only (3 merges) … 4 edges rewritten, 3 aliases written, 3 dirs move
 Entities 11,992 → 11,989", and the four records before it end the same way — 30
 merges and 705 fact files moved, then 111, then 6 — each one naming the suffix
 queue it deliberately left alone. The apply still runs but the mechanical
-volume has run out: the ten apply reports to 2026-10-26 each carry
-`tiers_allowed: [CASE, PUNCT]` and 0–4 merges, 20 in total. What stays a human
+volume has run out: the ten mechanical apply reports to 2026-11-25 each carry
+`tiers_allowed: [CASE, PUNCT]` and 0–3 merges, 14 in total (the ten to
+2026-10-26 carried 0–4 and 20). What stays a human
 act is every merge that
 *claims a meaning*:
 `SUFFIX_SAFE` is never passed to `--apply` on schedule, so the gate-approved
 suffix queue waits on a person — 17 clusters on 2026-09-24, 19 on 2026-09-25,
-23 on 2026-10-26, growing while nobody runs them (that night's report named 40
-further suffix clusters the gate refused and 42 symbol-ambiguous ones, none of
-them a candidate for the schedule either). The waiting itself was the unwatched
+23 on 2026-10-26. It is not a queue nobody works: on 2026-11-19 an attended run
+applied 12 of them (`entity-merges-applied-2026-11-19-20261119T010911Z.json`:
+37 edges rewritten, 12 aliases, 12 dirs moved), the first apply of that tier on
+record, and 11 wait on 2026-11-26 against 45 gate-REFUSED of the 56 sharing the
+tier. The human route is fenced as well as documented now: `--apply` refuses
+without an explicit `--tiers` (#4197), and a `SUFFIX_SAFE` apply refuses a
+`--gate-cache` resolving outside `_pipeline/memory-graph/` — that 2026-11-19
+apply had judged 12 irreversible merges against a session scratchpad on tmpfs
+(#4369, exit 4). The waiting itself was the unwatched
 half until #3407: #60 now prints both queues — the approved suffix clusters and
 #67's `merge` proposals — with the age of each queue's oldest entry, on the
-Hygiene table a human already reads. It is a report and never an alarm: an
+Hygiene table a human already reads; #4228 gave the suffix half a dated review
+packet and a daily-note line, and #4369 added `suffix_applied` beside the waiting
+figure, because the row could print a queue but never an apply — the 12 merges
+committed at 01:09Z were still being printed at 13:00Z as waiting, OVERDUE.
+It is a report and never an alarm: an
 unapplied queue is the designed state of a human-only merge step, so alarming on
 it would fire every night and teach a reader to ignore the exit code.
-The age comes from the dated plan filename, because the gate cache
-`semantic-verdicts.jsonl` stores no timestamp at all. #67 proposes into a JSONL and stops; its own
+The suffix age still comes from the dated plan filename: the gate cache
+`semantic-verdicts.jsonl` began writing `judged_at` only with #4369, and 42 of
+its 575 rows carry one on 2026-11-26, so a cluster's first approval is still
+rebuildable only from the plans — while #67's queue ages on the `first_seen_at`
+its own proposal rows carry. #67 proposes into a JSONL and stops; its own
 `--apply` was retired 2026-09-04. #84 reports and writes nothing; applying is an
 operator act. The rails are the whole point of the arrangement, since the
 2026-08-22 wipe (12,131 edges) and the 2026-09-03 151-merge incident were both
@@ -1029,27 +1043,33 @@ unattended applies — and the symbol-variant names (`C` / `C++` / `C#`) that th
 first automatic apply merged, and a revert then undid, are why the line sits at
 *mechanical* rather than at *whatever the judge approves*.
 
-**#98 applies a repair, and the ruling that says the loop may run it is not this
-page's.** The defect it fixes is the one the measurement rail can count and no
+**#98 applies a repair, and the ruling about whether any loop may run it is not this page's.**
+The defect it fixes is the one the measurement rail can count and no
 job repaired: fact records stored with an empty `entity`, which fall out of
 entity recall while the file still looks healthy. `scripts/memory/retag_untagged_facts.py`
-has been able to repair them since 2026-10-13, and #98 has never run as of
-2026-10-26 (`select count(*) from runs where task_id=98` over
-`~/lloyd-data/workers.db` was 0 that day, as it was on 2026-10-16),
+has been able to repair them since 2026-10-13, and #98 has never run —
+nor may it (`select count(*) from runs where task_id=98` over
+`~/lloyd-data/workers.db` is still 0 on 2026-11-26, as it was on 2026-10-16),
 because its contract named an operator
 for `~/lloyd-data`; the owed-check ruling that closed
 #2686 on 2026-10-14 decided the remaining work was a scheduled run on this box
-rather than a human task, which is the same answer #990 gave #48 — but twelve
-days after that ruling the item is still `status: draft`, so the decision has no
-run behind it. The rail reads clean — 0 untagged of 173,733 records on
-2026-10-26 — but that reading is the attended act, not the schedule: the same row
+rather than a human task, which is the same answer #990 gave #48 — and three
+days later, on 2026-10-17, Alan ruled the job **spent, never to be armed**
+(round #2905, vault commit
+c6c3dd93), on the reasoning that it is a one-shot runner for a finite population
+of records that once had no `entity:` tag. `status: draft` is its terminal state,
+and the machine-readable `parked:` key (#3016) is what tells the fleet-watchdog
+stall scan and the Mission Control held bucket that this gap is a decision and
+not a stall. The rail reads clean — 0 untagged of 216,740 records on
+2026-11-26 (`kg_hygiene.scan()`) — but that reading is the attended act, not the
+schedule: the same row
 was ABOVE FLOOR at 3,206 records in 830 files on 2026-10-17 and 0 on 2026-10-18,
-and the artifact that only Step 2 of the skill produces,
+and the artifact that only Step 1 of the skill creates,
 `~/lloyd-data/_pipeline/vault-derived/facts-snapshot-20261017T143113Z`, dates
-from that afternoon. No job in the fleet repairs a record that loses its tag, so
-the draft status is what stands between the rail going red again and somebody
-sitting down to fix it. When it is armed the write
-joins the top tier, and it is bounded the way #48's is — **entity tags only**,
+from that afternoon. No job in the fleet repairs a record that loses its tag —
+that is the parked ruling's cost: an untagged record is repaired when a person
+decides to run the repair, and not before. When it is run the write
+is bounded the way #48's is — **entity tags only**,
 never a text, a date or a provenance field. Two duties are new to it and both
 live in `skills/retag-untagged-facts/SKILL.md` rather than here. It snapshots the
 facts tree with `cp -al` **before** the apply, because unlike #48 it has no
@@ -1060,9 +1080,12 @@ the repair renames a new inode over each file it touches — the property
 since a snapshot that silently tracked the write would be worse than none. And it
 prunes what it creates, keeping the newest 7, because no other mechanism bounds
 that root — `scripts/groundskeeper/retention-sweep.py` has no pattern for
-`facts-snapshot-*`, so an unpruned nightly snapshot of a tree measured at 46,109
-`.md` files on 2026-11-03 is an unbounded store opened on the very night a count
-was scheduled to come down. Re-derive the size — the tree is derived output the
+`facts-snapshot-*`, so an unpruned nightly snapshot of a tree measured at 51,481
+`.md` files on 2026-11-26 (44,227 on 2026-10-26, 46,109 on 2026-11-03) is an
+unbounded store opened on the very night a count
+was scheduled to come down — and because the parking ruling means Step 4 never
+runs on schedule, the one snapshot the 2026-10-17 attended repair left behind is
+still there 40 days on, 229 MB on disk, bounded by nothing (#4592). Re-derive the size — the tree is derived output the
 nightly pipeline rewrites, and the skill's copy of the count was twelve days stale
 when #3408 was filed — with
 `cd ~/lloyd-data/_pipeline/vault-derived && find facts -name '*.md' | wc -l`.
