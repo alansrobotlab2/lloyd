@@ -3098,6 +3098,8 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text(json.dumps(out, indent=2, default=str))
     print(f"[info] wrote {out_path}")
+    # #4297: a refused gold-side ceiling reaches the daily note, once per corpus move.
+    escalate_refused_ceiling(summary["overall"], queries, baseline=out_path.name)
     print(_corpus_line(corpus))
     # Printed beside the corpus line because the nightly's report is written from
     # this output. An unrun leg says why rather than reading as a 0.000 (#4404).
@@ -3212,6 +3214,87 @@ def _matched_suffix(o: dict, metric: str) -> str:
         return ""
     return (f" matched: score={pop.get('score')} ceiling={pop.get('ceiling')}"
             f" n={pop.get('n')}")
+
+
+
+# ── #4297: the refused gold-side ceiling, escalated to the daily note ────────
+
+#: How many days of daily notes the dedup reads back. A refusal stands until a person
+#: re-runs the labeler, and the nightly runs every morning, so a key read off today's
+#: note alone would post one line per night of the gap — the 2026-11-10/12/14 gap was
+#: three refused artifacts and nobody told. A month covers every gap on record (the
+#: longest, 2026-09-23..28, was six nights); a refusal older than that is re-announced
+#: once, which is a reminder rather than a flood.
+CEILING_ESCALATION_LOOKBACK_DAYS = 30
+
+#: The head of the daily-note line, so a reader and a test can find the class.
+CEILING_ESCALATION_HEAD = "[retrieval-eval] gold-side ceiling refused"
+
+
+def _newest_ceiling_artifact_sha() -> str | None:
+    """`corpus.labels_sha256` of the newest label-agreement artifact, or None when
+    there is no artifact or it cannot be read. A read, never a load: the loader is what
+    refused it, and the fingerprint is the diagnosis the refusal already printed."""
+    try:
+        path = lac.newest_artifact()
+        if path is None:
+            return None
+        art = json.loads(Path(path).read_text(encoding="utf-8"))
+        return (art.get("corpus") or {}).get("labels_sha256")
+    except Exception:
+        return None
+
+
+def escalate_refused_ceiling(overall: dict, queries: list[dict], *,
+                             baseline: str | None = None,
+                             now: datetime | None = None) -> bool:
+    """When `overall.ceiling.kind` is null, append ONE line to today's daily note.
+
+    The consumer `summary.overall.ceiling.remediation` (#4050) never had: the ceiling sat
+    refused for three published nightlies (2026-11-10/12/14) while task #82 recorded
+    `success`, and nothing reached a file a person reads. This run is the node's only
+    consumer, and the line goes through `app.autonomy.append_daily_alert_line`, the shared
+    writer — no other vault write. It names the artifact's `labels_sha256`, the live
+    corpus `labels_sha256` (the same `lac.labels_sha256(queries)` the loader compared)
+    and `ceiling.remediation.command`, verbatim.
+
+    Dedup key: the corpus `labels_sha256`. A refused run whose corpus fingerprint already
+    appears in today's note or in any of the previous `CEILING_ESCALATION_LOOKBACK_DAYS`
+    notes appends nothing, so a multi-night refusal on one corpus is one line and a corpus
+    move is a second. The gate's paired runs and a person's ad-hoc run hit the same key.
+
+    Nothing about the run changes: the ceiling, the exit code and the remediation node
+    stay exactly as they were, and every failure here is a False, never a raise — a
+    nightly must still write its numbers when the note cannot be read.
+    """
+    ceil = overall.get("ceiling")
+    if not isinstance(ceil, dict) or ceil.get("kind") is not None:
+        return False
+    try:
+        from datetime import timedelta
+        from zoneinfo import ZoneInfo
+
+        from app.autonomy import _daily_note_dir, append_daily_alert_line
+
+        corpus_sha = lac.labels_sha256(queries)
+        today = (now or datetime.now(ZoneInfo("America/Los_Angeles"))).astimezone(
+            ZoneInfo("America/Los_Angeles")).date()
+        notes = _daily_note_dir()
+        for back in range(CEILING_ESCALATION_LOOKBACK_DAYS + 1):
+            note = notes / f"{(today - timedelta(days=back)).isoformat()}.md"
+            if note.exists() and corpus_sha in note.read_text(encoding="utf-8"):
+                return False
+        command = (ceil.get("remediation") or {}).get("command")
+        line = (f"{CEILING_ESCALATION_HEAD}"
+                f"{f' in {baseline}' if baseline else ''} — every `*_normalized` is null "
+                f"until it is re-based. artifact labels_sha256 "
+                f"{_newest_ceiling_artifact_sha() or 'none'}, corpus labels_sha256 "
+                f"{corpus_sha}; remediation (person-authorised, not the nightly's to "
+                f"take): {command}")
+        return bool(append_daily_alert_line(line))
+    except Exception as exc:  # noqa: BLE001 — a note is never worth the nightly
+        print(f"[warn] refused-ceiling escalation not written: {exc}", file=sys.stderr)
+        return False
 
 
 if __name__ == "__main__":

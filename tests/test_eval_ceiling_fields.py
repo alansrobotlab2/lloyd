@@ -1730,12 +1730,14 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
 
     #4285 took the third road: its edits above `main` are line-for-line replacements and
     its new helpers (`ceiling_population` and its three companions) are appended after
-    `main`, so no cited line moved and only the total below did (3,131 → 3,218).
+    `main`, so no cited line moved and only the total below did (3,131 → 3,218). #4297
+    did the same with the refused-ceiling escalation: one call below the baseline write
+    (line 3097, the last line cited) and the function after `main` (3,218 → 3,301).
     """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3218, (
-        f"eval/run_eval.py is {len(lines)} lines, not the 3,218 #4285 left it at by "
-        "appending after `main` (every `architecture/` line citation and this list were "
+    assert len(lines) == 3301, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 3,301 #4285 and #4297 left it "
+        "at by appending after `main` (every `architecture/` line citation and this list were "
         "re-numbered to 3,131 on 2026-11-25, when #4399's "
         "skills_search arm grew it from the 2,975 #4404's episodic-floor leg had reached "
         "on 2026-11-20 (from 2,735 before that) — behaviour, not prose, so the rule was "
@@ -2054,3 +2056,125 @@ def test_the_guard_still_withholds_a_matched_pair_whose_two_ns_differ():
     del fields["ceiling_notes"]
     ev._normalize_against_ceiling(fields, _scored(66, 79))
     assert fields["entity_hit_rate_normalized"] == round(0.9 / 0.6, 4)
+
+
+# ── #4297: a refused gold-side ceiling reaches the daily note, once per corpus ──
+
+def _la_today():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    return datetime.now(ZoneInfo("America/Los_Angeles")).date()
+
+
+@pytest.fixture
+def daily_notes(tmp_path, monkeypatch):
+    """Today's note in a scratch dir of its own, with the witness ledger beside it (both
+    or neither: `app.autonomy._witness_daily_note_append` refuses the half pair)."""
+    notes = tmp_path / "daily"
+    notes.mkdir()
+    monkeypatch.setenv("LLOYD_DAILY_NOTE_DIR", str(notes))
+    monkeypatch.setenv("LLOYD_DAILY_NOTE_APPEND_LEDGER", str(tmp_path / "appends.jsonl"))
+    return notes
+
+
+def _refused_overall(tmp_path, monkeypatch, corpus=None) -> dict:
+    """The 2026-11-14 shape: an artifact on disk whose gold moved under it."""
+    art = _synthetic_artifact(entity_labels="moved")
+    art_dir = tmp_path / "label-agreement"
+    _write(art, art_dir)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(art_dir))
+    corpus = corpus or _synth_corpus()
+    fields = ev.ceiling_context(corpus)
+    assert fields["ceiling"]["kind"] is None, "the fixture must be a refused ceiling"
+    records = [dict(r, id=q["id"]) for r, q in
+               zip(_printed_records(len(corpus), 2), corpus)]
+    summary = ev.summarize(records)
+    summary["overall"].update(fields)
+    return summary["overall"]
+
+
+def _escalation_lines(notes: Path) -> list[str]:
+    return [ln for f in sorted(notes.glob("*.md"))
+            for ln in f.read_text(encoding="utf-8").splitlines()
+            if ev.CEILING_ESCALATION_HEAD in ln]
+
+
+def test_a_refused_ceiling_appends_one_daily_note_line_naming_both_fingerprints(
+        tmp_path, monkeypatch, daily_notes):
+    """Clauses 1 and 2: one line, through the shared writer and nothing else, carrying
+    the artifact fingerprint, the corpus fingerprint and the remediation command."""
+    import app.autonomy as autonomy
+
+    overall = _refused_overall(tmp_path, monkeypatch)
+    calls: list[str] = []
+    real = autonomy.append_daily_alert_line
+
+    def spy(body):
+        calls.append(body)
+        return real(body)
+
+    monkeypatch.setattr(autonomy, "append_daily_alert_line", spy)
+    assert ev.escalate_refused_ceiling(overall, _synth_corpus(),
+                                       baseline="nightly-x.json") is True
+    assert len(calls) == 1, calls
+    assert [p.name for p in daily_notes.iterdir()] == [f"{_la_today().isoformat()}.md"], (
+        "the escalation wrote somewhere other than today's note")
+    lines = _escalation_lines(daily_notes)
+    assert len(lines) == 1, lines
+    line = lines[0]
+    assert "artifact labels_sha256 deadbeefdeadbeef" in line, line
+    assert f"corpus labels_sha256 {lac.labels_sha256(_synth_corpus())}" in line, line
+    assert overall["ceiling"]["remediation"]["command"] == lac.LABELER_REMEDIATION_COMMAND
+    assert lac.LABELER_REMEDIATION_COMMAND in line, line
+    assert "nightly-x.json" in line
+
+
+def test_one_corpus_is_one_line_and_a_corpus_move_is_a_second(
+        tmp_path, monkeypatch, daily_notes):
+    """Clause 3, across nights: the key is the corpus `labels_sha256`, read back from
+    today's note and the notes before it, so a second refused night on the same corpus
+    adds nothing — not even a note — and a moved corpus adds exactly one line."""
+    from datetime import timedelta
+
+    overall = _refused_overall(tmp_path, monkeypatch)
+    corpus_sha = lac.labels_sha256(_synth_corpus())
+    # Last night's run already told someone, in last night's note.
+    yesterday = daily_notes / f"{(_la_today() - timedelta(days=1)).isoformat()}.md"
+    yesterday.write_text(f"- 06:04 PST — {ev.CEILING_ESCALATION_HEAD} — corpus "
+                         f"labels_sha256 {corpus_sha}\n", encoding="utf-8")
+    today = daily_notes / f"{_la_today().isoformat()}.md"
+    assert ev.escalate_refused_ceiling(overall, _synth_corpus()) is False
+    assert not today.exists(), "a second refused night on one corpus created a note"
+
+    yesterday.unlink()
+    assert ev.escalate_refused_ceiling(overall, _synth_corpus()) is True
+    assert ev.escalate_refused_ceiling(overall, _synth_corpus()) is False
+    assert len(_escalation_lines(daily_notes)) == 1
+
+    moved = _synth_corpus()
+    moved[0] = dict(moved[0], expect_entities=["Inner Voice"])
+    assert lac.labels_sha256(moved) != corpus_sha
+    assert ev.escalate_refused_ceiling(overall, moved) is True
+    lines = _escalation_lines(daily_notes)
+    assert len(lines) == 2 and lac.labels_sha256(moved) in lines[1], lines
+
+
+def test_a_measured_ceiling_appends_nothing_and_leaves_the_note_alone(
+        tmp_path, monkeypatch, daily_notes):
+    """Clause 4: neither creates today's note nor modifies an existing one."""
+    art = _synthetic_artifact()
+    _write(art, tmp_path / "label-agreement")
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path / "label-agreement"))
+    fields = ev.ceiling_context(_synth_corpus())
+    assert fields["ceiling"]["kind"] == lac.CEILING_KIND
+    today = daily_notes / f"{_la_today().isoformat()}.md"
+    assert ev.escalate_refused_ceiling(fields, _synth_corpus()) is False
+    assert not today.exists()
+    today.write_text("- 05:00 PST — something else\n", encoding="utf-8")
+    before = (today.read_bytes(), today.stat().st_mtime_ns)
+    assert ev.escalate_refused_ceiling(fields, _synth_corpus()) is False
+    assert (today.read_bytes(), today.stat().st_mtime_ns) == before
+    # `summarize` alone (no ceiling computed) is not a refusal either.
+    assert ev.escalate_refused_ceiling({"ceiling": None}, _synth_corpus()) is False
+    assert (today.read_bytes(), today.stat().st_mtime_ns) == before
+
