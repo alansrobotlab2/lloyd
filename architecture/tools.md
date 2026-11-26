@@ -39,10 +39,10 @@ token-bearing `tools/list`, which agree exactly (109 in the tree plus the
 Thunderbird bridge's 49, every one of them under a Lloyd `email_`/`calendar_` name
 since #4433 renamed the nine that had been arriving as `tb_*`). The model is
 shown fewer: `_BackgroundTaskDrain` is never advertised, `recall_observation` is
-offered only to a turn whose relief writes observation stubs (#1481), and the four
-`discord_*` tools sit in `disabled_tools`, so a chat turn sees 152 on config.yaml
-alone, and 137 on this box, where the live override disables fifteen mail verbs
-more (§8). Twelve were retired on
+offered only to a turn whose relief writes observation stubs (#1481), and
+config.yaml's tracked `disabled_tools` removes nineteen more — the four `discord_*`
+tools and fifteen Thunderbird mail verbs (§8) — so a chat turn sees 137, on a fresh
+clone and on this box alike. Twelve were retired on
 2026-09-23 as duplicates of, or subsumed by, a tool that stays: `fact_check`
 (`fact_resolve`), `fact_profile` (`fact_get`, which took its cap and `query`
 ranking), `browser_type` (`browser_fill(keystrokes=true)`), #376's
@@ -917,13 +917,14 @@ comparison against a real box's two files.
 
 - Server level: `mcp_servers.<name>.enabled: false`
 - Tool level: `mcp_servers.<name>.disabled_tools: [bare_tool_name, ...]`.
-  In config.yaml today: the four `discord_*` tools. The live override on this
-  box carries fifteen more — the Thunderbird mail mutators, `email_delete` and
-  `email_empty_trash` among them — which is why a chat turn resolves to 137
-  tools here against the 152 config.yaml implies (measured 2026-11-20 against the
-  158 of the intro: minus the internal drain, minus the conditional
-  `recall_observation`, minus the four `discord_*`, minus the fifteen), and why
-  a rebuild boots mail mutation this machine has switched off (#3128).
+  In config.yaml today: nineteen — the four `discord_*` tools and the fifteen
+  Thunderbird mail verbs, `email_delete` and `email_empty_trash` among them, tracked
+  since `abd0df13` (#3128, #3382) so a rebuild with no override file does not boot
+  mail mutation. A chat turn resolves to 137 tools (the 158 of the intro, minus the
+  internal drain, minus the conditional `recall_observation`, minus the nineteen),
+  and `tests/test_tools_md_inventory_parity.py` recomputes that figure from the
+  served surface and config.yaml. `tests/test_tool_overrides.py::test_config_yaml_tracks_every_mail_mutator`
+  pins the fifteen from config.yaml alone.
 
 config.yaml holds the hand-edited defaults and is read-only at boot. The Tools
 page writes `data/tool_overrides.yaml`, which is merged over it
@@ -933,8 +934,8 @@ automod gate and promoter both refuse a dirty tree. So a fresh clone boots on
 config.yaml alone, and config.yaml has to describe what is actually served. The
 merge warns in both directions, and on every key it honours: when the override
 re-enables a tool config.yaml disables, when it disables a tool the tracked file
-does not list (the direction this box sits in — the fifteen above are exactly
-this warning's subject), when the two disagree on a server's `enabled` or on
+does not list (what this box did with the fifteen mail verbs until config.yaml
+carried them), when the two disagree on a server's `enabled` or on
 `workers.enabled`, and when a `tool_search` key differs from the tracked value.
 Agreement stays silent. The same comparison, run outside the suite, is
 `python -m scripts.maintenance.sync_tool_overrides --check` — the only way to ask

@@ -522,3 +522,66 @@ def test_a_workers_enabled_disagreement_is_reported(tmp_path, capsys):
                  served={"workers": {"enabled": False}})
     assert sync(root, check=True) == 1
     assert "workers.enabled" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# A rebuild must not boot mail mutation this machine switched off (#3128, #3382)
+# ---------------------------------------------------------------------------
+
+#: The fifteen verbs `abd0df13` moved from the box's override into the tracked
+#: default. Written out, never derived from a mutator predicate: three of them
+#: (`email_account_access`, `email_accounts`, `email_list_filters`) are read-only in
+#: `agent_mcp/annotations.py`, so a predicate-driven list comes out with twelve.
+TRACKED_MAIL_MUTATORS = (
+    "email_account_access",
+    "email_accounts",
+    "email_apply_filters",
+    "email_create_filter",
+    "email_create_folder",
+    "email_delete",
+    "email_delete_filter",
+    "email_delete_folder",
+    "email_empty_junk",
+    "email_empty_trash",
+    "email_list_filters",
+    "email_move_folder",
+    "email_rename_folder",
+    "email_reorder_filters",
+    "email_update_filter",
+)
+
+
+def _untracked_mail_mutators(cfg: dict) -> list[str]:
+    block = ((cfg.get("mcp_servers") or {}).get(SERVER) or {})
+    return sorted(set(TRACKED_MAIL_MUTATORS) - set(block.get("disabled_tools") or []))
+
+
+def _tracked_config() -> dict:
+    """config.yaml and nothing else — never `data/tool_overrides.yaml`, which is
+    gitignored and absent on exactly the checkout this guards (a fresh clone)."""
+    return yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
+
+
+def test_config_yaml_tracks_every_mail_mutator():
+    """`app/config.py::_merge_tool_overrides` overwrites `disabled_tools` with the
+    override's list wholesale, so this is inert on a box that has the override and
+    decisive on one that does not — which is why it reads the tracked file alone and
+    has no early return for a missing override."""
+    assert len(set(TRACKED_MAIL_MUTATORS)) == 15
+    missing = _untracked_mail_mutators(_tracked_config())
+    assert not missing, (
+        f"config.yaml omits {missing} from mcp_servers.{SERVER}.disabled_tools, so a "
+        f"rebuild with no override file boots them live")
+
+
+def test_dropping_any_one_mail_mutator_from_config_yaml_is_caught():
+    """The anti-vacuity half: each of the fifteen, removed alone from the tracked
+    list, is the one name the check above reports."""
+    import copy
+
+    cfg = _tracked_config()
+    for name in TRACKED_MAIL_MUTATORS:
+        dropped = copy.deepcopy(cfg)
+        tools = dropped["mcp_servers"][SERVER]["disabled_tools"]
+        tools.remove(name)
+        assert _untracked_mail_mutators(dropped) == [name], name

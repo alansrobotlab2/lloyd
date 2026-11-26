@@ -610,3 +610,100 @@ def test_a_stale_row_count_in_section11_is_reported(page_text):
     assert any("40" in d for d in _bridge_inventory_defects(planted)), (
         "§11 could go back to stating 40 while the map carries 49 and the "
         "regeneration would freeze nine rows without a sound")
+
+
+# ── The chat-turn count, §intro and §8 (#3382) ───────────────────────────────
+#
+# Until config.yaml tracked the fifteen mail verbs the page carried two counts — one
+# "on config.yaml alone" and one "on this box" — because the gitignored override
+# disabled fifteen tools the tracked file did not. With the fifteen tracked
+# (`abd0df13`) there is one count, and it is a derived figure: the served surface,
+# minus the tools the harness never advertises, minus what config.yaml's tracked
+# `disabled_tools` removes from it. These nodes recompute it rather than trust the
+# prose.
+
+#: `… a chat turn sees 137 …` / `… a chat turn resolves to 137 tools …`
+_CHAT_COUNT = re.compile(r"chat\s+turn\s+(?:sees|resolves\s+to)\s+(\d+)")
+#: The intro's surface total, `**158 tools, 29 modules**`.
+_SURFACE_TOTAL = re.compile(r"^\*\*(\d+) tools, \d+ modules\*\*", re.M)
+_SECTION8 = re.compile(r"^## 8\. Enable and disable\n(.*?)^## 9\. ", re.S | re.M)
+#: Served by `list_tools()` but never put in a chat turn's `tools` array: the internal
+#: drain is filtered out of every advertisement, and `recall_observation` is offered
+#: only to a turn whose relief writes observation stubs (#1481).
+_NEVER_IN_A_CHAT_TURN = {"_BackgroundTaskDrain", "recall_observation"}
+#: The split the page used to print; none of it may come back (#3382 clause 2).
+_RETIRED_SPLIT_PHRASES = ("141 on config.yaml alone", "carries fifteen more",
+                          "the direction this box sits in")
+
+
+def _tracked_disabled() -> set[str]:
+    import yaml
+
+    cfg = yaml.safe_load((ROOT / "config.yaml").read_text(encoding="utf-8")) or {}
+    servers = cfg.get("mcp_servers") or {}
+    return {name for block in servers.values() for name in (block or {}).get(
+        "disabled_tools") or []}
+
+
+def _chat_count_defects(page_text: str, served: dict[str, list[str]],
+                        exempt: set[str]) -> list[str]:
+    """Every way the page's chat-turn count can be wrong, as named defects.
+
+    The served surface is `list_tools()` with a zero-export module's §6 rows standing
+    in for its tools — in a worktree the Thunderbird bridge serves nothing, and it is
+    exactly the module the fifteen disabled mail verbs belong to, so dropping it would
+    compare a 109-tool surface against a 158-tool box. Where the bridge is loaded the
+    substitution is a no-op and the figure is the wire's.
+    """
+    defects: list[str] = []
+    intro = page_text.split("\n## 1. The shape", 1)[0]
+    m8 = _SECTION8.search(page_text)
+    if not m8:
+        return ["architecture/tools.md has no `## 8. Enable and disable` section"]
+    counts: dict[str, list[int]] = {
+        "intro": [int(n) for n in _CHAT_COUNT.findall(intro)],
+        "§8": [int(n) for n in _CHAT_COUNT.findall(m8.group(1))],
+    }
+    for where, found in counts.items():
+        if len(found) != 1:
+            defects.append(f"{where} states {len(found)} chat-turn counts {found}; "
+                           "the page must print exactly one")
+    for phrase in _RETIRED_SPLIT_PHRASES:
+        if phrase in page_text:
+            defects.append(f"the retired config-alone/on-this-box split survives: {phrase!r}")
+
+    inv = _inventory(page_text)
+    names = {n for mod, ns in served.items() if mod not in exempt for n in ns}
+    names |= {n for mod, e in inv.items() if mod in exempt for n in e["rows"]}
+    total = _SURFACE_TOTAL.search(page_text)
+    if not total or int(total.group(1)) != len(names):
+        defects.append(f"the intro's surface total {total and total.group(1)!r} is not "
+                       f"the {len(names)} tools served (zero-export modules read from §6)")
+    advertised = names - _NEVER_IN_A_CHAT_TURN - _tracked_disabled()
+    for where, found in counts.items():
+        for n in found:
+            if n != len(advertised):
+                defects.append(
+                    f"{where} says a chat turn sees {n}; the served surface "
+                    f"({len(names)}) minus {sorted(_NEVER_IN_A_CHAT_TURN & names)} minus "
+                    f"config.yaml's tracked disabled_tools leaves {len(advertised)}")
+    return defects
+
+
+def test_the_page_prints_one_chat_turn_count_derived_from_config_yaml(page_text, served,
+                                                                     exempt):
+    assert _chat_count_defects(page_text, served, exempt) == []
+
+
+def test_a_stale_or_split_chat_turn_count_is_reported(page_text, served, exempt):
+    """The planted half: the node above is only worth something if these go red."""
+    (n,) = _CHAT_COUNT.findall(page_text.split("\n## 1. The shape", 1)[0])
+    off_by_one = _planted(page_text, f"a chat turn sees {n}", f"a chat turn sees {int(n) + 1}")
+    assert any("intro says a chat turn sees" in d
+               for d in _chat_count_defects(off_by_one, served, exempt))
+
+    split = _planted(page_text, f"a chat turn sees {n}",
+                     f"a chat turn sees {n}, and 141 on config.yaml alone, a chat turn sees 152")
+    defects = _chat_count_defects(split, served, exempt)
+    assert any("141 on config.yaml alone" in d for d in defects), defects
+    assert any("intro states 2 chat-turn counts" in d for d in defects), defects
