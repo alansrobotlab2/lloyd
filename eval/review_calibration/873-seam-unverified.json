@@ -1,0 +1,29 @@
+{
+  "name": "873-seam-unverified",
+  "item_id": 873,
+  "round_id": "SM_20260912_015449",
+  "parent": "2191ddf2d63679d3fea6831a105fef202806ab8b",
+  "commit": "dbe785c71c7189c066cbe3a0def6f36954e3f34e",
+  "changed_paths": [
+    "scripts/knowledge-frontmatter-backfill.py",
+    "scripts/vault/knowledge_log.py",
+    "tests/test_knowledge_log_contract.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "cause_class": "real_unmet_work",
+  "corpus_case_id": "unmet-SM_20260912_015449",
+  "note": "Derived from cause_corpus.jsonl row `unmet-SM_20260912_015449` (real_unmet_work). Ledger: `review` row 2026-09-12T02:11:40Z for SM_20260912_015449 attempt 1 at head dbe785c7 answered `retry` with no clause named, the refusal carried by its blocking findings, which is what `expect` records (the corpus row's `verdict_given`). The work was not finished at dbe785c7: the round changed the diff before its next review (dbe785c7..cb490c65: 1 file changed, 136 insertions(+), 33 deletions(-)) and only that later head graded `pass` and landed (`promoted` 2026-09-12T02:24:42Z, cb490c65). `honesty_finding` is false because the expectation is the clause verdict, not any one finding text.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "Round SM_20260912_015449 landed: knowledge/_log.md repaired (11 ISO `## YYYY-MM-DD` headings, newest-first, the 06-18/06-19 pair split, no entry lost) and the append contract given one owner \u2014 KNOWLEDGE_SCHEMA.md names nightly-reflection-knowledge-write, the four dead bracketed templates are deleted, and appends go through scripts/vault/knowledge_log.py, which inserts newest-first, refuses a value"
+  }
+}

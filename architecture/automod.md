@@ -2422,6 +2422,10 @@ purpose: a backfilled verdict measures the grader, and `implement_outcomes`
 must never read it as a verdict on the round. Items confirmed before clauses
 existed mostly wrote `(a) … (b) …` inline; `acceptance_clauses_of` splits
 those, so #544's prose reads as the five clauses its reviewer graded.
+Since #4281 the top level holds 16 cases, and every one carries the
+`cause_class` of the `cause_corpus.jsonl` row it was derived from, named in its
+`corpus_case_id`; `eval/review_calibration/README.md` "The cause-labelled cases"
+has the table and the rule each `expect` was derived by.
 
 **The two errors, measured apart (2026-11-22).** Those four cases were confirmed
 by the loop that runs the grader, and two were re-marked toward its answer, so

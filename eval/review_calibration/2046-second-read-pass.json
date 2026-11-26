@@ -1,0 +1,32 @@
+{
+  "name": "2046-second-read-pass",
+  "item_id": 2046,
+  "round_id": "SM_20261002_065500",
+  "parent": "9b021485602e94d85423e85860e8283ae5b90944",
+  "commit": "d024507b928243a45fb5ce05aab5259f6c2e2440",
+  "changed_paths": [
+    "scripts/automod/vault_round.py",
+    "tests/test_automod_vault_round.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "cause_class": "grader_wrong_on_approved_work",
+  "corpus_case_id": "approved-SM_20261002_065500",
+  "note": "Derived from cause_corpus.jsonl row `approved-SM_20261002_065500` (grader_wrong_on_approved_work). Ledger: `review` row 2026-10-02T07:36:59Z for SM_20261002_065500 attempt 2 at head d024507b answered `retry`; a second `review` row 2026-10-02T07:42:43Z graded the same head `pass` (every clause met). `promoted` 2026-10-02T07:43:49Z landed 57433a18, whose tree is byte-identical to d024507b (`git diff --quiet d024507b 57433a18` exits 0); its `settled` row (2026-10-02T08:12:03Z) is in the ledger and `state.reverted_commits` over live + every archive does not contain it, so the landing was never rolled back. The work is what landed, so `expect` is `pass` with no unmet clause: the refusal is the grader error the corpus row names. Range 9b021485..d024507b: the base the gate's preflight rebased onto before this review.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [
+      2047
+    ],
+    "spawned": [
+      2047
+    ],
+    "summary": "Landed commit d024507b on round SM_20261002_065500; gate PASSED with review 6 met of 6 and amendment 6 ratified. _guards_row (scripts/automod/vault_round.py:673-705) is additive: workers copied whenever the report named it (serial probe states 1), parallel_retry as {ran, failed-as-node-count, workers} only when a re-ask ran, parallel_only_failures capped at the same [:10] as nodes with parallel_on"
+  }
+}

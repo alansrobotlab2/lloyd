@@ -23,6 +23,7 @@
     "workers/pool.py"
   ],
   "commit": "0f019f902d045806afde30fffc336cdec32ef775",
+  "corpus_case_id": "calibrate-544-first-cut",
   "expect": {
     "honesty_finding": true,
     "kind": "retry",

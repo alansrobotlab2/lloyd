@@ -1,0 +1,27 @@
+{
+  "name": "3697-second-read-pass",
+  "item_id": 3697,
+  "round_id": "SM_20261102_124159",
+  "parent": "2bad16e91f6087d7bc2df9b08c5e214e820886fd",
+  "commit": "0af2ec0b9638a061bcb9c44b4eb37be71686fa67",
+  "changed_paths": [
+    "tests/test_guard_arm_matrix.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "cause_class": "grader_wrong_on_approved_work",
+  "corpus_case_id": "approved-SM_20261102_124159",
+  "note": "Derived from cause_corpus.jsonl row `approved-SM_20261102_124159` (grader_wrong_on_approved_work). Ledger: `review` row 2026-11-02T13:31:34Z for SM_20261102_124159 attempt 1 at head 0af2ec0b answered `retry`; a second `review` row 2026-11-02T13:34:24Z graded the same head `pass` (every clause met). `promoted` 2026-11-02T13:34:42Z landed 6e2c3d71, whose tree is byte-identical to 0af2ec0b (`git diff --quiet 0af2ec0b 6e2c3d71` exits 0); its `settled` row (2026-11-02T13:36:47Z) is in the ledger and `state.reverted_commits` over live + every archive does not contain it, so the landing was never rolled back. The work is what landed, so `expect` is `pass` with no unmet clause: the refusal is the grader error the corpus row names. Range 2bad16e9..0af2ec0b: the round_start base.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "Round SM_20261102_124159, head 0af2ec0b, one file in scope (tests/test_guard_arm_matrix.py, +113/-8). The zero-slack floor `out.stdout.count(...) >= 10` in test_the_report_surface_prints_the_envelopes_on_demand is replaced by a registry-derived identity check read off the subprocess stdout and compared against worker_source_names(ROOT) - SOURCE_CAPABILITIES, exactly-once, plus two forging nodes (a"
+  }
+}

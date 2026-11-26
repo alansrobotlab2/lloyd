@@ -1,0 +1,29 @@
+{
+  "name": "504-missing-path-cite",
+  "item_id": 504,
+  "round_id": "SM_20260914_100744",
+  "parent": "282a628021ed55d6065135983b3e12c387bcb865",
+  "commit": "0a9d889e4f0509054e10ca2abbfb9fb29ae181d0",
+  "changed_paths": [
+    "agent_mcp/vault.py",
+    "tests/test_doc_candidate_pool.py",
+    "tests/test_qmd_query_shape.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "cause_class": "grader_defect",
+  "corpus_case_id": "cite-SM_20260914_100744-c2-missing_path",
+  "note": "Derived from cause_corpus.jsonl row `cite-SM_20260914_100744-c2-missing_path` (grader_defect). Ledger: `review` row 2026-09-14T10:38:51Z for SM_20260914_100744 attempt 1 at head 0a9d889e answered `retry`; the corpus row proves the refusal's citation fails against the graded tree (`review_cause.legality` re-checks it: missing_path), so the review was wrong and `expect` is what the work deserved: `pass`, no unmet clause. PROVISIONAL because the ledger does not settle that for this tree: what landed (`promoted` 2026-09-14T10:53:05Z, fadbc235, settled and never rolled back) is a later head, 0a9d889e..fadbc235 = 2 files changed, 100 insertions(+), 18 deletions(-), so a landing vouches for fadbc235, not for 0a9d889e. Confirm by a diff read of 282a6280..0a9d889e against the item's clauses, then drop the flag.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "kg-maintenance-tasks: doc_hit true, first_doc_rank 17 (pinned corpus, rank 13 live), doc_hit_rate 1.00, no other query lost its doc leg, expect_docs untouched."
+  }
+}

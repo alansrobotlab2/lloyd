@@ -1,0 +1,33 @@
+{
+  "name": "1880-outside-tree-cite",
+  "item_id": 1880,
+  "round_id": "SM_20260930_060244",
+  "parent": "35bfbbb7bc46b96fb61bcb13d45623428faa3e3d",
+  "commit": "85e0135f5e504e982286cfad60512c59658f9500",
+  "changed_paths": [
+    "app/component_manifest.py",
+    "app/routers/health.py",
+    "tests/test_component_manifest.py",
+    "tests/test_component_manifest_prefetch_seam.py",
+    "tests/test_component_manifest_retention.py",
+    "tests/test_component_manifest_send_sites.py",
+    "tests/test_health_manifest_stats.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "cause_class": "graded_wrong_input",
+  "corpus_case_id": "cite-SM_20260930_060244-c6-path_outside_graded_tree",
+  "note": "Derived from cause_corpus.jsonl row `cite-SM_20260930_060244-c6-path_outside_graded_tree` (graded_wrong_input). Ledger: `review` row 2026-09-30T06:20:20Z for SM_20260930_060244 attempt 1 at head 85e0135f answered `retry`; the corpus row proves the refusal's citation fails against the graded tree (`review_cause.legality` re-checks it: path_outside_graded_tree), so the review was wrong and `expect` is what the work deserved: `pass`, no unmet clause. PROVISIONAL because the ledger does not settle that for this tree: what landed (`promoted` 2026-09-30T06:35:22Z, 8c60092c, settled and never rolled back) is a later head, 85e0135f..8c60092c = 3 files changed, 130 insertions(+), 47 deletions(-), so a landing vouches for 8c60092c, not for 85e0135f. Confirm by a diff read of 35bfbbb7..85e0135f against the item's clauses, then drop the flag. The item's front matter now carries 5 acceptance clauses where this review graded 6 (amended after the round), a second reason the expectation is not settled.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "Round SM_20260930_060244 landed on a passed gate at head f559b3ca; gate.json reads \"ok\": true with review \"6 met of 6 clause(s)\", tests 14244 passed / 1 xfailed / 38 skipped, canary_boot booted with 107 tools and canary_smoke a real turn in 5.8s. note_components now stores the {sha256, bytes} pair per component instead of dict(components), one reader (_digest_pair) accepts raw text from send sites"
+  }
+}

@@ -1,0 +1,30 @@
+{
+  "name": "460-outside-tree-cite",
+  "item_id": 460,
+  "round_id": "SM_20260914_022718",
+  "parent": "7104535def4c473f489fa0f8a3707cd23eacb39b",
+  "commit": "fd34a1be0a28395feb6d733dcd408fb38b8c7872",
+  "changed_paths": [
+    "scripts/iv_metrics_record.py",
+    "tests/test_iv_metrics_series.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "cause_class": "graded_wrong_input",
+  "corpus_case_id": "cite-SM_20260914_022718-c1-path_outside_graded_tree",
+  "note": "Derived from cause_corpus.jsonl row `cite-SM_20260914_022718-c1-path_outside_graded_tree` (graded_wrong_input). Ledger: `review` row 2026-09-14T02:50:28Z for SM_20260914_022718 attempt 1 at head fd34a1be answered `retry`; the corpus row proves the refusal's citation fails against the graded tree (`review_cause.legality` re-checks it: path_outside_graded_tree), so the review was wrong and `expect` is what the work deserved: `pass`, no unmet clause. PROVISIONAL because the ledger does not settle that for this tree: what landed (`promoted` 2026-09-14T03:13:42Z, fea74c88, settled and never rolled back) is a later head, fd34a1be..fea74c88 = 2 files changed, 148 insertions(+), 14 deletions(-), so a landing vouches for fea74c88, not for fd34a1be. Confirm by a diff read of 7104535d..fd34a1be against the item's clauses, then drop the flag.",
+  "author_outcome": {
+    "landed": false,
+    "acceptance": "met",
+    "deferred_to": [
+      458
+    ],
+    "spawned": [],
+    "summary": "Round SM_20260914_022718; gate rung line: \"review passed; all six acceptance clauses met on this diff: clause 1 met ... clause 6 met\" and \"PASS tests (197.18s): 4411 passed, 2 xfailed, 11 skipped\". The five test-honesty findings the review named were each fixed by name and the fixes mutation-checked (the exit-code token and the median floor both fail when mutated). The item still needs two things "
+  }
+}

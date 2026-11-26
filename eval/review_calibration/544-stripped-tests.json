@@ -22,6 +22,8 @@
     "honesty_finding": false
   },
   "provisional": false,
-  "note": "The same commit with tests/test_tool_effects.py removed before grading. Every clause is at most `partial` (no changed test can pin it), so the grader must not pass it; the deterministic prechecks see no test file and the diff has none to flag, so no honesty finding is expected — the refusal comes from the clauses.",
-  "author_outcome": null
+  "note": "The same commit with tests/test_tool_effects.py removed before grading. Every clause is at most `partial` (no changed test can pin it), so the grader must not pass it; the deterministic prechecks see no test file and the diff has none to flag, so no honesty finding is expected — the refusal comes from the clauses. cause_class `unknown` (#4281): the only cause_corpus.jsonl row about this case is `calibrate-2822-owedcheck-rig` — `~/lloyd-data/logs/calibrate-2822-owedcheck-213637.log`, where every case answered `grader did not answer: item #544 has no acceptance to grade against`, so no verdict exists to attribute and the class is `unknown` by rule.",
+  "author_outcome": null,
+  "cause_class": "unknown",
+  "corpus_case_id": "calibrate-2822-owedcheck-rig"
 }

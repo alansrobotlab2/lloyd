@@ -1,0 +1,30 @@
+{
+  "name": "407-first-head-unmet",
+  "item_id": 407,
+  "round_id": "SM_20260912_073237",
+  "parent": "e20e1a57f5d3f24f4086a8e4ba4cd8cb1d37152e",
+  "commit": "adc4a3b67bfd2c8bc4e61c05920495f971aa9344",
+  "changed_paths": [
+    "agent_mcp/vault.py",
+    "tests/test_qmd_query_shape.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      1
+    ],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "cause_class": "real_unmet_work",
+  "corpus_case_id": "unmet-SM_20260912_073237",
+  "note": "Derived from cause_corpus.jsonl row `unmet-SM_20260912_073237` (real_unmet_work). Ledger: `review` row 2026-09-12T07:46:53Z for SM_20260912_073237 attempt 1 at head adc4a3b6 answered `retry` with clauses [1] not met, which is what `expect` records (the corpus row's `verdict_given`). The work was not finished at adc4a3b6: the round changed the diff before its next review (adc4a3b6..a2c7f70a: 1 file changed, 144 insertions(+), 25 deletions(-)) and only that later head graded `pass` and landed (`promoted` 2026-09-12T07:58:39Z, a2c7f70a). `honesty_finding` is false because the expectation is the clause verdict, not any one finding text.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "Round SM_20260912_073237 (adc4a3b + a2c7f70) landed after gate ok:true; review rung: '5 met of 5 clause(s)', tests rung '3807 passed, 2 xfailed, 11 skipped'. _qmd_subprocess_search and QMD_BIN deleted; a down/hung qmd daemon now raises QmdUnavailable on the vault.py retrieval path (TimeoutError/URLError, non-500 HTTPError, failed rerank-off retry) while a genuinely empty corpus still returns []; a"
+  }
+}

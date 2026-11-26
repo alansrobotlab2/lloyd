@@ -1,0 +1,29 @@
+{
+  "name": "488-outside-tree-cite",
+  "item_id": 488,
+  "round_id": "SM_20260913_233404",
+  "parent": "d39bb542dab11aa6ef9e5b21ddf9ac3f29038c6e",
+  "commit": "196ddd6600e6ee6a85784756f9f1d6a513e9c41e",
+  "changed_paths": [
+    "tests/test_yaml_fix_skill_claims.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "cause_class": "graded_wrong_input",
+  "corpus_case_id": "cite-SM_20260913_233404-c1-path_outside_graded_tree",
+  "note": "Derived from cause_corpus.jsonl row `cite-SM_20260913_233404-c1-path_outside_graded_tree` (graded_wrong_input). Ledger: `review` row 2026-09-13T23:50:54Z for SM_20260913_233404 attempt 1 at head 196ddd66 answered `retry`; the corpus row proves the refusal's citation fails against the graded tree (`review_cause.legality` re-checks it: path_outside_graded_tree), so the review was wrong and `expect` is what the work deserved: `pass`, no unmet clause. PROVISIONAL because the ledger does not settle that for this tree: what landed (`promoted` 2026-09-14T00:03:57Z, 6beb3c6a, settled and never rolled back) is a later head, 196ddd66..6beb3c6a = 1 file changed, 248 insertions(+), 22 deletions(-), so a landing vouches for 6beb3c6a, not for 196ddd66. Confirm by a diff read of d39bb542..196ddd66 against the item's clauses, then drop the flag.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [
+      1096
+    ],
+    "summary": "All six clauses met and pinned; gate `review ok=True (203.45s) :: review: 6 met of 6 clause(s); All six clauses met`, `tests ok=True :: 13 passed, 0 skipped`, `canary_boot ok=True :: booted; 112 internal tools; commit verified`, `canary_smoke ok=True :: real turn in 7.5s; Bash dispatched, sentinel round-tripped`. Code change is commit `6beb3c6` (tests/test_yaml_fix_skill_claims.py, 13 nodes) landi"
+  }
+}

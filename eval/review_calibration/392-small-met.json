@@ -14,6 +14,7 @@
     "tests/test_trajectory_extraction.py"
   ],
   "commit": "ce713bf39cf81d2d00b5ab1cbb0404209df4349e",
+  "corpus_case_id": "calibrate-392-small-met",
   "expect": {
     "honesty_finding": true,
     "kind": "retry",

@@ -193,10 +193,13 @@ def test_every_shipped_case_declares_the_paths_of_the_range_the_grader_grades():
     paths was wrong rather than the fixture being stale.
     """
     cases = RT.load_fixtures()
-    assert {c["name"] for c in cases} == set(SHIPPED_RANGES), (
-        "the shipped calibration set is no longer the four cases this test describes — a "
-        "case whose JSON stopped parsing, or whose `expect.kind` is unknown, is silently "
-        "skipped by load_fixtures, which would make the loop below grade nothing")
+    # #4281 grew the set past these four; every file still has to load, or the loop
+    # below silently checks fewer cases than ship.
+    assert set(SHIPPED_RANGES) <= {c["name"] for c in cases} and len(cases) == len(
+        list(RT.FIXTURE_DIR.glob("*.json"))), (
+        "a shipped calibration case no longer loads — a case whose JSON stopped parsing, "
+        "or whose `expect.kind` is unknown, is silently skipped by load_fixtures, which "
+        "would make the loop below grade nothing")
     for case in cases:
         got = _range_paths(RT.LIVE_ROOT, case["parent"], case["commit"])
         assert sorted(case["changed_paths"]) == got, (
@@ -737,7 +740,8 @@ def test_the_remark_moved_one_provisional_flag_and_no_landing_identity(tmp_path)
     and only this node reads the four files.
     """
     raw = {p.stem: json.loads(p.read_text(encoding="utf-8"))
-           for p in sorted(RT.FIXTURE_DIR.glob("*.json"))}
+           for p in sorted(RT.FIXTURE_DIR.glob("*.json"))
+           if p.stem in _FIXTURE_IDENTITIES}  # #4281's added cases are pinned at file end
     assert set(raw) == set(_FIXTURE_IDENTITIES), sorted(raw)
 
     assert raw["392-small-met"]["provisional"] is True, raw["392-small-met"].get("provisional")
@@ -1270,3 +1274,156 @@ def test_clause_4_the_owner_guard_refuses_a_class_with_an_empty_owner():
     rows = _routing_rows(table)
     assert rows["spec_ambiguity"] == "", rows
     assert "unknown" not in rows, rows
+
+
+# ── #4281 clauses 1-3: >=12 cause-labelled cases, each traced to its corpus row ──────
+#
+# Every top-level case names the `cause_corpus.jsonl` row its label came from
+# (`corpus_case_id`) and carries that row's `cause_class` as a key of its own, never the
+# loader's `unlabelled` default. The cases #4281 added take `expect` from the evidence
+# by one rule (the coordinator's ruling, delegated by Alan): a row whose review was wrong
+# expects what the work deserved, `pass` with no unmet clause; a `real_unmet_work` row
+# expects the unmet verdict the row records; a class that settles no verdict
+# (`spec_ambiguity`, `unknown`) is `provisional`.
+
+_REVIEW_WRONG = ("graded_wrong_input", "grader_defect", "grader_wrong_on_approved_work")
+
+
+def _committed_corpus_rows() -> dict[str, dict]:
+    """The committed corpus by `case_id`, read as plain JSON lines — no ledger needed."""
+    rows = [json.loads(ln) for ln in RC.CORPUS_PATH.read_text(encoding="utf-8").splitlines()
+            if ln.strip()]
+    return {r["case_id"]: r for r in rows}
+
+
+def _recorded_unmet(verdict_given: str) -> list[int]:
+    """The clause list a corpus row's `verdict_given` records as not met; `unnamed` is []."""
+    import re
+    m = re.search(r"with clauses \[([\d, ]*)\] not met", verdict_given)
+    return [int(x) for x in m.group(1).split(",") if x.strip()] if m else []
+
+
+def _label_problems(raw: dict[str, dict], corpus: dict[str, dict]) -> list[str]:
+    """Every way the shipped set can break clauses 1 and 2's label half, as text."""
+    out = []
+    if len(raw) < 12:
+        out.append(f"{len(raw)} cases ship, fewer than 12")
+    for name, case in sorted(raw.items()):
+        cause = case.get("cause_class")
+        if cause not in RC.FIXED_CAUSES:
+            out.append(f"{name}: cause_class {cause!r} is not one of the fixed six")
+        row = corpus.get(case.get("corpus_case_id"))
+        if row is None:
+            out.append(f"{name}: corpus_case_id {case.get('corpus_case_id')!r} names no corpus row")
+            continue
+        if row["cause_class"] != cause:
+            out.append(f"{name}: labelled {cause!r}, its corpus row "
+                       f"{row['case_id']!r} says {row['cause_class']!r}")
+        if name in SHIPPED_RANGES:
+            continue  # the four pre-#4281 cases' `expect` is pinned by the nodes above
+        exp = case["expect"]
+        if case["corpus_case_id"] not in case.get("note", ""):
+            out.append(f"{name}: its note does not name its corpus row")
+        if cause in _REVIEW_WRONG and (exp["kind"], exp["unmet_clauses"]) != ("pass", []):
+            out.append(f"{name}: a {cause} row says the review was wrong, so it expects "
+                       f"`pass` with no unmet clause, not {exp}")
+        if cause == "real_unmet_work" and (exp["kind"], exp["unmet_clauses"]) != (
+                "retry", _recorded_unmet(row["verdict_given"])):
+            out.append(f"{name}: expects {exp}, not the unmet verdict its row records")
+        if cause in ("spec_ambiguity", RC.UNKNOWN) and case.get("provisional") is not True:
+            out.append(f"{name}: a {cause} row settles no verdict, so the case is provisional")
+        if not isinstance(case.get("provisional"), bool):
+            out.append(f"{name}: provisional is not a bool")
+    return out
+
+
+def _alternate_repo(tmp_path):
+    """A scratch repo that borrows the checkout's object store read-only (alternates),
+    so `calibrate` can check out every case's commit without registering a worktree in
+    the shared repository."""
+    common = Path(git(RT.LIVE_ROOT, "rev-parse", "--path-format=absolute",
+                      "--git-common-dir").stdout.strip())
+    repo = tmp_path / "alt"
+    git(tmp_path, "init", "-q", str(repo))
+    (repo / ".git" / "objects" / "info" / "alternates").write_text(
+        str(common / "objects") + "\n", encoding="utf-8")
+    return repo
+
+
+def _has_commit(repo, sha) -> bool:
+    return git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
+
+
+def test_4281_twelve_labelled_cases_each_traced_to_its_corpus_row_graded_by_a_stub(
+        world, tmp_path, monkeypatch):
+    """#4281 clauses 1-3. (1) >=12 top-level case files, each with a `cause_class` KEY from
+    the fixed six — no case leans on `load_fixtures`' `unlabelled` default. (2) Each names
+    its corpus row in `corpus_case_id`, its class equals that row's, and its
+    `changed_paths` is `git diff --name-only <parent> <commit>` wherever those commits are
+    in this repository. (3) `calibrate` grades the whole directory through a stub — the
+    live grader is made to raise — and every row carries its fixture's label."""
+    raw = {p.stem: json.loads(p.read_text(encoding="utf-8"))
+           for p in sorted(RT.FIXTURE_DIR.glob("*.json"))}
+    corpus = _committed_corpus_rows()
+    assert len(raw) >= 12, sorted(raw)
+    assert all("cause_class" in case for case in raw.values()), (
+        [n for n, c in raw.items() if "cause_class" not in c])
+    assert _label_problems(raw, corpus) == []
+
+    checked = 0
+    for name, case in raw.items():
+        if not (_has_commit(RT.LIVE_ROOT, case["parent"])
+                and _has_commit(RT.LIVE_ROOT, case["commit"])):
+            continue
+        assert sorted(case["changed_paths"]) == _range_paths(
+            RT.LIVE_ROOT, case["parent"], case["commit"]), name
+        checked += 1
+    if not checked:
+        pytest.skip("none of the cases' commits are in this repository (a shallow clone?)")
+
+    def _no_live_grading(**kw):
+        raise AssertionError("calibrate reached the live grader")
+    monkeypatch.setattr(RV, "grade", _no_live_grading)
+    monkeypatch.setattr(RV, "item_contract", lambda item_id, ledger=None: {
+        "id": item_id, "title": f"#{item_id}", "body": "", "clauses": ["one", "two"]})
+    repo = _alternate_repo(tmp_path)
+    present = {n for n, c in raw.items()
+               if _has_commit(repo, c["parent"]) and _has_commit(repo, c["commit"])}
+    assert len(present) == checked, "the scratch repo does not see the checkout's objects"
+    fx = tmp_path / "shipped"
+    fx.mkdir()
+    for name in present:
+        (fx / f"{name}.json").write_text(json.dumps(raw[name]), encoding="utf-8")
+    stub = _stub(_met())
+    rows = RT.calibrate(repo=repo, fixture_dir=fx, grader=stub)
+    assert len(stub.calls) == len(rows) == len(present), (len(stub.calls), len(rows))
+    assert {r["name"]: r["cause_class"] for r in rows} == {
+        n: raw[n]["cause_class"] for n in present}
+    assert not [r for r in rows if "did not answer" in r["why"]], (
+        "a case never reached the grader — its commit did not check out or had no contract")
+    for r in rows:
+        ok, why = RT.compare(raw[r["name"]], {"kind": r["kind"], **r["result"]})
+        assert (r["ok"], r["why"]) == (ok, why), r["name"]
+
+
+def test_4281_the_label_check_fails_when_one_label_is_mutated():
+    """The node above is not vacuous: re-labelling one case to another fixed class, naming
+    a row that does not exist, dropping the key, or moving a misgraded case's `expect`
+    off `pass` is each reported by name."""
+    raw = {p.stem: json.loads(p.read_text(encoding="utf-8"))
+           for p in sorted(RT.FIXTURE_DIR.glob("*.json"))}
+    corpus = _committed_corpus_rows()
+    assert _label_problems(raw, corpus) == []
+    victim = next(n for n, c in sorted(raw.items())
+                  if n not in SHIPPED_RANGES and c["cause_class"] == "graded_wrong_input")
+    for mutate, says in (
+            (lambda c: c.update(cause_class="grader_defect"), "its corpus row"),
+            (lambda c: c.update(corpus_case_id="no-such-row"), "names no corpus row"),
+            (lambda c: c.pop("cause_class"), "not one of the fixed six"),
+            (lambda c: c["expect"].update(kind="retry"), "expects `pass`")):
+        bad = json.loads(json.dumps(raw))
+        mutate(bad[victim])
+        problems = _label_problems(bad, corpus)
+        assert any(p.startswith(f"{victim}:") and says in p for p in problems), problems
+    assert _label_problems(dict(list(raw.items())[:11]), corpus)[0] == (
+        "11 cases ship, fewer than 12")

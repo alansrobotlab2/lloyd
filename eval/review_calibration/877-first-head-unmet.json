@@ -1,0 +1,31 @@
+{
+  "name": "877-first-head-unmet",
+  "item_id": 877,
+  "round_id": "SM_20260912_045638",
+  "parent": "3d95c9c1c5a5e0fa97b770e3a16c8a29698e0ac6",
+  "commit": "6e4dea116e396921e8f06067e15155077523d6d6",
+  "changed_paths": [
+    "agent_mcp/vault.py",
+    "tests/test_retrieval.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      4,
+      5
+    ],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "cause_class": "real_unmet_work",
+  "corpus_case_id": "unmet-SM_20260912_045638",
+  "note": "Derived from cause_corpus.jsonl row `unmet-SM_20260912_045638` (real_unmet_work). Ledger: `review` row 2026-09-12T05:06:50Z for SM_20260912_045638 attempt 1 at head 6e4dea11 answered `retry` with clauses [4, 5] not met, which is what `expect` records (the corpus row's `verdict_given`). The work was not finished at 6e4dea11: the round changed the diff before its next review (6e4dea11..f7c97bf1: 2 files changed, 60 insertions(+), 1 deletion(-)) and only that later head graded `pass` and landed (`promoted` 2026-09-12T05:26:56Z, f7c97bf1). `honesty_finding` is false because the expectation is the clause verdict, not any one finding text.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "SM_20260912_045638 landed: 25 deletions, 0 insertions in agent_mcp/vault.py \u2014 _INTENT_FACTUAL_RE, _INTENT_TEMPORAL_RE, _INTENT_CONCEPTUAL_RE and _rrf_fuse removed with no wiring, replacement symbol or config key. Gate ok=true on all rungs: '3749 passed, 2 xfailed, 10 skipped'; review '6 met of 6 clause(s)'; canary_boot '112 internal tools; commit verified'; canary_smoke 'real turn in 7.1s'. Clause"
+  }
+}

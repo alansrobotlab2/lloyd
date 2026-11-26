@@ -1,0 +1,35 @@
+{
+  "name": "411-first-head-unmet",
+  "item_id": 411,
+  "round_id": "SM_20260912_082158",
+  "parent": "a2c7f70a0862d9272cb595399dce3b97a0e25cd7",
+  "commit": "93c7e79bbc9cdda7b44e90b991ce6f7a119fdf07",
+  "changed_paths": [
+    "agent_mcp/_subagent_registry.py",
+    "agent_mcp/builtin_task.py",
+    "tests/test_task_steering.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [
+      1,
+      2,
+      3,
+      4,
+      5
+    ],
+    "honesty_finding": false
+  },
+  "provisional": false,
+  "cause_class": "real_unmet_work",
+  "corpus_case_id": "unmet-SM_20260912_082158",
+  "note": "Derived from cause_corpus.jsonl row `unmet-SM_20260912_082158` (real_unmet_work). Ledger: `review` row 2026-09-12T08:34:01Z for SM_20260912_082158 attempt 1 at head 93c7e79b answered `retry` with clauses [1, 2, 3, 4, 5] not met, which is what `expect` records (the corpus row's `verdict_given`). The work was not finished at 93c7e79b: the round changed the diff before its next review (93c7e79b..968c3a53: 2 files changed, 277 insertions(+), 237 deletions(-)) and only that later head graded `pass` and landed (`promoted` 2026-09-12T08:45:04Z, 968c3a53). `honesty_finding` is false because the expectation is the clause verdict, not any one finding text.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "Round SM_20260912_082158 landed: the registry row publishes the running Task child's live chat_messages list and its cancel event, steer()/cancel_run() enforce one named fail-closed policy (STEERING_POLICY = \"orchestrator-session\") and log every refusal without appending, _task wires options.cancel_event with a cancelled exit branch that still closes the row and stores history, and injection frami"
+  }
+}

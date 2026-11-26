@@ -25,6 +25,9 @@ here touches a round, a landing or `promotions.jsonl`.
 | `392-small-met` | `ce713bf3`, a one-file landing whose author said `met`, and whose `expect` is provisional because live gradings of `parent..commit` answer `retry` against it | `retry` — the `pass` confirmed by a diff read on 2026-10-16 is the disagreement, not the verdict |
 | `447-small-met` | `01219641`, a two-file landing whose author said `met` | `pass` — confirmed by a diff read on 2026-10-16 |
 
+The four rows above are the original cases; #4281 added twelve more, one per
+cause-corpus row (see "The cause-labelled cases" below).
+
 `provisional: true` marks an expectation nobody has confirmed by reading the
 diff. Confirm or correct it, then drop the flag. A grader that agrees on all
 four — including answering #544's clause (d) `met`, against the 2026-09-10
@@ -213,8 +216,49 @@ source does not resolve to a real backlog item or promotion-ledger round cannot 
 `calibrate` prints one `cause <class>: <ok>/<n> agree` line per class present **before**
 the aggregate, which stays the last line and still counts every case:
 `scripts/automod/review_tools.py build-cause-corpus` rebuilds the corpus from the ledgers
-and publishes the dated distribution to `~/lloyd-data/eval/review-calibration/`. Growing
-the graded cases themselves to >=12 labelled fixtures is a second round.
+and publishes the dated distribution to `~/lloyd-data/eval/review-calibration/`.
+
+### The cause-labelled cases (#4281)
+
+Every top-level case carries a `cause_class` key of its own — none leans on the loader's
+`unlabelled` default — and a `corpus_case_id` naming the corpus row the label came from,
+whose `cause_class` it equals. `447-small-met` and `544-stripped-tests` are `unknown`: their
+only corpus row is `calibrate-2822-owedcheck-rig`, a run in which no verdict was given.
+The twelve cases #4281 added each grade one corpus row's graded commit against its parent,
+and take `expect` from the evidence by one rule: a row whose review was wrong
+(`graded_wrong_input`, `grader_defect`, `grader_wrong_on_approved_work`) expects what the
+work deserved, `pass` with no unmet clause; a `real_unmet_work` row expects the unmet
+verdict it records; and a case whose verdict the ledger does not settle is `provisional`,
+with the reason in its `note`. Each `note` names its ledger rows by timestamp.
+
+| case | corpus row | class | expected |
+|---|---|---|---|
+| `2046-second-read-pass` | `approved-SM_20261002_065500` | grader_wrong_on_approved_work | `pass` — the same tree graded `pass` and landed |
+| `3697-second-read-pass` | `approved-SM_20261102_124159` | grader_wrong_on_approved_work | `pass` — the same tree graded `pass` and landed |
+| `873-seam-unverified` | `unmet-SM_20260912_015449` | real_unmet_work | `retry`, no clause named |
+| `877-first-head-unmet` | `unmet-SM_20260912_045638` | real_unmet_work | `retry`, clauses 4 and 5 |
+| `407-first-head-unmet` | `unmet-SM_20260912_073237` | real_unmet_work | `retry`, clause 1 |
+| `411-first-head-unmet` | `unmet-SM_20260912_082158` | real_unmet_work | `retry`, clauses 1–5 |
+| `877-missing-node-cite` | `cite-SM_20260912_045638-c5-missing_node_file` | grader_defect | `pass`, provisional — a later head landed |
+| `504-missing-path-cite` | `cite-SM_20260914_100744-c2-missing_path` | grader_defect | `pass`, provisional — a later head landed |
+| `488-outside-tree-cite` | `cite-SM_20260913_233404-c1-path_outside_graded_tree` | graded_wrong_input | `pass`, provisional — a later head landed |
+| `460-outside-tree-cite` | `cite-SM_20260914_022718-c1-path_outside_graded_tree` | graded_wrong_input | `pass`, provisional — a later head landed |
+| `1880-outside-tree-cite` | `cite-SM_20260930_060244-c6-path_outside_graded_tree` | graded_wrong_input | `pass`, provisional — a later head landed |
+| `1131-unsatisfiable-clause` | `clause-1169` | spec_ambiguity | `retry`, provisional — the clause admitted two readings |
+
+Corpus rows left out, and why: `approved-SM_20260927_093455` and `clause-1349` name commits
+no longer in the repository; `gate-1385-never-reviewed` and `calibrate-2822-owedcheck-rig`
+name no graded commit; rounds `SM_20260912_054439` and `SM_20260912_191235` each have an
+`unmet-` row and a `cite-` row on the same commit with opposite verdicts, so neither pair
+is used; the `cite-` rows of `SM_20260912_114820`, `SM_20260913_225320` and
+`SM_20260916_192316` grade rounds that never landed, so no landing speaks for the work;
+four more `cite-` rows of `SM_20260913_233404` repeat the commit its `c1` row already
+uses; and the rows of `SM_20260930_065740` (#1879) and `SM_20260930_075044` (#1878) were
+left out to bound engine time, both items' clauses having been amended since they were
+graded. A live `calibrate` over all sixteen is about 90 minutes of
+engine time at ~350 s a case, so it runs in an idle window, never in CI:
+`tests/test_automod_review_tools.py` reads the files and grades the whole directory through a
+stub.
 
 ### Routing owners — who a cause class sends the fix to (#4281)
 

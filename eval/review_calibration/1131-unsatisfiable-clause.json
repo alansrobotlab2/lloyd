@@ -1,0 +1,33 @@
+{
+  "name": "1131-unsatisfiable-clause",
+  "item_id": 1131,
+  "round_id": "SM_20260915_183243",
+  "parent": "ed978ba4230ce893f5c777dec56d4221e19c1a5e",
+  "commit": "abe821478f36e90fab1d55ca534699f2b549021c",
+  "changed_paths": [
+    "scripts/mine-trajectories.py",
+    "tests/test_skill_verdicts.py",
+    "tests/test_trajectory_extraction.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "retry",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "cause_class": "spec_ambiguity",
+  "corpus_case_id": "clause-1169",
+  "note": "Derived from cause_corpus.jsonl row `clause-1169` (spec_ambiguity). Ledger: `review` row 2026-09-15T19:02:02Z for SM_20260915_183243 attempt 1 at head abe82147 answered `retry` (item #1131; every clause met, the refusal carried by two blocking test-honesty prechecks, a new skip marker and a new pytest.skip). The corpus row's source is backlog #1169, which filed the clause rather than the grader as the defect: clause 4 names a measurement as a fixture, so no committed test can seed it. This round ended `round_aborted` 2026-09-15T19:14:45Z; the work went on in SM_20260915_204549, whose `promoted` row (2026-09-15T21:14:27Z, db9ca75f on the same base ed978ba4, settled 2026-09-15T21:29:30Z, never rolled back) is a later tree (abe82147..db9ca75f = 3 files changed, 193 insertions(+), 53 deletions(-), the skips replaced by live asserts). So `expect` is the `retry` the record holds over this head, with no clause named unmet. PROVISIONAL: a spec_ambiguity row says the contract admitted two readings, so a verdict over this tree is not settled by the clause as written. Range ed978ba4..abe82147: the base the gate's preflight rebased onto.",
+  "author_outcome": {
+    "landed": false,
+    "acceptance": "not_met",
+    "deferred_to": [
+      1169
+    ],
+    "spawned": [
+      1169
+    ],
+    "summary": "Nothing landed: round SM_20260915_183243 was aborted after both review attempts were spent on clause 4. Clauses 1, 2, 3 and 5 were measurably true on the kept branch automod/SM_20260915_183243 (commits abe8214 + 7df6e21, base ed978ba4), which cleared every non-review rung \u2014 'tests (338.61s): 4941 passed, 2 xfailed, 11 skipped' \u2014 and the review itself called them 'genuinely met', so they are report"
+  }
+}

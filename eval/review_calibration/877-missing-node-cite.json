@@ -1,0 +1,28 @@
+{
+  "name": "877-missing-node-cite",
+  "item_id": 877,
+  "round_id": "SM_20260912_045638",
+  "parent": "3d95c9c1c5a5e0fa97b770e3a16c8a29698e0ac6",
+  "commit": "3a7a639811a18af06a70383230f086f01f6ac8a9",
+  "changed_paths": [
+    "agent_mcp/vault.py",
+    "tests/test_retrieval.py"
+  ],
+  "strip_tests": false,
+  "expect": {
+    "kind": "pass",
+    "unmet_clauses": [],
+    "honesty_finding": false
+  },
+  "provisional": true,
+  "cause_class": "grader_defect",
+  "corpus_case_id": "cite-SM_20260912_045638-c5-missing_node_file",
+  "note": "Derived from cause_corpus.jsonl row `cite-SM_20260912_045638-c5-missing_node_file` (grader_defect). Ledger: `review` row 2026-09-12T05:16:36Z for SM_20260912_045638 attempt 1 at head 3a7a6398 answered `retry`; the corpus row proves the refusal's citation fails against the graded tree (`review_cause.legality` re-checks it: missing_node_file), so the review was wrong and `expect` is what the work deserved: `pass`, no unmet clause. PROVISIONAL because the ledger does not settle that for this tree: what landed (`promoted` 2026-09-12T05:26:56Z, f7c97bf1, settled and never rolled back) is a later head, 3a7a6398..f7c97bf1 = 2 files changed, 59 insertions(+), so a landing vouches for f7c97bf1, not for 3a7a6398. Confirm by a diff read of 3d95c9c1..3a7a6398 against the item's clauses, then drop the flag.",
+  "author_outcome": {
+    "landed": true,
+    "acceptance": "met",
+    "deferred_to": [],
+    "spawned": [],
+    "summary": "SM_20260912_045638 landed: 25 deletions, 0 insertions in agent_mcp/vault.py \u2014 _INTENT_FACTUAL_RE, _INTENT_TEMPORAL_RE, _INTENT_CONCEPTUAL_RE and _rrf_fuse removed with no wiring, replacement symbol or config key. Gate ok=true on all rungs: '3749 passed, 2 xfailed, 10 skipped'; review '6 met of 6 clause(s)'; canary_boot '112 internal tools; commit verified'; canary_smoke 'real turn in 7.1s'. Clause"
+  }
+}
