@@ -192,7 +192,7 @@ can land its kind of write**: what may be destroyed, what may be written, what a
 untrusted-input turn may read (its own "THIRD policy"), and what a shell redirect
 may create inside the vault (its own "FOURTH policy", quoting the module, not
 this doc). `architecture/authority-surfaces.md` row 3 is the map of this module
-and still counts three, filed as #4439, because a count spelled in prose is
+and names each answer by identifier with no count (#4439), because a count in prose is
 exactly what #3131 stopped letting anybody keep:
 
 | Predicate | Question | Enforced by |

@@ -1,9 +1,9 @@
-"""What may be destroyed, and what may be written: one module, two policies.
+"""What may be destroyed, written, read, or created in the vault by a redirect.
 
-The first is a structural check for shell commands that delete a protected tree
-wholesale. The second, added by #1049, is the write deny-set the `Write`/`Edit`
-lane consults — a different question, over a different surface, answered from
-the same place so the two cannot drift into disagreeing about what is sacred.
+A structural check for shell commands that delete a protected tree wholesale; the
+write deny-set every write lane consults (#1049); the read deny-set (#3524); and the
+vault tree as a Bash-only write root (#3701). Each is its own question, answered
+from the same place so they cannot drift into disagreeing about what is sacred.
 
 `safety._HARD_DENY_PATTERNS` matched `rm -rf` only when the flags were fused
 and the target began with a bare `/`, `~` or `$HOME`. That shape is one

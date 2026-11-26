@@ -2324,8 +2324,8 @@ _POINTER_ROWS = {
 #: merging them would let a module with no owner elsewhere look pointered.
 _DELEGATION_CITES = {"safety": "authority-surfaces.md"}
 
-#: The guard-order doc: the layer stack whose row 3 documents the protected-path
-#: set — what may be destroyed, written and read — in full.
+#: The guard-order doc: the layer stack whose row 3 documents the protected-path set in
+#: full, by name: `check_protected_delete`, `write_deny_reason`, `read_deny_reason`, `bash_vault_write_denial`.
 _GUARD_ORDER_DOC = "authority-surfaces.md"
 
 _DOC_CITE = re.compile(r"`architecture/([A-Za-z0-9._-]+\.md)`")
@@ -2593,3 +2593,166 @@ def test_the_module_coverage_pin_is_shown_able_to_fail():
     assert sorted(_modules_missing(wo_table, mods)) == sorted(table_only), (
         "with the table body gone the modules reported missing are not the ones the "
         "table alone named, so the two readings of the doc have drifted apart")
+
+
+# ---------------------------------------------------------------------------
+# authority-surfaces.md row 3 names every policy protected_paths.py declares (#4439)
+# ---------------------------------------------------------------------------
+#
+# Row 3 said "three policies" / "three questions" while the module it maps had
+# declared a FOURTH (#3701), and the module's own docstring still said "two". A count
+# spelled in prose is what #3131 stopped letting anybody keep, so this pin derives the
+# number of policies from the module's ordinal `… policy` headers and asks row 3 for one
+# named answer per declaration — a fifth policy reddens on a missing name, never on a
+# stale number, and nothing here states how many there are.
+
+PROTECTED_PATHS_PY = ROOT / "app" / "harness" / "protected_paths.py"
+AUTHORITY_SURFACES = ROOT / "architecture" / "authority-surfaces.md"
+
+#: Ordinal words, in order — a vocabulary, not a count of anything.
+_ORDINALS = ("FIRST", "SECOND", "THIRD", "FOURTH", "FIFTH", "SIXTH", "SEVENTH",
+             "EIGHTH", "NINTH", "TENTH")
+
+#: The module's own declaration of a policy: `# This module's THIRD policy`,
+#: `# This is the module's FOURTH policy`. The policies below the lowest header are the
+#: ones the module had before it started numbering them; the highest header is the count.
+_POLICY_HEADER_RE = re.compile(r"^# (?:This module's|This is the module's) ([A-Z]+) policy\b",
+                               re.MULTILINE)
+
+#: The named answer row 3 must carry for each declared policy, keyed by its ordinal.
+#: Every identifier must be defined at module level in protected_paths.py.
+_POLICY_ANSWERS = {
+    "FIRST": ("check_protected_delete",),
+    "SECOND": ("PROTECTED_WRITE_ROOTS", "write_deny_reason"),
+    "THIRD": ("PROTECTED_READ_ROOTS", "read_deny_reason"),
+    "FOURTH": ("VAULT_BASH_WRITE_ROOT", "bash_vault_write_denial"),
+}
+
+#: The bench assertion rail: a call site of the write predicate, ruled not a policy.
+_BENCH_RAIL = "_bench_assertion_denial"
+
+#: A stated size of the module's policy set, in any spelling a rewrite might reach for.
+_POLICY_COUNT_RE = re.compile(
+    r"\b(?:one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:policies|questions)\b"
+    r"|\b(?:first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+policy\b",
+    re.IGNORECASE)
+
+
+def _declared_policies(src: str) -> "tuple[str, ...]":
+    """Ordinals 1..N, where N is the highest `… policy` header the module carries."""
+    words = _POLICY_HEADER_RE.findall(src)
+    assert words, "no ordinal `… policy` header in protected_paths.py: nothing derived"
+    unknown = [w for w in words if w not in _ORDINALS]
+    assert not unknown, f"policy headers with an ordinal this pin cannot read: {unknown}"
+    return _ORDINALS[: max(_ORDINALS.index(w) for w in words) + 1]
+
+
+def _authority_row_3(text: str) -> str:
+    rows = [l for l in text.splitlines() if l.startswith("| 3 |")]
+    assert len(rows) == 1, f"{len(rows)} rows start '| 3 |' in authority-surfaces.md"
+    return rows[0]
+
+
+def _module_level_names(src: str) -> "set[str]":
+    names: "set[str]" = set()
+    for node in ast.parse(src).body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            names.add(node.name)
+        elif isinstance(node, ast.Assign):
+            names |= {t.id for t in node.targets if isinstance(t, ast.Name)}
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+    return names
+
+
+def _unnamed_policies(row: str, src: str) -> "list[str]":
+    """Each declared policy whose answer row 3 does not name, as a reason string."""
+    problems = []
+    for ordinal in _declared_policies(src):
+        answer = _POLICY_ANSWERS.get(ordinal)
+        if answer is None:
+            problems.append(f"the module declares a {ordinal} policy and this pin has no "
+                            "named answer for it: add its identifiers here and to row 3")
+            continue
+        problems += [f"{ordinal}: row 3 does not name `{n}`" for n in answer
+                     if f"`{n}`" not in row]
+    return problems
+
+
+def _stated_policy_counts(text: str) -> "list[str]":
+    return [m.group(0) for m in _POLICY_COUNT_RE.finditer(text)]
+
+
+def _count_free_surfaces() -> "dict[str, str]":
+    """The three places that map the module and must state no count of its policies."""
+    src = PROTECTED_PATHS_PY.read_text(encoding="utf-8")
+    harness_rows = [l for l in DOC_TEXT.splitlines() if l.startswith("| `protected_paths.py` |")]
+    assert len(harness_rows) == 1, "harness.md no longer has one protected_paths.py row"
+    return {
+        "app/harness/protected_paths.py docstring": ast.get_docstring(ast.parse(src)) or "",
+        "architecture/harness.md protected_paths.py row": harness_rows[0],
+        "architecture/authority-surfaces.md row 3": _authority_row_3(
+            AUTHORITY_SURFACES.read_text(encoding="utf-8")),
+    }
+
+
+def test_row_3_names_an_answer_for_every_policy_the_module_declares():
+    """#4439 clauses 1-2: one named answer in row 3 per declared policy, derived."""
+    src = PROTECTED_PATHS_PY.read_text(encoding="utf-8")
+    row = _authority_row_3(AUTHORITY_SURFACES.read_text(encoding="utf-8"))
+    declared = _declared_policies(src)
+    assert set(_POLICY_ANSWERS) == set(declared), (
+        f"the module declares {declared}; the pin names {sorted(_POLICY_ANSWERS)}")
+    defined = _module_level_names(src)
+    phantom = [n for ns in _POLICY_ANSWERS.values() for n in ns if n not in defined]
+    assert phantom == [], f"named answers protected_paths.py does not define: {phantom}"
+    assert _unnamed_policies(row, src) == []
+    for ident in ("VAULT_BASH_WRITE_ROOT", "bash_vault_write_denial"):
+        assert f"`{ident}`" in row, f"row 3 does not name the vault Bash-write policy's {ident}"
+
+
+def test_row_3_rules_the_bench_rail_a_call_site_not_a_policy():
+    """#4439 clause 3: the rail is named, called a call site, and is no declared policy."""
+    src = PROTECTED_PATHS_PY.read_text(encoding="utf-8")
+    row = _authority_row_3(AUTHORITY_SURFACES.read_text(encoding="utf-8"))
+    assert f"`{_BENCH_RAIL}`" in row and "call site" in row
+    assert _BENCH_RAIL in _module_level_names(src)
+    assert all(_BENCH_RAIL not in ns for ns in _POLICY_ANSWERS.values())
+    caller = src[src.index("def check_bash_write_denied("):src.index(f"def {_BENCH_RAIL}(")]
+    assert f"{_BENCH_RAIL}(path" in caller and "call site" in caller, (
+        "check_bash_write_denied no longer asks the rail, or no longer calls it a call site")
+    assert not _POLICY_HEADER_RE.search(caller), "a policy header now sits over the rail"
+    assert len(_declared_policies(src)) == len(_POLICY_ANSWERS)
+
+
+def test_nothing_that_maps_protected_paths_states_a_count_of_its_policies():
+    """#4439 clause 4 (and clause 2's heading/closing half): no count on any surface."""
+    found = {where: _stated_policy_counts(text)
+             for where, text in _count_free_surfaces().items()}
+    assert {w: c for w, c in found.items() if c} == {}, found
+    row = _count_free_surfaces()["architecture/authority-surfaces.md row 3"]
+    heading = row.split("|")[2].strip()
+    assert heading == "Protected trees", heading
+
+
+def test_the_policy_pins_fire_on_the_defects_they_were_written_for():
+    """The premise of #4439, manufactured: each filed sentence put back is caught."""
+    src = PROTECTED_PATHS_PY.read_text(encoding="utf-8")
+    row = _authority_row_3(AUTHORITY_SURFACES.read_text(encoding="utf-8"))
+    for stale in ("Protected trees, three policies", "One module, three questions,",
+                  "one module, two policies", "since #3524, the module's third policy"):
+        assert _stated_policy_counts(stale), f"{stale!r} reads as count-free"
+    without_fourth = row.replace("`bash_vault_write_denial`", "the vault rule")
+    assert _unnamed_policies(without_fourth, src) == [
+        "FOURTH: row 3 does not name `bash_vault_write_denial`"]
+    fifth = src + "\n# This is the module's FIFTH policy, planted.\n"
+    assert any("FIFTH" in p for p in _unnamed_policies(row, fifth))
+
+
+def test_the_policy_pin_holds_no_literal_count():
+    """#4439 clause 2, the #3131 shape: no `len(...) == <n>` over the policy set here."""
+    here = Path(__file__).resolve().read_text(encoding="utf-8")
+    banned = re.compile(r"len\(\s*(?:_POLICY_ANSWERS|_declared_policies\([^)]*\)|declared)"
+                        r"\s*\)\s*[=!]=\s*\d+")
+    assert not banned.search(here)
+    assert banned.search("len(_POLICY_ANSWERS)" " == 4")
