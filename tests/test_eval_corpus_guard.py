@@ -5137,7 +5137,12 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: no scorer changed. It names `ee8fb7e3`, the #4297 commit, stamped one commit later for
 #: the self-naming reason above. If the sweep lands rewritten (rebased, cherry-picked or
 #: squashed) that sha is not an ancestor of main and must be re-stamped at the landed one.
-RUN_EVAL_CODE_ANCHOR = "ee8fb7e3"
+#:
+#: The 2026-11-26 hand sweep moves it a seventh time: #4033's opt-in `--linked-notes
+#: {off,tail,inline}` (default `off`, so every baseline stays comparable) and its helpers
+#: appended after `main`. No scored query and no scorer changed. It names `12d885ae`, the
+#: #4033 commit, stamped one commit later; a rewritten landing must re-stamp it.
+RUN_EVAL_CODE_ANCHOR = "12d885ae"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because
