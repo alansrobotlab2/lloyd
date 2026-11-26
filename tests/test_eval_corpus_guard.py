@@ -5988,6 +5988,42 @@ def test_the_guards_mirror_walk_honours_the_same_rule_the_instrument_walks(tmp_p
         "parity node refuses, one function later")
 
 
+#: The rows qmd can return. A document whose file disappears is kept with `active = 0`
+#: rather than dropped, and every read qmd serves filters on `active = 1`
+#: (`qmd/src/cli/qmd.ts`, `qmd/src/vecindex.ts`), so a bare `count(*)` over `documents`
+#: counts rows no search will ever answer with. The daily retention sweep deletes
+#: `autonomy-runs/<id>/run_*.md` past 30 days, so on 2026-11-25 the bare count read
+#: `autonomy-runs` 1,157 against the walk's 1,121 — exactly its 36 soft-deleted rows — and
+#: the node below was red one swept run record at a time (#4590). Both the per-collection
+#: query and the total read through this one predicate, so the two stay in one namespace.
+_SERVED_DOCUMENTS = "from documents where active = 1"
+
+
+def _served_index_counts(con) -> tuple[dict[str, int], int]:
+    """`({collection: served documents}, served total)` off an open qmd index."""
+    indexed = {str(r[0]): int(r[1]) for r in con.execute(
+        f"select collection, count(*) {_SERVED_DOCUMENTS} group by collection")}
+    total = int(con.execute(f"select count(*) {_SERVED_DOCUMENTS}").fetchone()[0])
+    return indexed, total
+
+
+def _assert_pool_is_the_served_index(pooled: dict[str, int], indexed: dict[str, int],
+                                     total: int) -> None:
+    """The pool equals the served index, collection by collection and in total."""
+    indexed_keys = {_doc_norm(k): k for k in indexed}
+    assert len(indexed_keys) == len(indexed), (
+        f"two collection names normalise to one key: {sorted(indexed)}")
+    for key, name in sorted(indexed_keys.items()):
+        assert pooled.get(key, 0) == indexed[name], (
+            f"collection {name!r}: the walk contributes {pooled.get(key, 0)} paths and "
+            f"the index holds {indexed[name]} documents. One of the two rules is not "
+            "qmd's, and the guard's verdict is worth only as much as this equality")
+    assert sum(pooled.values()) == total, (
+        f"pool {sum(pooled.values())} against the index's {total} with every "
+        "per-collection count passing: a collection is pooled under two names, or the "
+        "index moved between the two reads and this node cannot tell which")
+
+
 def test_the_honoured_pool_is_what_the_live_index_can_return():
     """#4575's mechanism, guard level: honouring the two columns reproduces the
     deployment exactly, collection by collection, instead of approximating it.
@@ -6027,25 +6063,60 @@ def test_the_honoured_pool_is_what_the_live_index_can_return():
     con = sqlite3.connect(f"file:{doc_corpus.LIVE_INDEX}?mode=ro", uri=True,
                           timeout=10)
     try:
-        indexed = {str(r[0]): int(r[1]) for r in con.execute(
-            "select collection, count(*) from documents group by collection")}
-        total = int(con.execute("select count(*) from documents").fetchone()[0])
+        indexed, total = _served_index_counts(con)
     finally:
         con.close()
 
     assert total > 5000, f"a {total}-document index is not this deployment"
-    indexed_keys = {_doc_norm(k): k for k in indexed}
-    assert len(indexed_keys) == len(indexed), (
-        f"two collection names normalise to one key: {sorted(indexed)}")
-    for key, name in sorted(indexed_keys.items()):
-        assert pooled.get(key, 0) == indexed[name], (
-            f"collection {name!r}: the walk contributes {pooled.get(key, 0)} paths and "
-            f"the index holds {indexed[name]} documents. One of the two rules is not "
-            "qmd's, and the guard's verdict is worth only as much as this equality")
-    assert sum(pooled.values()) == total, (
-        f"pool {sum(pooled.values())} against the index's {total} with every "
-        "per-collection count passing: a collection is pooled under two names, or the "
-        "index moved between the two reads and this node cannot tell which")
+    _assert_pool_is_the_served_index(pooled, indexed, total)
     assert pooled.get("subliminal", 0) == indexed.get("subliminal", 0) <= 8, (
         "the vault-wide collection is what the whole item is about; if it is contributing "
         "its root's whole tree again, `*.md` stopped being honoured")
+
+
+def test_the_served_count_drops_soft_deleted_rows_and_the_comparison_still_bites_on_one():
+    """#4590: the live node's two counts read only what qmd can return, and correcting the
+    denominator did not soften the equality it guards.
+
+    A fixture index with qmd's own `documents` columns: `autonomy-runs` holds three served
+    rows and two soft-deleted ones (a swept run record's shape), `knowledge` two served. The
+    served counts must read 3 and 5 where a bare `count(*)` reads 5 and 7; the exact pool
+    passes; and a pool off by one document in either direction in either collection — or
+    one that pools the soft-deleted rows the way the old count did — still raises.
+    """
+    import sqlite3
+
+    con = sqlite3.connect(":memory:")
+    try:
+        con.execute("create table documents (id integer primary key autoincrement, "
+                    "collection text not null, path text not null, "
+                    "active integer not null default 1, unique(collection, path))")
+        rows = ([("autonomy-runs", f"86/run_86_2026110{i}_000000.md", 1) for i in range(3)]
+                + [("autonomy-runs", f"86/run_86_2026100{i}_000000.md", 0) for i in range(2)]
+                + [("knowledge", f"note-{i}.md", 1) for i in range(2)])
+        con.executemany("insert into documents (collection, path, active) values (?, ?, ?)",
+                        rows)
+        bare_total = con.execute("select count(*) from documents").fetchone()[0]
+        indexed, total = _served_index_counts(con)
+    finally:
+        con.close()
+
+    assert bare_total == 7, "fixture: two soft-deleted rows beside five served ones"
+    assert indexed == {"autonomy-runs": 3, "knowledge": 2} and total == 5, (
+        f"the served count read {indexed}, {total}: it is counting rows qmd marks "
+        "`active = 0` and will never return")
+
+    exact = {"autonomy_runs": 3, "knowledge": 2}
+    _assert_pool_is_the_served_index(exact, indexed, total)
+
+    off_by_one = [
+        {"autonomy_runs": 2, "knowledge": 2},
+        {"autonomy_runs": 4, "knowledge": 2},
+        {"autonomy_runs": 3, "knowledge": 1},
+        {"autonomy_runs": 3, "knowledge": 3},
+        {"autonomy_runs": 3, "knowledge": 2, "stray": 1},
+        {"autonomy_runs": 5, "knowledge": 2},       # the soft-deleted rows pooled
+    ]
+    for pool in off_by_one:
+        with pytest.raises(AssertionError):
+            _assert_pool_is_the_served_index(pool, indexed, total)
