@@ -271,10 +271,10 @@ def _resolve_overlay(overlay_dir: str | Path | None) -> Path | None:
     return path if path.exists() else None
 
 
-# Back-compat public names (some callers import these directly)
+# Back-compat public names. No `SKILLS_DIRS` alias: it was bound to `None` (#4364);
+# the one definition of the skill roots is `agent_mcp.skills.SKILLS_DIRS` (#1294).
 SOUL_PATH = _CANON_SOUL_PATH
 MEMORIES_DIR = _CANON_MEMORIES_DIR
-SKILLS_DIRS = _CANON_SKILLS_DIRS
 
 
 def _format_active_todos(todos: list[dict] | None) -> str | None:
