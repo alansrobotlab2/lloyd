@@ -27,7 +27,7 @@ logger = logging.getLogger("lloyd-server")
 # (what the frontend will act on). A tab missing from this set is worse than
 # unnavigable: `set_state` raises, the frontend's report 400s, and the mirror
 # keeps serving the tab the user was on *before* — so `mc_get_state` answers
-# confidently and wrongly. tests/test_mc_tab_parity.py pins all four.
+# confidently and wrongly. tests/test_mc_tab_parity.py pins every one of them.
 VALID_TABS = {
     "dashboard",
     "inner_voice", "chat", "background", "backlog", "autonomy", "workers",

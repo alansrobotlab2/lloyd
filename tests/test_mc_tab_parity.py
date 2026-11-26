@@ -124,9 +124,9 @@ def test_browser_tab_is_the_case_that_regressed():
 
 # ── The sixth list: Layout.tsx's PAGES render map (#1274) ───────────────────
 #
-# `const PAGES: Record<string, React.FC>` (web/src/components/Layout.tsx:79)
-# is the map `const PageComponent = PAGES[page]` (:315) reads, and the JSX
-# guard `{PageComponent && (…)}` (:557) renders *nothing* when the key is
+# `const PAGES: Record<string, React.FC>` (web/src/components/Layout.tsx)
+# is the map `const PageComponent = PAGES[page]` reads, and the JSX
+# guard `{PageComponent && (…)}` renders *nothing* when the key is
 # missing — which is how a tab could be added to all five lists above, pass
 # every assertion in this file, and still show a user an empty pane. That is
 # the symptom `test_frontend_acts_on_every_tab_the_agent_may_ask_for` names
@@ -135,7 +135,8 @@ def test_browser_tab_is_the_case_that_regressed():
 #
 # `chat`, `ide` and `memory` are absent from the map on purpose: each is
 # mounted elsewhere in Layout.tsx under its own `page === '<name>'` guard
-# (:391, :528, :549) and kept mounted across tab switches — the IDE and memory
+# (the chat header, the IDE pane, the memory pane) and kept mounted across tab
+# switches — the IDE and memory
 # behind `ideEverActive`/`memoryEverActive` so Monaco and the memory graph do
 # not rebuild on every visit, the chat slots because the panel owns a LiveKit
 # room per session. The exemption is therefore *declared* below instead of
@@ -162,7 +163,7 @@ def _render_map_tabs(src: str | None = None) -> set[str]:
 
     Parsed, never substring-tested: the body carries the comment
     `// memory is rendered separately below — sticky, like the IDE.`
-    (Layout.tsx:81), so `"memory" in <map body>` is true for a tab that has
+    inside the PAGES map, so `"memory" in <map body>` is true for a tab that has
     no entry in it. `^\s*([a-z_]+):` cannot match that line — it opens with
     `//` after the indent — and
     `test_parsing_the_map_skips_the_comment_that_names_a_sticky_tab` pins
@@ -231,9 +232,9 @@ def test_the_sticky_exemption_is_exactly_the_declared_trio():
 # ── What counts as a mount (#3042) ───────────────────────────────────────────
 #
 # `page === '<name>'` is a token, and Layout.tsx compares `page` for reasons
-# that mount nothing: :181 and :189 are `useEffect` bodies that only flip the
-# `…EverActive` flag, :212 is a hook argument (`enabled: page === 'chat' &&
-# !isMobile`) that only gates polling, and :499 hands `visible={…}` to a
+# that mount nothing: two are `useEffect` bodies that only flip the
+# `…EverActive` flag, one is a hook argument (`enabled: page === 'chat' &&
+# !isMobile`) that only gates polling, and one hands `visible={…}` to a
 # component that is already mounted. A substring over the whole file is
 # satisfied by any one of them, so deleting the IDE's JSX block and leaving
 # its `useEffect` behind — which is what a restructure that folds Monaco
@@ -242,10 +243,9 @@ def test_the_sticky_exemption_is_exactly_the_declared_trio():
 #
 #   * a ternary inside an element's opening tag —
 #     `className={cn('…', page === 'ide' ? '' : 'hidden')}` — which is how a
-#     sticky pane hides without unmounting (:465, :516, :530, :551);
+#     sticky pane hides without unmounting (the chat slots, the IDE, memory);
 #   * a comparison guarding a JSX block — `page === 'chat' && (` with an
-#     element following it — which is how the desktop chat header mounts
-#     (:393).
+#     element following it — which is how the desktop chat header mounts.
 #
 # A `useEffect` body and a hook argument object are plain TypeScript, and
 # neither shape reaches them. The scan errs toward red: a mount written in a
@@ -307,11 +307,12 @@ def test_a_declared_sticky_page_is_mounted_outside_the_map():
     """A declared exemption must be a real mount, not a matching string.
 
     Sticky here means "rendered by a `page === '<name>'` comparison *in
-    markup*, outside the map" — that is what the trio does at Layout.tsx:393
-    (the desktop chat header, `page === 'chat' && (`), :526-530
+    markup*, outside the map" — that is what the trio does in Layout.tsx: the
+    desktop chat header (`page === 'chat' && (`), the IDE pane
     (`{ideEverActive && ( … page === 'ide' ? '' : 'hidden' … <IdePage /> …)}`)
-    and :547-551 (the same shape around `<MemoryPage />`). The file compares
-    `page` three more times outside any mount — :181, :189 and :212 — so a
+    and the memory pane (the same shape around `<MemoryPage />`). The file
+    compares `page` more times outside any mount — the `ideEverActive` and
+    `memoryEverActive` effects and the chat poll's `enabled:` argument — so a
     file-wide substring could not tell a mount from a flag flip;
     `test_a_sticky_page_whose_mount_was_refactored_away_goes_red` deletes one
     mount, keeps its `useEffect`, and drives that on a synthetic tree.
@@ -347,7 +348,7 @@ def test_a_sticky_page_whose_mount_was_refactored_away_goes_red(
     """#3042's hole, reproduced: the mount goes, the comparison stays, green.
 
     The mutation is the refactor a restructure makes — Monaco's JSX block is
-    folded elsewhere or dropped, and the `useEffect` at Layout.tsx:180-182
+    folded elsewhere or dropped, and the `useEffect` in Layout.tsx
     that flips `ideEverActive` survives with it. That leaves exactly one
     `page === 'ide'` in the file, in the effect, and it is the occurrence the
     old file-wide substring matched, so the old assertion was satisfied by a
@@ -459,8 +460,9 @@ def test_parsing_the_map_skips_the_comment_that_names_a_sticky_tab():
         "or near-empty set makes every parity assertion above pass on the "
         "wrong denominator")
     assert "memory" not in keys, (
-        "`memory` was parsed as a PAGES key, but it is only the comment at "
-        f"Layout.tsx:81 — the map body is:\n{body.strip()}")
+        "`memory` was parsed as a PAGES key, but it is only the "
+        "`// memory is rendered separately` comment inside Layout.tsx's PAGES "
+        f"map — the map body is:\n{body.strip()}")
 
 
 def test_a_tab_the_five_lists_accept_but_the_render_map_lacks_goes_red(
@@ -573,7 +575,8 @@ STALE_RENDER_MAP_CLAIMS = {
 def test_the_architecture_doc_no_longer_calls_the_render_map_unpinned():
     """Clause 5: the doc may not keep reporting a gap this file closed.
 
-    `architecture/mission-control.md:46-52` described the render map as pinned
+    The render-map paragraph of `architecture/mission-control.md` (the one that
+    names `const PAGES`) described the render map as pinned
     by no test at all and said such a tab "passes every assertion". Both were
     true when #1274 filed them and both are false now, and a reader who
     believes either one stops looking for the guard that exists. Nothing else
@@ -666,3 +669,67 @@ def test_the_name_skip_changes_no_output(tmp_path, monkeypatch):
     out = mc_ui._summarize_chat()
     assert [r["id"] for r in out["recent_sessions"]] == reference[:5]
     assert out["total_session_count"] == len(list(d.glob("*.json"))) == 47
+
+
+# ── Numeric Layout.tsx citations are retired, guarded by absence (#3041) ─────
+#
+# Every `Layout.tsx:<n>` cite this file and `architecture/mission-control.md`
+# carried went stale within a commit or two of being written (two inserted
+# lines moved every one; the map-comment cite was never true), and the doc was
+# re-pointed once and drifted again in the same window. Per `bd60bd2e` (#2971,
+# the `workers/queue.py` ban in tests/test_egress_window_unit.py) the cites are
+# retired to construct names and the tracked corpus is held to none. The
+# record prefixes are that ban's: a frozen corpus the cites are evidence inside.
+
+_LAYOUT_CITE_RECORD_ROOTS = ("eval/baselines", "eval/iv",
+                             "eval/cross_engine_disagreement_arm1", "tests/fixtures")
+#: Assembled from parts, because this file is inside the corpus it polices: the
+#: literal file name, a colon and a digit may not appear together anywhere in it.
+_LAYOUT_CITE = re.compile("Layout" + r"\.tsx" + ":" + r"[0-9]")
+#: The line number the positive control cites, so the reader is shown non-vacuous.
+_SYNTHETIC_LAYOUT_LINE = 999
+
+
+def _numeric_layout_citations(root: Path) -> list[str]:
+    import subprocess
+
+    out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"],
+                         capture_output=True, text=True, check=True).stdout
+    hits: list[str] = []
+    for rel in sorted(p for p in out.split("\0") if p):
+        if any(rel == ex or rel.startswith(ex + "/") for ex in _LAYOUT_CITE_RECORD_ROOTS):
+            continue
+        path = root / rel
+        if not path.is_file() or path.is_symlink():
+            continue
+        text = path.read_bytes().decode("utf-8", "ignore")
+        for n, line in enumerate(text.splitlines(), 1):
+            if _LAYOUT_CITE.search(line):
+                hits.append(f"{rel}:{n}: {line.strip()[:100]}")
+    return hits
+
+
+def test_the_tracked_tree_holds_no_numeric_layout_tsx_citation():
+    hits = _numeric_layout_citations(ROOT)
+    assert not hits, (
+        "numeric Layout.tsx line citations are retired (#3041): name the construct "
+        "(`const PAGES`, the `page === 'ide'` pane, the `ideEverActive` effect) "
+        "instead of its line, which moves on the next edit:\n" + "\n".join(hits))
+
+
+def test_the_layout_citation_reader_reddens_on_a_synthetic_cite(tmp_path):
+    import subprocess
+
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    (tmp_path / "architecture").mkdir()
+    (tmp_path / "architecture" / "doc.md").write_text(
+        f"the map sits at `web/src/components/Layout.tsx:{_SYNTHETIC_LAYOUT_LINE}`\n",
+        encoding="utf-8")
+    (tmp_path / "tests" / "fixtures").mkdir(parents=True)
+    (tmp_path / "tests" / "fixtures" / "rec.md").write_text(
+        f"Layout.tsx:{_SYNTHETIC_LAYOUT_LINE} as recorded\n", encoding="utf-8")
+    (tmp_path / "clean.py").write_text("# Layout.tsx's PAGES map\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(tmp_path), "add", "-A"], check=True)
+    hits = _numeric_layout_citations(tmp_path)
+    assert hits == [f"architecture/doc.md:1: the map sits at "
+                    f"`web/src/components/Layout.tsx:{_SYNTHETIC_LAYOUT_LINE}`"], hits

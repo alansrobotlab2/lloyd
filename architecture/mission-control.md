@@ -47,9 +47,9 @@ tab absent from the summarizer registry is not an error either:
 sent the user, which is why `architecture`, `settings` and `graph` register an
 explicit `lambda: {}` rather than being left out.
 The sixth list is the one that decides whether the tab draws anything:
-`const PAGES` in `web/src/components/Layout.tsx:84`, the map
-`PageComponent = PAGES[page]` (`:328`) looks up and the `{PageComponent && …}`
-guard (`:570`) renders. Its failure is the loudest-looking and the most
+`const PAGES` in `web/src/components/Layout.tsx`, the map
+`PageComponent = PAGES[page]` looks up and the `{PageComponent && …}`
+guard renders. Its failure is the loudest-looking and the most
 silent-actual: `mc_navigate` returns 200, the brief comes back, the frontend
 switches `page`, and the pane stays empty — the same "nothing moves" symptom as
 the hook list, one level deeper, and until #1274 `tests/test_mc_tab_parity.py`
