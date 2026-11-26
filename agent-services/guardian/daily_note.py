@@ -45,11 +45,11 @@ _TYPE = "note"
 def _stamp(now: datetime | date | str) -> str:
     """The `timestamp` value, always full-width.
 
-    Every daily note in the vault carries `YYYY-MM-DDTHH:MM:SS`, and `timestamp` is
-    `str | None` per `scripts/vault/okf_schema.py`, so a bare date would parse but
-    read as a different kind of record: a `date` — which is all the watchdog's
-    `_today()` clock seam yields — is normalised to midnight of that day. A string
-    is passed through untouched, for a caller that already formatted one.
+    Every daily note in the vault carries `YYYY-MM-DDTHH:MM:SS`, the OKF `timestamp`
+    value `derive_timestamp` in `scripts/vault/okf_migrate.py` defines, so a bare
+    date would parse but read as another kind of record: a `date` — all the
+    watchdog's `_today()` clock seam yields — is normalised to midnight of that
+    day. A string is passed through untouched, for a caller that already formatted one.
     """
     if isinstance(now, datetime):
         return now.strftime("%Y-%m-%dT%H:%M:%S")
