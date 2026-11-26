@@ -143,7 +143,7 @@ other direction, for three.
 |---|---|---|
 | [Ingest](#ingest-68-30-53) | #68 #30 #53 | turn outside signal into internal state |
 | [Distil](#distil-38-42-39-40-47--56-57-58-83--54) | #38 #42 #39 #40 #47 · #56 #57 #58 #83 · #54 | read what we already have, write something more useful than the sum of it |
-| [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges |
+| [Build the graph](#build-the-graph-24-51-74) | #24 #51 #74 | turn documents and trajectories into facts and typed edges — plus, for one member of this group, the nightly vault-maintenance pass (frontmatter validation, structure review), a second function this row's axis does not otherwise describe |
 | [Canonicalize](#canonicalize-48-67-84-98) | #48 #67 #84 #98 | make what is already stored agree with itself |
 | [Queue the work](#queue-the-work-65-35-77) | #65 #35 #77 | decide what gets attention next |
 | [Bound entropy](#bound-entropy-79-81-78-80-90-104-108-110-111) | #79 #81 #78 #80 · #90 · #104 · #108 · #110 · #111 | stop the stores rotting or growing without limit |
@@ -1156,7 +1156,22 @@ again in a second repository — the only pair of them writing in none of the st
 this document is about: each changes state in
 another project's git history, which is why their `Writes?` cells read `yes` while the
 tier table still tiers both `Reports only`. Read the `Writes?` column as "changes state
-beyond its own output", or #90's row contradicts its own Role cell.
+beyond its own output", or #90's row contradicts its own Role cell. One member of a
+different group performs this group's frontmatter/structure work from outside its roster:
+#24, which stays rostered under [Build the graph](#build-the-graph-24-51-74) and appears
+nowhere in this section, runs it nightly as Step 4 of the skill its own task names —
+frontmatter validation and a structure review written into
+`~/obsidian/memory/vault-maintenance/` — the same two checks this group's #78 and #80 only
+report on and never fix (#4588).
+
+**That half of #24's run has no task-level owner, only a skill.** The skill written for
+the function alone is `skills/nightly-vault-maintenance/SKILL.md`, `status: active`, and no
+live autonomy task declares it: measured 2026-11-26,
+`grep -h '^skill_name:' ~/obsidian/autonomy/*.md | sort -u` returns 53 values across the
+53 id-prefixed task files in `~/obsidian/autonomy/` and none of them is that skill's name,
+so the work happens only because it is bolted onto the graph job. Whether Step 4 moves to
+a task whose `skill_name` is that skill — the only route by which the orphan gets an owner
+— is a ruling on the vault surface and is owed on #4588, not decided here.
 
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|

@@ -11421,3 +11421,235 @@ def test_every_skill_and_task_dates_a_tree_size_that_names_its_root():
         assert found, (
             f"{label!r} produced no defect, so the rail does not read {key} the way it "
             "claims to")
+
+
+# ── #4588 — #24's second function is stated where the grouping axis is stated ──
+
+#: The hyphenated spelling of the orphaned skill's name, and nothing else. The doc's
+#: other references to this work are prose ("nightly vault-maintenance pass") and the
+#: run-log path (`~/obsidian/memory/vault-maintenance/`), neither of which contains the
+#: hyphens, so a count of this token counts the ownership claim itself rather than every
+#: sentence that mentions vault maintenance.
+ORPHAN_SKILL = "nightly-vault-maintenance"
+
+#: The command the doc prints so a reader can re-derive the ownership claim without
+#: taking its word for it. Matched as literal text: the point of clause 3 is that a
+#: dated claim ships with the thing that re-measures it.
+ORPHAN_SKILL_QUERY = "grep -h '^skill_name:' ~/obsidian/autonomy/*.md | sort -u"
+
+
+def _functions_row_cells(label: str) -> list[str]:
+    """One §The functions row, split into its cells as written.
+
+    `_table` deliberately reads the Jobs cell only, because membership is the question
+    it asks. Clause 1 targets the row's `What it is for` cell — the sentence that *is*
+    the grouping axis — so this needs the whole row.
+    """
+    rows = [ln for ln in _text().splitlines() if ln.startswith(f"| [{label}](")]
+    assert len(rows) == 1, (
+        f"§The functions has {len(rows)} rows labelled {label!r}, expected exactly one")
+    return [c.strip() for c in rows[0].strip().strip("|").split("|")]
+
+
+def _orphan_ownership_defects(text: str) -> list[str]:
+    """What the orphaned-skill claim must carry, returned as defects rather than asserts.
+
+    A function, not inline assertions, so the node below can replay it over mutated
+    copies of the doc: a claim-check that cannot be made to red by stripping the date
+    out of the sentence it reads is a claim-check that only ever reports green.
+    """
+    out: list[str] = []
+    hits = text.count(ORPHAN_SKILL)
+    if hits != 1:
+        out.append(f"the skill name is spelled {hits}x in the doc; clause 3 wants the "
+                   "ownership claim stated once, not restated in two sections")
+    carriers = [p for p in text.split("\n\n") if ORPHAN_SKILL in p]
+    if len(carriers) != 1:
+        out.append(f"{len(carriers)} paragraphs carry the skill name, expected 1, so "
+                   "there is no single place to correct when the board moves")
+        return out
+    flat = _flat(carriers[0])
+    if ORPHAN_SKILL_QUERY not in flat:
+        out.append("the paragraph names the orphaned skill without printing the command "
+                   f"that re-derives it ({ORPHAN_SKILL_QUERY!r})")
+    if not re.search(r"measured 20\d\d-\d\d-\d\d", flat):
+        out.append("the orphaned-skill claim carries no `measured YYYY-MM-DD` date, so a "
+                   "reader cannot tell how stale the 53-values figure is")
+    if "no live autonomy task declares it" not in flat:
+        out.append("the paragraph never states the finding itself — that no live "
+                   "autonomy task declares the skill")
+    if not re.search(r"returns (\d+) values across the (\d+) id-prefixed task files", flat):
+        out.append("the claim states no re-measurable figures (the value count beside "
+                   "the id-prefixed task-file count), so the live node cannot dispute it")
+    return out
+
+
+def test_the_functions_build_the_graph_row_states_both_halves_of_24s_run():
+    """#4588 clause 1: the axis row names the maintenance half, roster unmoved.
+
+    §The functions is where the doc says what each group is *for*, and this row read
+    "turn documents and trajectories into facts and typed edges" — true of #51, true of
+    #74, true of half of #24. The other half is Step 4 of `skills/autonomy-data-pipeline/
+    SKILL.md`: frontmatter validation (Task 5.3) then a structure review (Task 5.4),
+    logged into `~/obsidian/memory/vault-maintenance/`. #24's Role cell inside §Build the
+    graph already names that pass (HEAD 161eeb06 did it), but a Role cell sits below the
+    axis, so whoever consulted the table still could not learn that a job in this group
+    rewrites vault frontmatter six times a day.
+
+    The roster must not travel with the prose. Adding #24 to §Bound entropy's heading or
+    Jobs cell is caught by
+    `test_every_membership_table_still_names_its_ids_exactly_once_and_counts_agree`
+    ("ids spelled twice inside one membership surface"), so the fix is a clause in the
+    `What it is for` cell and exactly one `#24` in the Jobs cell, which is what this
+    node pins from both sides.
+    """
+    cells = _functions_row_cells("Build the graph")
+    assert len(cells) == 3, f"the Build the graph row parsed to {len(cells)} cells: {cells}"
+    jobs, purpose = cells[1], cells[2]
+
+    assert _ids(jobs) == ["#24", "#51", "#74"], (
+        f"the Jobs cell reads {jobs!r} — the roster is #24 #51 #74 with #24 spelled once")
+
+    fleet = {i for ids, _ in _table(FUNCTIONS_HEADER).values() for i in ids}
+    named = [i for i in _ids(purpose) if i in fleet]
+    assert not named, (
+        f"the `What it is for` cell rosters a job ({named}); the axis sentence describes "
+        "what a group is for and is not a second place to list members")
+
+    lost = [p for p in ("facts", "typed edges") if p not in purpose]
+    assert not lost, f"the row lost the half of the axis it always stated: {lost}"
+    missing = [p for p in ("vault-maintenance", "frontmatter", "structure review")
+               if p not in purpose]
+    assert not missing, (
+        f"the row still hides #24's second function ({missing} absent from {purpose!r}); "
+        "a reader of the axis cannot see that this group's fact-extraction job also runs "
+        "the nightly vault-maintenance pass")
+    assert "second function" in purpose and "axis" in purpose, (
+        f"the row states the pass without saying it is outside the grouping criterion "
+        f"({purpose!r}), which reads as if maintenance were what the group is for")
+
+    gained = {row: ids for row, (ids, _) in _table(FUNCTIONS_HEADER).items()
+              if not row.startswith("[Build the graph]") and "#24" in ids}
+    assert not gained, (
+        f"#24 was rostered into a second function group as well: {sorted(gained)}")
+
+
+def test_bound_entropy_names_the_job_running_its_frontmatter_function_from_another_group():
+    """#4588 clause 2: the other half-owner says so, without joining the roster.
+
+    This group is defined by vault hygiene and conformance, yet the only job that
+    *changes* frontmatter and structure nightly is #24, rostered under Build the graph —
+    so the function is split across two groups that each state a different criterion
+    ("the only jobs that create edges and entities" versus "stop the stores rotting or
+    growing without limit"), and the section a reader of §Bound entropy consults for the
+    owner of nightly vault work said nothing about it.
+
+    One sentence has to carry both halves of the ruling, because the pair is the point:
+    naming #24 as the performer without saying it stays under Build the graph reads as a
+    re-shelving this item forbids and the membership guard reds. The roster is therefore
+    re-read here, not merely asserted in prose.
+    """
+    bound = _group_section("Bound entropy")
+    want = [s for s in _sentences(bound)
+            if "#24" in s and "frontmatter" in s and "structure" in s
+            and "rostered under" in s and "Build the graph" in s]
+    assert want, (
+        "§Bound entropy names no single job as running this group's frontmatter/structure "
+        "work from another group *while staying rostered under Build the graph* — the two "
+        "halves in one sentence, or the paragraph reads as a re-shelving "
+        f"({[s[:70] for s in _sentences(bound) if '#24' in s]})")
+
+    h = re.search(r"^## Bound entropy: (.+)$", _text(), re.M)
+    assert h, "there is no `## Bound entropy: ...` group heading to read the roster from"
+    assert "#24" not in _ids(h.group(1)), (
+        f"#24 was added to the §Bound entropy heading ({h.group(1)!r}); the membership "
+        "guard reds an id listed in two groups")
+    row_ids = _table(FUNCTIONS_HEADER)[
+        next(k for k in _table(FUNCTIONS_HEADER) if k.startswith("[Bound entropy]"))][0]
+    assert "#24" not in row_ids, (
+        f"#24 was added to the §Bound entropy Jobs cell ({row_ids}); that is the "
+        "re-shelving the item rules out, not the correction")
+    member_rows = [ln for ln in bound.splitlines() if ln.startswith("| #24 |")]
+    assert not member_rows, (
+        f"#24 gained a row in §Bound entropy's own ID table ({member_rows[0][:60]}), "
+        "which rosters it there while the tables refuse to")
+
+
+def test_the_doc_states_once_which_skill_has_no_task_owner_and_how_to_re_derive_it():
+    """#4588 clause 3: the orphaned skill, stated once, dated, and re-measurable.
+
+    The function #24 Step 4 performs has a skill of its own —
+    `skills/nightly-vault-maintenance/SKILL.md`, `status: active` — and no task that
+    declares it, which is why fix-direction (b) is a ruling rather than a doc edit: there
+    is no task-level owner to move the work to. A claim about a live board rots the way
+    every other figure in this doc rots, so the sentence carries its measurement date and
+    the command that re-derives it.
+
+    Replayed over three seeds after the live check, because a defect list that nothing can
+    make non-empty is a green light bolted to the tree.
+    """
+    text = _text()
+    defects = _orphan_ownership_defects(text)
+    assert defects == [], "\n".join(defects)
+
+    seeds = {
+        "the measurement date stripped": (
+            lambda t: re.sub(r"measured 20\d\d-\d\d-\d\d", "measured recently", t)),
+        "the re-derivation command stripped": (
+            lambda t: t.replace(f"`{ORPHAN_SKILL_QUERY}`", "the skill_name census")),
+        "the claim restated in a second paragraph": (
+            lambda t: t + "\n\nSee `skills/" + ORPHAN_SKILL + "/SKILL.md`.\n"),
+    }
+    for label, mutate in seeds.items():
+        mutated = mutate(text)
+        assert mutated != text, f"the seed {label!r} perturbed nothing"
+        assert _orphan_ownership_defects(mutated), (
+            f"{label!r} produced no defect, so the claim-check does not read the "
+            "date, the command and the single statement it claims to")
+
+
+@live_vault
+def test_the_orphan_skill_claim_still_matches_the_live_board():
+    """#4588 clause 3's fact half: the figures and `status: active` re-measured.
+
+    `@live_vault` because it reads `~/obsidian` — the gate deselects it and the round
+    report judges it, same split as `test_validate_tasks_emits_no_doc_membership_warning_for_any_id`.
+    The figures are recomputed in Python over the same file set the printed command globs
+    (`*.md` under `autonomy/`, id-prefixed ones counted as task files), so a nightly that
+    claims a skill without deleting the task that names it goes red here rather than
+    leaving the doc's number stranded.
+    """
+    import sys
+    sys.path.insert(0, str(ROOT))
+    from app.data_root import vault_root
+
+    board = vault_root() / "autonomy"
+    if not board.is_dir():
+        pytest.skip(f"{board} is not on this box, so the board cannot be read")
+    files = sorted(p for p in board.iterdir() if p.suffix == ".md")
+    assert files, f"{board} holds no markdown at all, so nothing was counted"
+    declared = {re.match(r"^skill_name:\s*(\S+)", ln).group(1)
+                for p in files for ln in p.read_text().splitlines()
+                if ln.startswith("skill_name:")}
+    task_files = [p for p in files if re.match(r"\d+-", p.name)]
+    assert len(task_files) >= 40, (
+        f"only {len(task_files)} id-prefixed task files — the board read came up near-empty")
+
+    m = re.search(r"returns (\d+) values across the (\d+) id-prefixed task files",
+                  _flat(_text()))
+    assert m, "the doc's orphaned-skill claim states no figures to check"
+    assert _num(m.group(1)) == len(declared), (
+        f"the doc says the skill_name census returns {m.group(1)} distinct values; the "
+        f"live board declares {len(declared)}")
+    assert _num(m.group(2)) == len(task_files), (
+        f"the doc says {m.group(2)} id-prefixed task files; the live board has "
+        f"{len(task_files)}")
+    assert ORPHAN_SKILL not in declared, (
+        f"a task now declares `skills/{ORPHAN_SKILL}/SKILL.md`, so the function has an "
+        "owner and the doc sentence is the stale one")
+
+    skill = vault_root() / "skills" / ORPHAN_SKILL / "SKILL.md"
+    assert skill.is_file(), f"{skill} is gone, so the doc points at a deleted skill"
+    assert re.search(r"^status:\s*active$", skill.read_text(), re.M), (
+        f"{skill} is no longer `status: active`, which is what made the missing owner "
+        "worth an item rather than a deletion")
