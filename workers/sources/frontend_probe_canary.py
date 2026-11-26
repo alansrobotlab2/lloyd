@@ -15,10 +15,11 @@ Three rules, each one a way this could have been quietly wrong:
   child inherits the pool's environment, which sets none, so the artifact lands in
   the live state dir. The result names the path it read
   (`STATE_DIR / frontend_probe_canary / latest.json`, resolved at call time).
-- **`--seeds 12`, not the script's default floor of 10.** `--seeds` is a floor the
-  run refuses to report below, and the shipped table holds twelve must-detect seeds.
-  At 10 a scheduled run would tolerate a seed silently dropping out of `n` on top of
-  the one miss a 90% bar already allows.
+- **`--seeds SEEDS`, not the script's default floor of 10 (`MIN_SEEDS`).** `--seeds`
+  is a floor the run refuses to report below, and `SEEDS` is the whole must-detect
+  table, `len(frontend_probe_canary.must_detect_seeds())`. At the default floor a
+  scheduled run would tolerate seeds silently dropping out of `n` on top of the one
+  miss a 90% bar already allows.
 - **A run that did not measure is never a success, and never carries a rate.** The
   CLI's exit code is the verdict: 0 passed, 1 measured below the bar (the result
   carries the measured numbers, as a failure), 2 not measured (no numbers at all —

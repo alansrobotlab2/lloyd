@@ -5642,3 +5642,64 @@ def test_the_fitness_header_rail_fails_on_a_seeded_header():
                for f in _fitness_block_findings(header, "")), (
         "deleting the dated arming note is invisible, so the leaf's provenance is "
         "unrailed")
+
+
+# ── #3284: the probe canary's seed floor is named, never re-typed ────────────
+#
+# `workers/sources/frontend_probe_canary.py`'s docstring advertised "`--seeds 12`"
+# and "twelve must-detect seeds" for every revision after #2130 raised `SEEDS` to
+# 16, and `architecture/workers.md`'s row told an operator to hand-run the stale
+# floor. The number lives in `SEEDS` (pinned to the table by
+# `tests/test_automod_frontend_probe_canary_schedule.py`); prose names it.
+import scripts.automod.frontend_probe_canary as _probe_script  # noqa: E402
+import workers.sources.frontend_probe_canary as _probe_source  # noqa: E402
+
+_SEED_COUNT_LITERAL = re.compile(
+    r"--seeds\s+\d+|\b(?:twelve|sixteen|eighteen)\b|\b\d+\s+must-detect", re.I)
+
+
+def _probe_floor_bullet(doc: str) -> str:
+    bullet = next((b for b in re.split(r"\n- ", doc) if b.startswith("**`--seeds")),
+                  None)
+    assert bullet is not None, (
+        "the probe canary's docstring lost the bullet that says why the scheduled "
+        "floor is above the script's default")
+    return " ".join(bullet.split())
+
+
+def test_probe_canary_docstring_names_the_seed_constant_not_a_count():
+    doc = _probe_source.__doc__ or ""
+    hits = _SEED_COUNT_LITERAL.findall(doc)
+    assert not hits, f"the probe canary docstring re-types a seed count: {hits}"
+    bullet = _probe_floor_bullet(doc)
+    assert "`SEEDS`" in bullet or "`--seeds SEEDS`" in bullet, bullet
+    assert "`len(frontend_probe_canary.must_detect_seeds())`" in bullet, bullet
+    # Positive control: the rule fires on the sentence it was written against.
+    assert _SEED_COUNT_LITERAL.search(
+        "**`--seeds 12`, not the script's default floor of 10.** the shipped table "
+        "holds twelve must-detect seeds")
+
+
+def test_probe_canary_docstring_keeps_why_the_floor_is_above_the_default():
+    bullet = _probe_floor_bullet(_probe_source.__doc__ or "")
+    assert "floor the run refuses to report below" in bullet, bullet
+    m = re.search(r"default floor of (\d+) \(`MIN_SEEDS`\)", bullet)
+    assert m, f"the bullet no longer states the script's default floor: {bullet}"
+    assert int(m.group(1)) == _probe_script.MIN_SEEDS, (
+        f"the docstring says the default floor is {m.group(1)}; the script's "
+        f"`MIN_SEEDS` is {_probe_script.MIN_SEEDS}")
+    assert _probe_source.SEEDS > _probe_script.MIN_SEEDS, (
+        "the scheduled floor is no longer above the default, so the bullet's reason "
+        "is gone")
+
+
+def test_workers_md_probe_canary_row_shows_the_command_the_source_runs():
+    rows = [ln for ln in (ARCH / "workers.md").read_text(encoding="utf-8").splitlines()
+            if ln.startswith("| `frontend-probe-canary` |")]
+    assert len(rows) == 1, f"expected one frontend-probe-canary row, found {len(rows)}"
+    seeds = re.search(r"--seeds (\d+)", _probe_source.COMMAND)
+    assert seeds, f"COMMAND carries no --seeds floor: {_probe_source.COMMAND!r}"
+    shown = re.findall(r"--seeds (\d+)", rows[0])
+    assert shown == [seeds.group(1)], (
+        f"architecture/workers.md's row shows --seeds {shown} while the source runs "
+        f"{_probe_source.COMMAND!r}")
