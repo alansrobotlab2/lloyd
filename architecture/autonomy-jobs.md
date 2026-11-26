@@ -902,7 +902,7 @@ unattended every night too — it rewrites edges onto the surviving name, writes
 aliases and moves fact files — but it creates no entity and no relation the pair
 did not already have: `edges.rewrite_endpoint` expires each edge and re-adds its
 restated copy, and the apply registers the surviving name only when the registry
-lacks it (`entities.register`, `scripts/memory/entity-resolution-sweep.py:1041`).
+lacks it (`entities.register`, `scripts/memory/entity-resolution-sweep.py::apply_merges`).
 What it adds is a decision about which of two names an existing pair always should
 have shared — a boundary this group is defined by and no check enforces.
 
