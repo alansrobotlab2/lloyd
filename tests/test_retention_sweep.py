@@ -46,11 +46,15 @@ _SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "groundskeeper" /
 #:              by name below; the sweep removes things inside it, never the root
 #:   _TREE      the checkout the script itself lives in, used only to find `app/` on
 #:              sys.path — it is never passed to a delete
+#:   FACT_WRITE_GATE_PIN_CONFIG
+#:              the checkout's own `config.yaml`, which store 30 only READS for the
+#:              write_gate pin (#4206 clause 5); nothing opens it for writing, and the
+#:              floor nodes pass a fixture config through `pin_config=` instead
 
 #: Anything else UPPER_CASE-ish and a `Path` is assumed to be something a test could
 #: delete from until it says otherwise here. (The name test is deliberately case-blind:
 #: a `_FOO` private constant holding a path is just as deletable as a public one.)
-NON_TARGET_PATHS = frozenset({"DATA_ROOT", "_TREE"})
+NON_TARGET_PATHS = frozenset({"DATA_ROOT", "_TREE", "FACT_WRITE_GATE_PIN_CONFIG"})
 
 
 def _unredirected_destructive_paths(mod, keep_under: Path,
@@ -14327,9 +14331,11 @@ def _wfg_stamp(seconds: float) -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime(seconds))
 
 
-def _wfg_row(now: float, days_ago: float, verdict: str = "update") -> bytes:
-    """One journal row WITHOUT its newline, in the writer's own field order, carrying the
-    `verdict` the readers key on. Line endings belong to the file, not the row: an archive's
+def _wfg_row(now: float, days_ago: float, verdict: str = "add") -> bytes:
+    """One journal row WITHOUT its newline, in the writer's own field order. The default
+    verdict is `add` so a fold test is not also a test of the update-verdict floor (which
+    holds `"verdict": "update"` rows back by the pin `config.yaml` names); the floor's own
+    nodes plant update rows by name. Line endings belong to the file, not the row: an archive's
     gunzipped `splitlines()` and the live file's `splitlines()` both drop them, so a helper
     that baked one in could only ever compare against one of the two."""
     return json.dumps({
@@ -14628,7 +14634,7 @@ def test_the_write_gate_window_constant_states_the_floor_under_it():
     the test would pass beside a comment that had lost them, which is the drift this node exists
     for. The numeric half — that the fold at the shipped window really does keep the pinned
     count live — is
-    `tests/test_fact_write_gate.py::a_fold_at_the_shipped_window_keeps_the_pinned_update_count_live`.
+    `tests/test_fact_write_gate.py::test_the_fold_keeps_the_pinned_update_count_live_whatever_the_calendar`.
     """
     source = _SCRIPT.read_text(encoding="utf-8")
     at = source.index("FACT_WRITE_GATE_ARCHIVE_AGE_DAYS = 30")
@@ -14694,3 +14700,98 @@ def test_no_tracked_python_cites_a_symbol_with_a_line_span():
     assert out.stdout == "", (
         "tracked Python cites a symbol with a line span; name the symbol alone:\n"
         + out.stdout)
+
+
+# ───── #4206 clause 5: the update-verdict floor is derived from config.yaml and held ─────
+# The 30-day window kept `config.yaml`'s pinned `"verdict": "update"` count live only while
+# recent update rows outnumbered it — a calendar race. The fold now parses the pin at run time
+# and keeps the newest `pin + FACT_WRITE_GATE_PIN_MARGIN` update rows whatever their age.
+
+def _wfg_pin_config(tmp_path: Path, pin: int, name: str = "config.yaml") -> Path:
+    """A config whose `write_gate:` comment pins `pin` update rows, in the shipped sentence."""
+    cfg = tmp_path / name
+    cfg.write_text(
+        "fact_extraction:\n"
+        "  # There is a count to quote and it does\n"
+        f"  # not authorize: {pin:,} `\"verdict\": \"update\"` rows in\n"
+        "  # `_pipeline/vault-derived/fact-write-gate.jsonl` as of 2026-10-04, every one\n"
+        "  # written under `mode: \"noop\"`.\n"
+        "  write_gate:\n"
+        "    mode: \"noop\"\n", encoding="utf-8")
+    return cfg
+
+
+def test_the_write_gate_fold_holds_the_newest_pin_plus_margin_update_rows(
+        rs, tmp_path, monkeypatch):
+    """Every row here is past the window, so a calendar-only fold archives all of them but the
+    newest. The floor (pin 3 + margin 2 = 5) must keep the five NEWEST aged update rows live,
+    archive the older update rows and every aged add row, and say so on the one report line."""
+    monkeypatch.setattr(rs, "FACT_WRITE_GATE_PIN_MARGIN", 2)
+    cfg = _wfg_pin_config(tmp_path, 3)
+    now = time.time()
+    updates = [_wfg_row(now, 100.0 - d, verdict="update") for d in range(8)]   # 100..93 d
+    adds = [_wfg_row(now, 200.0 - d) for d in range(4)]
+    newest = _wfg_row(now, 1.0)
+    journal = _wfg_plant(rs, *adds, *updates, newest)
+    planted = journal.read_bytes().splitlines()
+
+    out = rs.sweep_fact_write_gate(True, now, journal=journal, pin_config=cfg)
+    assert out["refused"] is None, out
+    assert (out["pin"], out["update_floor"], out["held_for_pin"]) == (3, 5, 5), out
+    live = journal.read_bytes().splitlines()
+    live_updates = [ln for ln in live if b'"verdict": "update"' in ln]
+    assert live_updates == updates[-5:], (
+        "the floor did not keep the five NEWEST aged update rows live")
+    assert not any(a in live for a in adds), "an aged add row was held by the update floor"
+    assert newest in live
+    recovered = [ln for path in _wfg_archives(journal) for ln in _wgz_lines(path)]
+    assert sorted(recovered) == sorted(adds + updates[:3]), recovered
+    assert sorted(recovered + live) == sorted(planted), "a row was lost between the two files"
+
+    line = rs._fact_write_gate_line(out)
+    assert "5 aged update row(s) held for the write_gate pin (floor 5 = 3 + 2)" in line, line
+
+
+def test_the_write_gate_floor_is_parsed_at_run_time_not_restated(rs, tmp_path, monkeypatch):
+    """The same journal folded under two configs keeps two different counts: the number comes
+    out of the config the run reads, and the store's code carries no copy of it."""
+    monkeypatch.setattr(rs, "FACT_WRITE_GATE_PIN_MARGIN", 1)
+    now = time.time()
+    rows = [_wfg_row(now, 90.0 - d, verdict="update") for d in range(10)] + [_wfg_row(now, 1.0)]
+    kept = {}
+    for pin in (2, 6):
+        journal = _wfg_plant(rs, *rows, journal=tmp_path / f"pin{pin}" / "fact-write-gate.jsonl")
+        out = rs.sweep_fact_write_gate(True, now, journal=journal,
+                                       pin_config=_wfg_pin_config(tmp_path, pin, f"c{pin}.yaml"))
+        kept[pin] = out["kept_update"]
+    assert kept == {2: 3, 6: 7}, kept
+
+    # The shipped default reads the checkout's own config.yaml.
+    assert rs.FACT_WRITE_GATE_PIN_CONFIG == _SWEEP_TREE / "config.yaml", rs.FACT_WRITE_GATE_PIN_CONFIG
+    assert isinstance(rs._fact_write_gate_pinned_count(), int), "the shipped config pins nothing"
+
+    import ast
+    source = _SCRIPT.read_text(encoding="utf-8")
+    tree = ast.parse(source)
+    for name in ("sweep_fact_write_gate", "_fact_write_gate_pinned_count"):
+        fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == name)
+        consts = [n.value for n in ast.walk(fn) if isinstance(n, ast.Constant)
+                  and isinstance(n.value, int) and not isinstance(n.value, bool)]
+        pinned = rs._fact_write_gate_pinned_count()
+        assert pinned not in consts, f"{name} restates the pinned count {pinned} as a literal"
+
+
+def test_an_unreadable_write_gate_pin_holds_every_update_row(rs, tmp_path):
+    """A floor the fold cannot read is not a floor of zero: with the config gone every aged
+    update row stays live, add rows still fold, and the line names the reason."""
+    now = time.time()
+    upd = [_wfg_row(now, 80.0, verdict="update"), _wfg_row(now, 70.0, verdict="update")]
+    add = _wfg_row(now, 75.0)
+    journal = _wfg_plant(rs, upd[0], add, upd[1], _wfg_row(now, 1.0))
+    out = rs.sweep_fact_write_gate(True, now, journal=journal,
+                                   pin_config=tmp_path / "no-such-config.yaml")
+    assert out["pin"] is None and out["held_for_pin"] == 2 and out["moved"] == 1, out
+    live = journal.read_bytes().splitlines()
+    assert all(u in live for u in upd) and add not in live, live
+    line = rs._fact_write_gate_line(out)
+    assert "write_gate pin unreadable in config.yaml: every update row held" in line, line

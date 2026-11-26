@@ -450,47 +450,42 @@ def _sweep_store():
     not LIVE_LOG.is_file(),
     reason="the supersede-count floor is a property of the live journal",
 )
-def test_the_archive_window_leaves_the_live_journal_holding_the_pinned_supersede_count():
-    """#4206 clause 5: the fold's window must stay WIDER than the reach of the number this file's
-    own prose pins, or the sweep voids the one figure a reader cites from this journal.
+def test_the_fold_keeps_the_pinned_update_count_live_whatever_the_calendar(tmp_path):
+    """#4206 clause 5: after a fold the live journal still holds at least the `"verdict":
+    "update"` count this file's prose pins, plus the store's stated margin — HELD by the fold,
+    not hoped for from the calendar.
 
-    `test_the_quoted_supersede_count_is_at_most_what_the_live_log_holds` above counts
-    `'"verdict": "update"'` rows in the PRODUCTION file and asserts the 402 pinned at
-    `config.yaml:2788` is at most that count. A fold ages every row by its OWN `ts`, so after one
-    the live count IS the count inside the window — which makes this node the real floor on
-    `FACT_WRITE_GATE_ARCHIVE_AGE_DAYS`. The item's CHECK 5 reasoned that 30 days was safe because
-    "the two committed measurements use 400-write and 60-row labelled samples"; that named the
-    wrong constraint, and this is the constraint.
-
-    Measured on the live file 2026-11-17 (87,504 rows, 86,987,606 bytes): 2,088 rows carry the
-    marker and 1,015 of them sit inside 30 days of the newest stamped row — 2.5x the pinned
-    figure, and the sweep's own dry run of the new store says `42317 would archive` against an
-    independently counted 42,317 rows past the window. Both numbers are re-derived below rather
-    than quoted, so the node stays true as the file grows and goes red the moment the window
-    stops covering the prose. The horizon is the newest STAMPED row rather than wall clock, so
-    the answer is a property of these bytes and not of the minute the node happens to run.
+    The node this replaces counted update rows inside the 30-day window and compared them to the
+    pin, which passed only while recent update rows outnumbered it and went red (`1015 < 1019`)
+    the day a hand-copied figure overtook them. The fold now parses the pin out of
+    `config.yaml`'s `write_gate:` comment at run time and keeps the newest `pin + margin` update
+    rows whatever their age, so the worst case is checked directly: a COPY of the live journal
+    is folded as if the sweep ran 400 days after its newest row, when the window keeps nothing
+    but that row. The live file is only read; the fold runs on the copy in `tmp_path`.
     """
     rs = _sweep_store()
-    window = rs.FACT_WRITE_GATE_ARCHIVE_AGE_DAYS
     marker = rs.FACT_WRITE_GATE_UPDATE_VERDICT
-    stamp = rs._fact_write_gate_seconds
-    lines = [ln + "\n" for ln in LIVE_LOG.read_text(encoding="utf-8").splitlines()]
+    raw = LIVE_LOG.read_bytes()
+    copy = tmp_path / "fact-write-gate.jsonl"
+    copy.write_bytes(raw)
 
-    newest = max((s for s in (stamp(ln) for ln in lines) if s is not None), default=None)
+    newest = max((s for s in (rs._fact_write_gate_seconds(ln) for ln in raw.splitlines())
+                  if s is not None), default=None)
     assert newest is not None, "the live journal holds no parseable `ts` to age a fold against"
-
-    total = sum(1 for ln in lines if marker in ln)
-    kept = sum(1 for ln in lines
-               if marker in ln
-               and (s := stamp(ln)) is not None
-               and newest - s <= window * 86400)
     pinned, _as_of = _pinned_citation(_write_gate_comment())
+    assert rs._fact_write_gate_pinned_count(ROOT / "config.yaml") == pinned, (
+        "the sweep parses a different pin out of config.yaml than this file grades")
 
-    assert kept <= total, f"a {window}d window cannot keep {kept} of {total} rows"
+    total = raw.count(marker.encode("utf-8"))
+    out = rs.sweep_fact_write_gate(True, newest + 400 * 86400, journal=copy,
+                                   pin_config=ROOT / "config.yaml")
+    assert out["refused"] is None, out
+    kept = copy.read_bytes().count(marker.encode("utf-8"))
+    assert kept == out["kept_update"] == min(total, pinned + rs.FACT_WRITE_GATE_PIN_MARGIN), (
+        kept, out["kept_update"], total)
     assert kept >= pinned, (
-        f"a {window}d fold leaves the live journal holding {kept} of the {total} `{marker}` "
-        f"rows, under the {pinned} the write_gate comment pins: the fold would void the figure "
-        f"that prose cites, which is #2225's failure — a fold that moves rows a reader is about "
+        f"a fold left {kept} of the {total} `{marker}` rows live, under the {pinned} the "
+        f"write_gate comment pins: #2225's failure — a fold that moves rows a reader is about "
         f"to count silently zeroes the store it exists to bound")
 
 

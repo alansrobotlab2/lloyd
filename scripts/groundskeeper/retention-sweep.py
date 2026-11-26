@@ -6184,6 +6184,11 @@ FACT_WRITE_GATE_JOURNAL = DATA_ROOT / FACT_WRITE_GATE_RELATIVE
 #: silently zero the store it exists to bound — #2225's rule, and why this paragraph is here
 #: rather than a bare `= 30`.
 #:
+#: Those figures are why 30 was chosen; they are no longer what holds the floor. A calendar
+#: window keeps the pin only while recent update rows outnumber it, so the fold now holds it
+#: itself: `FACT_WRITE_GATE_PIN_CONFIG` / `FACT_WRITE_GATE_PIN_MARGIN` below parse the pin out
+#: of `config.yaml` on every run and keep that many update rows live whatever their age.
+#:
 #: There is deliberately NO byte backstop beside this window, unlike store 26. At the
 #: measured 884,542 B/day the post-fold steady state is ~26 MB live, and any ceiling under
 #: that starts cutting into the update-row count above, so a size rail here would break the
@@ -6205,6 +6210,51 @@ FACT_WRITE_GATE_ARCHIVE_PREFIX = "fact-write-gate-archive-"
 #: of this store moves — named as a constant here so the window's floor is ONE measurement both
 #: files read, not two string literals that drift apart (#2225).
 FACT_WRITE_GATE_UPDATE_VERDICT = '"verdict": "update"'
+
+#: The floor under the window, DERIVED and STRUCTURAL rather than restated (#4206 clause 5).
+#: The window above keeps the pinned count only while recent update rows outnumber it — a
+#: calendar race that a quiet month, or a prose bump of the pin, would lose on an unrelated
+#: day. So the fold itself holds it: it parses the pinned count out of `config.yaml`'s
+#: `write_gate:` comment AT RUN TIME (the same sentence
+#: `tests/test_fact_write_gate.py::_pinned_citation` reads, never a copy of its number) and
+#: keeps the newest `pin + FACT_WRITE_GATE_PIN_MARGIN` update-verdict rows live whatever their
+#: age, exactly as store 19 and store 26 keep the newest row. The config is the checkout's own
+#: (`_TREE`), which is code and not data, so it needs no `app.paths` and resolves under cron.
+FACT_WRITE_GATE_PIN_CONFIG = _TREE / "config.yaml"
+
+#: Update rows held over the parsed pin. The pin is hand-edited prose: a reader who re-measures
+#: and bumps it must find the rows still live, so the fold keeps this many more than the figure
+#: it read. 100 rows is ~25% of the 402 pinned when this was written, and costs ~100 KB live.
+FACT_WRITE_GATE_PIN_MARGIN = 100
+
+
+def _fact_write_gate_pinned_count(config: Path | None = None) -> int | None:
+    """The `"verdict": "update"` count `config.yaml`'s `write_gate:` comment pins, or None.
+
+    The comment block directly above the `  write_gate:` key is folded (comment markers off,
+    wrapped lines joined) and searched for `<N> `"verdict": "update"` rows in `<journal>` as
+    of <date>` — the sentence the test file's `_pinned_citation` grades. None when the file,
+    the key or the sentence is missing: the caller then holds EVERY update row, because a
+    floor it cannot read is not a floor of zero.
+    """
+    try:
+        lines = Path(config if config is not None else FACT_WRITE_GATE_PIN_CONFIG
+                     ).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
+        return None
+    try:
+        at = next(i for i, line in enumerate(lines) if line == "  write_gate:")
+    except StopIteration:
+        return None
+    start = at
+    while start and lines[start - 1].lstrip().startswith("#"):
+        start -= 1
+    folded = " ".join(part for part in (ln.strip()[1:].strip() for ln in lines[start:at])
+                      if part)
+    found = re.search(r"(\d[\d,]*)\s+" + re.escape(f"`{FACT_WRITE_GATE_UPDATE_VERDICT}`")
+                      + r" rows in `" + re.escape(FACT_WRITE_GATE_RELATIVE)
+                      + r"` as of \d{4}-\d{2}-\d{2}", folded)
+    return int(found.group(1).replace(",", "")) if found else None
 
 
 def _fact_write_gate_seconds(line: bytes) -> float | None:
@@ -6254,7 +6304,8 @@ def _fact_write_gate_archive_tally(journal: Path) -> tuple[int, int]:
     return files, total
 
 
-def sweep_fact_write_gate(apply, now, *, journal=None, on_attempt=None) -> dict:
+def sweep_fact_write_gate(apply, now, *, journal=None, on_attempt=None,
+                          pin_config=None) -> dict:
     """Fold write-gate rows older than FACT_WRITE_GATE_ARCHIVE_AGE_DAYS into month gzips.
 
     #4206, and store 26's shape rather than a new one. One row per ASKED fact write is
@@ -6285,11 +6336,17 @@ def sweep_fact_write_gate(apply, now, *, journal=None, on_attempt=None) -> dict:
     excludes the ENTIRE file, so on a box whose gate has not been asked in months folding it
     would empty the journal and destroy the one row that says the capability is wired up at
     all. Keeping it costs one row.
+
+    And the update-verdict floor (#4206 clause 5): the newest `pin + FACT_WRITE_GATE_PIN_MARGIN`
+    rows carrying `FACT_WRITE_GATE_UPDATE_VERDICT` stay live whatever their age, the pin parsed
+    from `pin_config` (default `FACT_WRITE_GATE_PIN_CONFIG`) on every run; an unreadable pin
+    holds every update row. `held_for_pin` counts the aged rows that floor kept back.
     """
     journal = Path(journal) if journal is not None else FACT_WRITE_GATE_JOURNAL
     out = {"apply": apply, "present": False, "before": 0, "after": 0, "bytes": 0,
            "moved": 0, "archived": 0, "rows": 0, "undated": 0, "kept_newest": 0,
-           "archive_files": 0, "archive_bytes": 0, "refused": None}
+           "archive_files": 0, "archive_bytes": 0, "refused": None,
+           "pin": None, "update_floor": None, "kept_update": 0, "held_for_pin": 0}
 
     def with_archives(res: dict) -> dict:
         # Taken on EVERY return, including the absent-journal one, store 26's reason: the
@@ -6323,8 +6380,8 @@ def sweep_fact_write_gate(apply, now, *, journal=None, on_attempt=None) -> dict:
         elif newest_at is None or seconds >= newest_at:
             newest_at, newest_index = seconds, index
 
-    buckets: dict[str, list[bytes]] = {}
     kept_idx: list[int] = []
+    aged_idx: list[int] = []
     for index, line in enumerate(lines):
         seconds = stamps[index]
         if seconds is None:
@@ -6337,7 +6394,34 @@ def sweep_fact_write_gate(apply, now, *, journal=None, on_attempt=None) -> dict:
         if now - seconds <= FACT_WRITE_GATE_ARCHIVE_AGE_DAYS * 86400:
             kept_idx.append(index)                    # inside the window
             continue
-        buckets.setdefault(time.strftime("%Y%m", time.gmtime(seconds)), []).append(line)
+        aged_idx.append(index)
+
+    # The update-verdict floor: hold back the NEWEST aged update rows until the live file
+    # keeps `pin + margin` of them. Newest first by the row's own stamp, later line on a tie,
+    # so what stays is the recent end of the evidence a re-measure of the pin would count.
+    marker = FACT_WRITE_GATE_UPDATE_VERDICT.encode("utf-8")
+    pin = _fact_write_gate_pinned_count(pin_config)
+    out["pin"] = pin
+    floor = None if pin is None else pin + FACT_WRITE_GATE_PIN_MARGIN
+    out["update_floor"] = floor
+    kept_update = sum(1 for i in kept_idx if marker in lines[i])
+    held: set[int] = set()
+    for index in sorted((i for i in aged_idx if marker in lines[i]),
+                        key=lambda i: (stamps[i], i), reverse=True):
+        if floor is not None and kept_update >= floor:
+            break
+        held.add(index)
+        kept_update += 1
+    out["kept_update"] = kept_update
+    out["held_for_pin"] = len(held)
+    kept_idx = sorted(kept_idx + list(held))
+
+    buckets: dict[str, list[bytes]] = {}
+    for index in aged_idx:
+        if index in held:
+            continue
+        buckets.setdefault(time.strftime("%Y%m", time.gmtime(stamps[index])),
+                           []).append(lines[index])
 
     out.update({"moved": sum(len(rows) for rows in buckets.values()),
                 "bytes": sum(len(ln) for rows in buckets.values() for ln in rows)})
@@ -6384,6 +6468,11 @@ def _fact_write_gate_line(p: dict) -> str:
             if p["archive_files"] else " [no month archive yet]")
     tail = (f" — {p['undated']} undated row(s) kept (no parseable `ts`)"
             if p["undated"] else "")
+    if p.get("present") and p.get("pin") is None:
+        tail += " — write_gate pin unreadable in config.yaml: every update row held"
+    elif p.get("held_for_pin"):
+        tail += (f" — {p['held_for_pin']} aged update row(s) held for the write_gate pin "
+                 f"(floor {p['update_floor']} = {p['pin']} + {FACT_WRITE_GATE_PIN_MARGIN})")
     if not p["present"]:
         return f"{label}: no journal yet — nothing to bound{arch}"
     if p["refused"]:
