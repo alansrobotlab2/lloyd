@@ -90,6 +90,17 @@ RAW_KEYS = ["n_queries", "entity_hit_rate", "doc_hit_rate", "entity_recall_avg",
             "anchorless_query_count", "anchorless_query_ids", "errors",
             "counterfactual_moved_rate", "counterfactual_pinned_rate"]
 
+# ── #4603: the published strings, spelled as the artifact carries them ─────────
+#
+# Literals, not `ev.BELOW_VETO`/`ev.NO_CEILING`/`ev.NO_SCORE`, so a node here fails on the
+# text it is pinning instead of on an `AttributeError` naming a constant the tree under test
+# has not landed yet — and because a consumer of `summary.overall` reads these bytes, not
+# the Python names. `test_the_veto_and_reason_constants_are_the_published_strings` is what
+# ties the two spellings together.
+BELOW_VETO_KEY = "below_veto"
+NO_CEILING_TEXT = "no ceiling"
+NO_SCORE_TEXT = "no score"
+
 
 # ── the semantics, with no engine and no live store ──────────────────────────
 
@@ -174,7 +185,20 @@ def test_normalization_divides_and_names_the_kind():
     assert fields["entity_hit_rate_ceiling_kind"] == lac.CEILING_KIND
     assert fields["entity_recall_avg_normalized"] == pytest.approx(1.2)
     assert fields["doc_hit_rate_normalized"] is None
-    assert "ceiling_notes" not in fields
+    # #2406's harness invariant is that this node's `overall` is missing the
+    # `dup_slot_share`/`*_carried` keys, so those keys are NOT what divides here — the six
+    # assertions above all pass on metrics whose score is present. #4603 changed what the
+    # missing ones do: `_normalize_against_ceiling` now states them as null WITH the reason
+    # that no ceiling was ever computed for them, in the shared `ceiling_notes` dict, rather
+    # than `continue`ing past both. So the dict is expected, and the thing that would make
+    # this node lie about the division it pins is a ratio appearing for a metric the ceiling
+    # block has no value for — which the two assertions below hold shut.
+    assert set(fields["ceiling_notes"]) <= set(ev.CI_METRICS)
+    assert "entity_hit_rate" not in fields["ceiling_notes"]
+    for metric in ("dup_slot_share", "superseded_slot_share",
+                   "entity_hit_rate_retrieval_carried"):
+        assert fields[f"{metric}_normalized"] is None, metric
+        assert fields["ceiling_notes"][metric].startswith(f"{NO_CEILING_TEXT}: "), metric
 
 
 # ── #2014: a ratio is never emitted from two different query sets ────────────
@@ -231,9 +255,16 @@ def test_a_ratio_is_still_emitted_when_both_halves_cover_the_same_query_set():
     # The zero-ceiling leg answers first and keeps its own note, n's equal or not.
     assert fields["entity_recall_avg_normalized"] is None
     assert "undefined" in fields["ceiling_notes"]["entity_recall_avg"]
-    assert set(fields["ceiling_notes"]) == {"entity_recall_avg"}
-    # No ceiling for a metric: still null, still no ratio borrowed, no note invented.
+    # A metric that divided has no note; every one that did not has exactly one. #4603 is
+    # what made the second half of that sentence true — before it the metrics with no
+    # divisor were silent.
+    assert set(fields["ceiling_notes"]) == set(ev.CI_METRICS) - {
+        "entity_hit_rate", "doc_hit_rate"}, (
+        "the note set stopped being the complement of the divided metrics")
+    # No ceiling for a metric: still null, still no ratio borrowed. What #4603 added is the
+    # reason, never a ratio, so this stays the load-bearing assertion of this node.
     assert fields["doc_recall_avg_normalized"] is None
+    assert fields["ceiling_notes"]["doc_recall_avg"].startswith(f"{NO_CEILING_TEXT}: ")
 
 
 def test_the_page_prints_null_for_a_ratio_over_two_populations(capsys):
@@ -1653,9 +1684,14 @@ def test_an_artifact_without_the_builder_key_puts_the_regeneration_command_in_th
     ev._normalize_against_ceiling(fields, overall)
     assert ev.MENU_BUILDER_NOTE in fields["ceiling_notes"], (
         "the per-metric notes were written into a dict that replaced the provenance one")
+    # #2406's bound is "a note key names a metric a reader can look up", not "a metric the
+    # printed page has a line for": since #4603 the seven metrics the ceiling never covers
+    # carry reasons too, keyed by their own metric name and reachable from the JSON. The
+    # printed page still shows notes for only the seven `METRICS` it prints a line per, so
+    # those seven reasons are for a tool reading the artifact, not for the nightly page.
     for metric, reason in fields["ceiling_notes"].items():
         if metric != ev.MENU_BUILDER_NOTE:
-            assert metric in METRICS, (
+            assert metric in ev.CI_METRICS, (
                 f"{metric!r} is neither a metric nor the provenance slot; a stray key "
                 "here would never be printed and never be found")
 
@@ -1734,12 +1770,17 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
     did the same with the refused-ceiling escalation: one call below the baseline write
     (line 3097, the last line cited) and the function after `main` (3,218 → 3,301).
     #4033 (2026-11-26) took it too: `--linked-notes` is five line-for-line edits above
-    `main` and its helpers are appended after it (3,301 → 3,348).
+    `main` and its helpers are appended after it (3,301 → 3,348). #4603 took the road a
+    fourth time: its five edits above `main` are each line-for-line (the silent `continue`
+    becomes one call, `ceiling_context` and `_ceiling_absent_fields` chain one attach each,
+    and the two literals `0.80` become `lac.AGREEMENT_VETO`), and the three constants plus
+    four helpers that build the veto record and the null-ratio reasons are appended after
+    `main` (3,348 → 3,482), so no `architecture/` citation moved and only this total did.
     """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3348, (
-        f"eval/run_eval.py is {len(lines)} lines, not the 3,348 #4285, #4297 and #4033 left it "
-        "at by appending after `main` (every `architecture/` line citation and this list were "
+    assert len(lines) == 3482, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 3,482 #4603 left it at by "
+        "appending after `main` (every `architecture/` line citation and this list were "
         "re-numbered to 3,131 on 2026-11-25, when #4399's "
         "skills_search arm grew it from the 2,975 #4404's episodic-floor leg had reached "
         "on 2026-11-20 (from 2,735 before that) — behaviour, not prose, so the rule was "
@@ -2180,3 +2221,328 @@ def test_a_measured_ceiling_appends_nothing_and_leaves_the_note_alone(
     assert ev.escalate_refused_ceiling({"ceiling": None}, _synth_corpus()) is False
     assert (today.read_bytes(), today.stat().st_mtime_ns) == before
 
+
+# ── #4603: the veto verdict in JSON, and a reason beside every null ratio ──────
+
+#: The `CI_METRICS` keys that can never receive a divisor: the ceiling artifact's
+#: `values` block carries `lac.ENTITY_METRICS` + `lac.DOC_METRICS` + `lac.UNMEASURED_METRICS`
+#: — seven names — and these seven of the fourteen are not among them. Listed in full
+#: because clause 2 names them individually, and because
+#: `test_no_normalized_key_is_a_silent_null_whether_or_not_a_ceiling_was_computed`
+#: re-derives the set from the artifact and goes red if this list and that block part.
+CAPELESS = ("entity_hit_rate_retrieval_carried", "entity_hit_rate_seed_carried",
+            "entity_hit_rate_fact_carried", "entity_hit_rate_graph_expanded_fact_carried",
+            "entity_hit_rate_graph_neighbor_carried", "dup_slot_share",
+            "superseded_slot_share")
+
+#: The ceiling block's own bookkeeping, as opposed to the metric keys it carries a divisor
+#: for. `below_veto` is one of these as of #4603, so it must never read as a metric.
+_CEILING_BOOKKEEPING = ("kind", "artifact", "n", "excluded", "unmeasured",
+                        "menu_builder", "artifact_age_days", "reason", "remediation",
+                        BELOW_VETO_KEY)
+
+
+def _measured_run(tmp_path, monkeypatch, *, disagree_on=()):
+    """A whole normalised run — artifact on disk, `ceiling_context`, `summarize`, the
+    division, and the JSON round trip — returned as `summary.overall` re-read from disk.
+
+    The round trip is the seam clause 1 is written against: the veto is only useful to a
+    tool that never opens the printed page, so the verdict has to survive `json.dump` into
+    `summary.overall.ceiling`. `_engine_artifact` builds the artifact through the real
+    labelling pass, so its agreement figure, its ceiling values and its `labels_sha256`
+    are all things `load_artifact` recomputes rather than admits. No published nightly can
+    stand in for this: every artifact under the baselines directory has a REFUSED ceiling
+    (the gold labels moved), so a below-veto record there would be reading a refusal.
+    """
+    out = tmp_path / "label-agreement"
+    out.mkdir(parents=True, exist_ok=True)
+    art = _engine_artifact(out, disagree_on=disagree_on)
+    _write(art, out)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(out))
+    ids = [q["id"] for q in _CEIL_CORPUS]
+    records = [dict(r, id=q["id"]) for r, q in
+               zip(_printed_records(len(ids), 2), _CEIL_CORPUS)]
+    summary = ev.summarize(records)
+    fields = ev.ceiling_context([dict(q) for q in _CEIL_CORPUS], scored_ids=ids,
+                                records=records)
+    ev._normalize_against_ceiling(fields, summary["overall"])
+    summary["overall"].update(fields)
+    path = tmp_path / "nightly-4603.json"
+    path.write_text(json.dumps({"summary": summary}), encoding="utf-8")
+    o = json.loads(path.read_text(encoding="utf-8"))["summary"]["overall"]
+    assert o["ceiling"]["kind"] == lac.CEILING_KIND, (
+        "the fixture's ceiling was refused, so every assertion below would be reading a "
+        "refusal as a measurement")
+    return o
+
+
+def _metrics_the_ceiling_has_values_for(ceiling: dict) -> set:
+    return {k for k in ceiling if k in ev.CI_METRICS and k not in _CEILING_BOOKKEEPING}
+
+
+def test_a_sub_veto_ceiling_puts_the_verdict_and_blameable_false_in_the_baseline(
+        tmp_path, monkeypatch):
+    """Clause 1, sub-veto half: the #654 veto as a node a JSON reader can act on.
+
+    The entity leg here is labelled at 0.6667 all-gold — under `AGREEMENT_VETO`, the same
+    side of the line the live instrument is on today (0.3511 on
+    `label-agreement-20261126-175819.json`) — so the record has to say the run is below
+    veto and that its raw `entity_hit_rate` is not blameable. `sub_veto_advisory` has said
+    this in prose since #1374 and `print_table`'s `_verdict` since #654; neither ever wrote
+    down the threshold or the consequence anywhere a tool could read, which is why
+    `git grep -i below_veto` returned nothing at the sha this item was filed at.
+    """
+    o = _measured_run(tmp_path, monkeypatch, disagree_on=("q-disagree",))
+    assert o["label_agreement"]["entity_label_agreement"] == pytest.approx(0.6667), (
+        "the fixture's all-gold entity agreement has to sit under the veto or this node is "
+        "pinning the wrong state")
+    rec = o["ceiling"][BELOW_VETO_KEY]
+    assert rec == {
+        "threshold": lac.AGREEMENT_VETO,
+        "agreement_key": "entity_label_agreement",
+        "below_veto": True, "blameable": False,
+        "legs": {"entity": {"measured": True, "below_veto": True, "blameable": False,
+                            "agreement_key": "entity_label_agreement"},
+                 "doc": {"measured": False, "below_veto": None, "blameable": None,
+                         "agreement_key": "doc_label_agreement"}}}, (
+        "the record is the whole decision: threshold, which key was judged, the verdict and "
+        "the consequence. The doc leg is null here because `doc_cap=0` measured no doc "
+        "labels, and an unmeasured leg must not borrow the entity leg's excuse")
+    assert rec["threshold"] == 0.80, (
+        "clause 1 names 0.80: the record carries the number, not a pointer to a constant "
+        "the reader would have to import")
+    # The figure itself stays where it already lives. The item's own scope forbids a second
+    # copy of it, and a copy is the shape that later disagrees with the original.
+    assert rec["agreement_key"] == "entity_label_agreement"
+    assert o["label_agreement"][rec["agreement_key"]] == pytest.approx(0.6667)
+    assert [k for k, v in rec.items()
+            if isinstance(v, (int, float)) and not isinstance(v, bool)] == ["threshold"], (
+        "only the threshold is a number in the record: the measured agreement must not be "
+        "restated here")
+    assert not any(isinstance(v, (int, float)) and not isinstance(v, bool)
+                   for leg in rec["legs"].values() for v in leg.values()), (
+        "no leg restates the figure it was judged on either")
+
+
+def test_an_at_or_above_veto_ceiling_states_that_the_run_is_not_below_veto(
+        tmp_path, monkeypatch):
+    """Clause 1, control half: the same record, on a labeler the run can be held to.
+
+    A flag that only ever says `blameable: false` is not a flag. The control artifact is
+    the identical three queries with a second rater that never dissents (agreement 1.0), so
+    the ONLY difference between this node and the sub-veto one is which side of 0.80 the
+    measured figure lands on.
+    """
+    o = _measured_run(tmp_path, monkeypatch)
+    assert o["label_agreement"]["entity_label_agreement"] == 1.0
+    rec = o["ceiling"][BELOW_VETO_KEY]
+    assert rec["below_veto"] is False and rec["blameable"] is True, (
+        "labels that agree leave the entity hit rate blameable, which is the whole point of "
+        "the veto having an opposite")
+    assert rec["legs"]["entity"] == {
+        "measured": True, "below_veto": False, "blameable": True,
+        "agreement_key": "entity_label_agreement"}
+
+
+def test_the_veto_record_is_the_threshold_comparison_and_nulls_when_unmeasured():
+    """Clause 1's boundary and its third state, at the unit that produces them.
+
+    Three things the run-level nodes cannot reach through a labelling pass: a figure of
+    exactly 0.80 is NOT below veto — the veto fires on `agreement < AGREEMENT_VETO`, the
+    same comparison `print_table` performs on `_ent`; the step below it; and the unmeasured
+    state every published nightly is in, where both figures are null and the record has to
+    make no claim rather than default to the reassuring one.
+    """
+    at = ev._below_veto_record({"entity_label_agreement": lac.AGREEMENT_VETO,
+                                "doc_label_agreement": 0.95})
+    assert at["below_veto"] is False and at["blameable"] is True
+    assert at["legs"]["doc"] == {"measured": True, "below_veto": False,
+                                 "blameable": True,
+                                 "agreement_key": "doc_label_agreement"}, (
+        "the doc leg is judged on its own figure, not folded into the entity headline")
+    under = ev._below_veto_record({"entity_label_agreement": lac.AGREEMENT_VETO - 0.01})
+    assert under["below_veto"] is True and under["blameable"] is False
+    for absent in (None, {}, {"entity_label_agreement": None},
+                   {"entity_label_agreement": "0.35"}):
+        rec = ev._below_veto_record(absent)
+        assert rec["below_veto"] is None and rec["blameable"] is None, absent
+        assert rec["legs"]["entity"]["measured"] is False, absent
+        assert rec["threshold"] == lac.AGREEMENT_VETO, absent
+
+
+def test_no_normalized_key_is_a_silent_null_whether_or_not_a_ceiling_was_computed(
+        tmp_path, monkeypatch):
+    """Clause 2: a null ratio always carries a reason, across all 14 `CI_METRICS` keys.
+
+    The 2026-11-26 nightly is the witness this node exists to make impossible: 14
+    `*_normalized` keys, every one null, and `ceiling_notes` holding no entry for any of
+    them, because `_normalize_against_ceiling` `continue`d before writing the kind or a
+    note. Seven of those keys can never receive a divisor at all, so the silent null was
+    not a one-off but the permanent state of half the reported surface. The refused run is
+    checked in the same node because it is the state every published baseline is actually
+    in, and a reason-less null there is the same defect on 14 keys instead of 7.
+    """
+    measured = _measured_run(tmp_path, monkeypatch)
+    assert set(CAPELESS) == set(ev.CI_METRICS) - _metrics_the_ceiling_has_values_for(
+        measured["ceiling"]), (
+        "CAPELESS no longer names the keys the ceiling has no value for, and clause 2 "
+        "counts them")
+
+    def _every_key_is_a_number_or_says_why(o: dict) -> None:
+        notes = o["ceiling_notes"]
+        silent = [m for m in ev.CI_METRICS
+                  if o[f"{m}_normalized"] is None and not (notes.get(m) or "").strip()]
+        assert not silent, f"{silent} publish a null ratio with no reason beside it"
+
+    o = _measured_run(tmp_path, monkeypatch, disagree_on=("q-disagree",))
+    _every_key_is_a_number_or_says_why(o)
+    notes = o["ceiling_notes"]
+    for metric in CAPELESS:
+        assert o[f"{metric}_normalized"] is None, (
+            f"{metric} divided by something it has no ceiling for")
+        assert notes[metric].startswith(f"{NO_CEILING_TEXT}: "), (
+            f"{metric}'s null says something other than that it has no divisor")
+    assert set(CAPELESS) <= set(notes), (
+        "the seven keys clause 2 names are not all present in ceiling_notes")
+
+    empty = tmp_path / "no-artifact"
+    empty.mkdir()
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(empty))
+    summary = ev.summarize(_printed_records(3, 2))
+    fields = ev.ceiling_context(_synth_corpus(), scored_ids=["p0", "p1", "p2"])
+    ev._normalize_against_ceiling(fields, summary["overall"])
+    summary["overall"].update(fields)
+    refused = summary["overall"]
+    assert refused["ceiling"]["kind"] is None
+    _every_key_is_a_number_or_says_why(refused)
+    carried = refused["ceiling"]["reason"].strip()
+    assert carried and all(n == f"{NO_CEILING_TEXT}: {carried}"
+                           for n in refused["ceiling_notes"].values()), (
+        "a refused ceiling's per-metric reason has to be the refusal the ceiling itself "
+        "states, not a paraphrase of it")
+
+
+def test_the_three_null_ratio_reasons_stay_three_distinct_texts(tmp_path, monkeypatch):
+    """Clause 3: the two reasons that already exist keep their exact text, and the new
+    capless reason is a third, distinguishable one.
+
+    All three classes in one `ceiling_notes` dict, from one real ceiling: the 0.0-cap text
+    (this artifact's doc ceilings are 0.0 and the score half does have doc scores), the
+    `population mismatch` text (the #2014 guard, fired by handing it a score half over 99
+    queries against a `ceiling.n` of 3 — the real guard reading real numbers, with
+    `ceiling_population` removed so the full halves are the pair compared), and the new text
+    on the metrics that have no divisor. What must not happen is a capless metric inheriting
+    one of the two existing sentences: each names a different owner of the problem, and the
+    reason field is where a reader decides whose bug to open.
+    """
+    out = tmp_path / "label-agreement"
+    out.mkdir(parents=True, exist_ok=True)
+    _write(_engine_artifact(out, disagree_on=("q-disagree",)), out)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(out))
+    fields = ev.ceiling_context([dict(q) for q in _CEIL_CORPUS],
+                                scored_ids=[q["id"] for q in _CEIL_CORPUS])
+    del fields["ceiling_population"]
+    scores = {"entity_hit_rate": 0.6667, "entity_recall_avg": 0.5, "doc_hit_rate": 0.5,
+              "doc_recall_avg": 0.5, "mrr_doc": 0.5, "ndcg10": 0.5,
+              "fact_entity_recall_avg": 0.5,
+              "ci95": {m: {"n": 99} for m in ev.CI_METRICS}}
+    ev._normalize_against_ceiling(fields, scores)
+    notes = fields["ceiling_notes"]
+
+    assert notes["doc_hit_rate"] == "ceiling is 0.0; score/ceiling undefined", (
+        "clause 3 keeps the 0.0 reason's exact text and its key")
+    assert notes["entity_hit_rate"].startswith(f"{ev.POPULATION_MISMATCH}: ")
+    assert "n=99" in notes["entity_hit_rate"] and "n=3" in notes["entity_hit_rate"], (
+        "the population reason still names both n's, which is how a 1.2799 was diagnosable "
+        "as a population gap rather than as a score")
+    for metric in CAPELESS:
+        note = notes[metric]
+        assert note.startswith(f"{NO_CEILING_TEXT}: ") and len(note) > len(NO_CEILING_TEXT) + 3
+        assert "undefined" not in note and not note.startswith(ev.POPULATION_MISMATCH), (
+            f"{metric}'s reason reuses a text that belongs to another class")
+    assert notes["fact_entity_recall_avg"].startswith(f"{NO_CEILING_TEXT}: ")
+    assert "fact" in notes["fact_entity_recall_avg"], (
+        "the one metric the instrument declares unmeasurable has its own line in "
+        "`ceiling.unmeasured`, and the reason carries those words rather than restating them")
+    assert notes["mrr_doc"] == "ceiling is 0.0; score/ceiling undefined", (
+        "the doc leg's ceilings are measured at 0.0 by this artifact, so the 0.0 reason "
+        "belongs to those metrics too and the capless text must not swallow them")
+    assert notes["doc_recall_avg"].startswith(f"{NO_CEILING_TEXT}: "), (
+        "a metric whose ceiling artifact measured nothing still needs a reason, and the "
+        "artifact's null is not one")
+    assert len({notes["doc_hit_rate"][:15], notes["entity_hit_rate"][:15],
+                notes["dup_slot_share"][:15]}) == 3, (
+        "the three classes' texts are not distinguishable by their opening")
+
+
+def test_the_veto_and_reason_constants_are_the_published_strings():
+    """The names in `eval/run_eval.py` and the bytes in the artifact are one fact, twice
+    spelled. This node is what notices when they part: a consumer that keys on
+    `"below_veto"` and a producer that renames `BELOW_VETO` to something else are both
+    green until someone asserts the pair."""
+    assert ev.BELOW_VETO == BELOW_VETO_KEY
+    assert ev.NO_CEILING == NO_CEILING_TEXT and ev.NO_SCORE == NO_SCORE_TEXT
+    assert ev.NO_CEILING != ev.POPULATION_MISMATCH != "ceiling is 0.0" != ev.NO_SCORE, (
+        "the four reason classes have to be four distinguishable heads")
+
+
+def test_a_score_side_missing_value_is_never_reported_as_a_missing_ceiling():
+    """The fourth text, and the reason it is not folded into the third.
+
+    `NO_CEILING` blames the instrument; this state is about the run — the divisor exists and
+    the run measured nothing on that leg. Guessing either way puts the wrong owner on the one
+    field whose whole job is to name the right one, so `dup_slot_share`-shaped silence must
+    not be reachable by dropping a score either.
+    """
+    fields = {"ceiling": {"kind": lac.CEILING_KIND, "entity_hit_rate": 0.5,
+                          "entity_recall_avg": 0.25}}
+    for metric in ev.CI_METRICS:
+        fields[f"{metric}_normalized"] = None
+    ev._normalize_against_ceiling(fields, {"entity_hit_rate": 0.35})
+    assert fields["entity_recall_avg_normalized"] is None
+    assert fields["ceiling_notes"]["entity_recall_avg"].startswith(f"{NO_SCORE_TEXT}: ")
+    assert "0.25" in fields["ceiling_notes"]["entity_recall_avg"], (
+        "the note names the divisor that was there, which is what distinguishes this state "
+        "from having no divisor at all")
+    assert fields["entity_hit_rate_normalized"] == pytest.approx(0.35 / 0.5), (
+        "the metric that does have both halves still divides, unaffected by the fix")
+
+
+def test_the_veto_record_and_the_null_reasons_touch_neither_cap_nor_the_guard(tmp_path,
+                                                                             monkeypatch):
+    """Clause 4: the scope this item closed. `ENTITY_CAP`/`DOC_CAP`, the #2014 population
+    guard and the published baselines are all three left alone, and this node is what
+    notices if a later edit reaches one of them.
+
+    The caps are pinned by `eval/label_agreement_ceiling.py`'s own bytes and by the imported
+    values, because the entity leg's offered-only figure turns on them and this round is a
+    reporting change only. The guard is pinned by its own executable lines inside
+    `_normalize_against_ceiling`, read out of the file on disk, because a clause that says
+    "unchanged" can only be graded against the bytes. And no part of the normalising path
+    may write a baseline: the item forbids back-filling published nightlies, and everything
+    here is reached from `main`, so a stray write there is the change that rewrites history.
+    """
+    labeler = (ROOT / "eval" / "label_agreement_ceiling.py").read_text(encoding="utf-8")
+    assert "ENTITY_CAP = 40" in labeler and "DOC_CAP = 40" in labeler, (
+        "clause 4 forbids moving either cap")
+    assert (lac.ENTITY_CAP, lac.DOC_CAP) == (40, 40)
+
+    body = SCRIPT.read_text(encoding="utf-8").split(
+        "def _normalize_against_ceiling", 1)[1].split("\ndef cf_pair_audit_fields")[0]
+    for line in (
+            '        score_n = ((overall.get("ci95") or {}).get(metric) or {}).get("n")',
+            '        ceil_n = (ceil.get("n") or {}).get(metric) if "n" in ceil else None',
+            '        if "n" in ceil and (score_n is None or ceil_n is None '
+            'or score_n != ceil_n):',
+            '            fields[f"{metric}_normalized"] = None',
+            '            continue'):
+        assert line in body.splitlines(), (
+            f"the #2014 guard's line left `_normalize_against_ceiling`: clause 4 leaves it "
+            f"alone — {line!r}")
+
+    out = tmp_path / "baselines"
+    monkeypatch.setattr(ev, "EVAL_BASELINES_DIR", out)
+    _measured_run(tmp_path, monkeypatch, disagree_on=("q-disagree",))
+    assert not out.exists(), (
+        "normalising a run wrote into the baselines directory, the tree this item forbids "
+        "touching")

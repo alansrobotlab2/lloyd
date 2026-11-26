@@ -5142,7 +5142,19 @@ STALE_COLLECTION_COUNT = "15" + " collections"
 #: {off,tail,inline}` (default `off`, so every baseline stays comparable) and its helpers
 #: appended after `main`. No scored query and no scorer changed. It names `12d885ae`, the
 #: #4033 commit, stamped one commit later; a rewritten landing must re-stamp it.
-RUN_EVAL_CODE_ANCHOR = "12d885ae"
+#:
+#: The 2026-11-26 #4603 round moves it an eighth time, for behaviour again: the
+#: machine-readable veto record (`BELOW_VETO`, `below_veto_record`, `attach_below_veto`,
+#: wired into `ceiling_context` and `_ceiling_absent_fields`) and the reasons beside every
+#: null ratio (`NO_CEILING`, `NO_SCORE`, `capless_reason`, `_explain_null_ratio`, called
+#: from the guard that used to `continue` silently). The five edits above `main` are each
+#: line-for-line — the guard gains one call, the two attaches gain one call each, and two
+#: literal `0.80` become `lac.AGREEMENT_VETO` — so 1784-1785, 2210 and 2974 still hold and
+#: every `architecture/` line citation still reads. No scored query and no scorer changed.
+#: It names `985f44ea`, the #4603 commit, stamped one commit later for the self-naming
+#: reason above; `git diff --name-only HEAD~1 HEAD -- eval/run_eval.py` is empty here. A
+#: landing that arrives rebased or squashed must re-stamp it at the landed sha.
+RUN_EVAL_CODE_ANCHOR = "985f44ea"
 
 #: Two lines of the #1599 block that were already correctly dated on 2026-10-22 and
 #: that #3166's one-sentence edit leaves byte-identical. Quoted in full because

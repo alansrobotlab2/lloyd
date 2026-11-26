@@ -1677,7 +1677,7 @@ def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None,
         fields[f"{metric}_normalized"] = None
         fields[f"{metric}_ceiling_kind"] = (
             ceil["kind"] if ceil["values"].get(metric) is not None else None)
-    return attach_ceiling_population(fields, art, records, scored_ids)
+    return attach_ceiling_population(attach_below_veto(fields), art, records, scored_ids)
 
 
 def _ceiling_absent_fields(reason: str) -> dict:
@@ -1691,7 +1691,7 @@ def _ceiling_absent_fields(reason: str) -> dict:
     for metric in CI_METRICS:
         fields[f"{metric}_normalized"] = None
         fields[f"{metric}_ceiling_kind"] = None
-    return fields
+    return attach_below_veto(fields)
 
 
 #: Key of the gold-label fingerprint in a baseline artifact (#1637). Spelled here
@@ -1782,11 +1782,11 @@ def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
         ceil, overall = _matched_halves(full_ceil, full_overall, fields, metric)
         cap, score = ceil.get(metric), overall.get(metric)
         if cap is None or score is None:
+            _explain_null_ratio(fields, metric, ceil, cap, score)
             continue
-        # The kind travels with the ratio it describes — set here rather than left to
-        # the caller, so no path can produce a normalized number whose divisor kind is
-        # unknown. A ratio without its kind is the ambiguity this field exists to
-        # remove: the seed-side and gold-side ceilings bound different failures.
+        # The kind travels with the ratio it describes — set here, not by the caller,
+        # so no path yields a ratio whose divisor kind is unknown: seed-side and
+        # gold-side ceilings bound different failures, the ambiguity this field removes.
         fields[f"{metric}_ceiling_kind"] = ceil.get("kind")
         if not cap:
             fields.setdefault("ceiling_notes", {})[metric] = (
@@ -2207,7 +2207,7 @@ def print_table(records: list[dict], summary: dict) -> None:
     if _agree.get("entity_label_agreement") is not None:
         _ent = _agree["entity_label_agreement"]
         _verdict = ("labels too ambiguous to call it a retrieval defect"
-                    if _ent < 0.80 else
+                    if _ent < lac.AGREEMENT_VETO else
                     "labels hold; the entity hit rate stands as a retrieval result"
                     if _ent > 0.90 else
                     "labels partly ambiguous; read the normalized gap, not the raw")
@@ -2283,7 +2283,7 @@ def print_table(records: list[dict], summary: dict) -> None:
         print(f"  {'label_agreement':<20}entity={_fmt_rate(agree['entity_label_agreement'])}"
               f"  doc={_fmt_rate(agree['doc_label_agreement'])}"
               f"  (labeler={lab.get('model')}@{lab.get('endpoint')})")
-        if (agree["entity_label_agreement"] or 0) < 0.80:
+        if (agree["entity_label_agreement"] or 0) < lac.AGREEMENT_VETO:
             ent = agree.get("entity_disagreements") or []
             print(f"  {'disagreement set':<20}{len(ent)} gold entity label(s): "
                   f"{', '.join(ent) if ent else '(none listed)'}")
@@ -3342,6 +3342,140 @@ def _with_linked_notes(result: dict, mode: str) -> dict:
             (out if mode == "inline" else tail).append(
                 {"path": path, "linked_from": d.get("path"), "link_type": link.get("type")})
     return {**result, "documents": out + tail}
+
+
+# ── #4603: the #654 veto verdict, and the reason beside every null ratio ──────
+#
+# Appended after `main` for the reason #4285, #4297 and #4033 each give in
+# `tests/test_eval_ceiling_fields.py::test_the_harness_stays_line_count_neutral_for_cited_prose`:
+# no line `architecture/` cites by number may move, and Python resolves these names at
+# call time.
+
+#: Key of the machine-readable #654 veto verdict inside `summary.overall.ceiling` (#4603).
+#: Named so a consumer and a test reach the same node without restating a sentence.
+BELOW_VETO = "below_veto"
+
+#: The head of the `ceiling_notes` reason for a ratio withheld because NO divisor was
+#: ever computed for that metric (#4603). A third class beside the two that already have
+#: a text — `ceiling is 0.0; score/ceiling undefined` (a divisor that exists and is 0.0)
+#: and `population mismatch` (two divisors covering different query sets) — because the
+#: three have three different owners: that ceiling, that population, and this instrument
+#: not covering that metric at all. Before this the third class had no text, so 7 of the
+#: 14 `CI_METRICS` keys — the five `entity_hit_rate_*_carried` rates, `dup_slot_share` and
+#: `superseded_slot_share`, none of which appears in the artifact's `values` block —
+#: published a null ratio with nothing said about why.
+NO_CEILING = "no ceiling"
+
+#: The head of the `ceiling_notes` reason for a ratio withheld because the RUN stated no
+#: value for a metric whose divisor does exist. Kept apart from `NO_CEILING` on purpose:
+#: the one field whose job is to say why a number is missing must not guess, and an empty
+#: numerator is a different fact from an absent divisor — the first is a question about
+#: this run, the second about the instrument.
+NO_SCORE = "no score"
+
+
+def _below_veto_record(agreement: dict | None) -> dict:
+    """The #654 veto as JSON: the threshold, the key it is read from, and whether a leg's
+    raw rate may be blamed for what it is while the figure sits under it.
+
+    `label_agreement_ceiling.sub_veto_advisory` and `print_table`'s `_verdict` have
+    compared the all-gold `entity_label_agreement` against `AGREEMENT_VETO` on every run
+    since the veto landed, and wrote down only the sentence. A reader of
+    `summary.overall.ceiling` could see `"entity_label_agreement": 0.3511` and could know
+    the threshold was 0.80 only by importing the labeler module, so the one thing that
+    decides whether a low `entity_hit_rate` is a retrieval defect at all was available
+    exactly to whoever read the page and to nobody parsing the JSON. This node is that
+    comparison, taken once, by the same constant the page reads.
+
+    What is NOT here is the agreement figure itself. It is already machine-readable in
+    the same `summary.overall`, at `label_agreement.entity_label_agreement`; a second
+    copy of a number is a second number that can disagree, so each leg names the key it
+    was judged on instead of restating what it found there.
+
+    Three states per leg, and the third is the one every published nightly is in today:
+    `measured: true, below_veto: true, blameable: false` is the veto in force;
+    `measured: true, below_veto: false, blameable: true` is a labeler set the run can be
+    held to; and `measured: false` with both flags null is no comparison having run —
+    which the veto must not answer by assuming, because "nobody measured the labels" and
+    "the labels agree" are different excuses for the same low number.
+    """
+    a = agreement or {}
+    legs: dict = {}
+    for leg in ("entity", "doc"):
+        value = a.get(f"{leg}_label_agreement")
+        measured = isinstance(value, (int, float)) and not isinstance(value, bool)
+        below = (value < lac.AGREEMENT_VETO) if measured else None
+        legs[leg] = {"measured": measured, "agreement_key": f"{leg}_label_agreement",
+                     "below_veto": below,
+                     "blameable": (not below) if measured else None}
+    entity = legs["entity"]
+    # The headline is the entity leg, because that is the leg #654's veto judges: this is
+    # the field the `_verdict` sentence at `print_table` is a rendering of, and the two
+    # must not drift into agreeing with each other only by luck. The doc leg rides along
+    # beneath, where its own null (a ceiling that measured no doc pool) is visible rather
+    # than folded into a fleet-wide flag.
+    return {"threshold": lac.AGREEMENT_VETO,
+            "agreement_key": "entity_label_agreement",
+            "below_veto": entity["below_veto"],
+            "blameable": entity["blameable"],
+            "legs": legs}
+
+
+def attach_below_veto(fields: dict) -> dict:
+    """Put the veto verdict on the `ceiling` node `fields` carries, and return `fields`.
+
+    Chained by both builders of a ceiling block — `ceiling_context`'s measured return and
+    `_ceiling_absent_fields`'s refused one — so a baseline that states a `ceiling` always
+    states the verdict beside it and a reader never branches on the key's absence. It
+    reads `fields["label_agreement"]`, which both builders fill, so the flag and the
+    figures it judges cannot be written by two different code paths and disagree.
+    """
+    ceiling = fields.get("ceiling")
+    if isinstance(ceiling, dict):
+        ceiling[BELOW_VETO] = _below_veto_record(fields.get("label_agreement"))
+    return fields
+
+
+def _no_ceiling_reason(metric: str, ceil: dict) -> str:
+    """Why no divisor was computed for `metric`, in the words the ceiling already uses.
+
+    Carried rather than paraphrased, because the ceiling states this in its own block and
+    a second sentence about it is a second sentence to keep true: a refused ceiling's
+    `reason` (the gold labels moved; no artifact; a stub labeler) is the whole
+    explanation, and a metric the artifact declares `unmeasured` — today only
+    `fact_entity_recall_avg`, named by `lac.UNMEASURED_METRICS` — has its own line in
+    `ceiling.unmeasured`. Neither block names the third case, which is a metric outside
+    the seven the instrument covers at all, and that one gets the plain statement.
+    """
+    carried = ((ceil.get("reason") or "").strip()
+               or (ceil.get("unmeasured") or {}).get(metric) or "").strip()
+    return (f"{NO_CEILING}: {carried}" if carried else
+            f"{NO_CEILING}: the gold-label ceiling computes no value for {metric}, "
+            "so there is no divisor to divide by")
+
+
+def _explain_null_ratio(fields: dict, metric: str, ceil: dict,
+                        cap, score) -> None:
+    """Write the null ratio AND the reason beside it, so a `<metric>_normalized` key is
+    never silent (#4603).
+
+    `_normalize_against_ceiling` used to `continue` here, which left two very different
+    states with one footprint: the metric the ceiling covers but this run could not
+    divide, and the metric the ceiling has never covered. `summarize` presets all 14
+    keys, so the second state reached every published baseline, and the 2026-11-26
+    nightly is the example — 14 `_normalized` keys null, `ceiling_notes` empty of every
+    one of them. `report` prints `(o.get("ceiling_notes") or {}).get(metric)`, so the
+    note is the only place a reason for a null ratio can live: nothing reads
+    `ceiling.unmeasured` back, and a reason written anywhere else is a reason no page and
+    no tool ever shows.
+    """
+    fields[f"{metric}_normalized"] = None
+    notes = fields.setdefault("ceiling_notes", {})
+    if cap is None:
+        notes[metric] = _no_ceiling_reason(metric, ceil)
+        return
+    notes[metric] = (f"{NO_SCORE}: this run measured no {metric}, so the ratio has no "
+                     f"numerator against a ceiling of {cap}")
 
 
 if __name__ == "__main__":
