@@ -624,7 +624,8 @@ ARCHIVED_STATUS = "archived"
 
 
 def ruled_ids(ids: list[int], *, backlog_dir: Path | None = None,
-              ledger: Path | None = None) -> dict[int, str]:
+              ledger: Path | None = None,
+              proposed: dict[int, str] | None = None) -> dict[int, str]:
     """Which of these WINDOW ids the board has already answered, and why.
 
     #3914. The widening takes its ids from the window's per-tick history
@@ -638,7 +639,7 @@ def ruled_ids(ids: list[int], *, backlog_dir: Path | None = None,
     which the aggregate sums out of `runs.meta_json` with no board read at all, so
     the trigger stays armed until the sub-floor ticks age out by the clock.
 
-    An id is ruled when EITHER live fact holds about it:
+    An id is ruled when ANY of these live facts holds about it:
 
     * its item is off the board — `done`, the host's other terminal statuses, or
       `archived`. Deliberately NOT "anything outside `OPEN_STATUSES`": #287 has
@@ -651,6 +652,16 @@ def ruled_ids(ids: list[int], *, backlog_dir: Path | None = None,
       unexecuted), not by moving the board to the `up_next` the row recorded, so
       an equality against the RECORDED side leaves all four printing. Only the
       live table sees them.
+    * the status `desired_statuses` answers for it NOW is the one the row records as
+      the STEWARD's proposal (`proposed`, id → the status `_widen` put in its row),
+      whatever the file says (#4405). A row asserts that the steward's side and the
+      machine's differ, and neither of those is the file: post-flip the machine
+      abstains on an item the steward wrote and echoes its status, while
+      `reconcile_statuses` moves the file on its own 900 s clock, so the file lags both
+      sides. #4394 read `draft` on disk for 74 minutes after its `steward_move` to
+      `up_next` while the live answer was already `up_next`, and #4397 was filed on that
+      row alone. The reason names the RECORDED proposal, never the live table's `why`,
+      and never claims anything about the file.
 
     **This read may only ever REMOVE an id.** It answers nothing about a row's
     content: both halves of every surviving row still come from the tick that
@@ -697,6 +708,11 @@ def ruled_ids(ids: list[int], *, backlog_dir: Path | None = None,
         if entry and str(entry[0]) == status:
             out[iid] = (f"its status on disk (`{status}`) is what the state machine "
                         f"answers for it now")
+            continue
+        steward = str((proposed or {}).get(iid) or "")
+        if entry and steward and str(entry[0]) == steward:
+            out[iid] = (f"the state machine now answers `{steward}`, the status the "
+                        f"steward proposed in its row")
     return out
 
 
@@ -976,7 +992,8 @@ def file_or_update(agree: dict, moves: list[dict], expected: dict[int, tuple], *
     # with its own measurement, which is #3752's job inside the tick and nobody's here.
     # What it removes is reported in Coverage, never subtracted in silence.
     abstained = ruled_ids([i for i in ids if i not in set(tick_ids)],
-                          backlog_dir=backlog_dir, ledger=led)
+                          backlog_dir=backlog_dir, ledger=led,
+                          proposed={m["item_id"]: m["status"] for m in wide_moves})
     if abstained:
         # Empties nothing on its own: `tick_ids` is non-empty past its own leg above and is
         # never a candidate here, so at least this tick's disagreement survives the

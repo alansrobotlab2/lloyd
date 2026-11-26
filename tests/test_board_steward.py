@@ -5781,16 +5781,19 @@ LIVE_ID = 3310
 
 
 def _ruled_tick(led: Path, ids, *, proposed: str = "draft",
-                sides: dict | None = None) -> None:
+                sides: dict | None = None, proposals: dict | None = None) -> None:
     """One `board_steward` tick whose proposals and recorded sides the rows will render.
 
     Both halves have to be in the ledger row: `moves` is the steward's half, and
     `agreement.disagree_sides` is the machine's (#3680) — a window id with no side renders
     **not recorded**, which would let a node pass on a row nobody could rule.
+    `proposals` overrides `proposed` per id (#4405's nodes need a steward half that is not
+    `draft`).
     """
     sides = sides if sides is not None else {}
+    proposals = proposals or {}
     _led(led, event="board_steward", apply=False, created_at=DIS_OLDER_STAMP,
-         moves=[{"item_id": i, "status": proposed,
+         moves=[{"item_id": i, "status": proposals.get(i, proposed),
                  "note": "unspent, offered again"} for i in ids],
          agreement={"disagree": list(ids), "judged": len(ids), "agree": [],
                     "disagree_sides": [{"item_id": i, "status": s, "why": w}
@@ -5798,7 +5801,7 @@ def _ruled_tick(led: Path, ids, *, proposed: str = "draft",
 
 
 def _rule_filing(board, monkeypatch, led, *, win_ids, on_disk, machine,
-                 tick_ids=DIS_AGREE):
+                 tick_ids=DIS_AGREE, proposals=None, sides=None):
     """File one disagreement item over `win_ids`, then hand back its body.
 
     `on_disk` writes each item at the status the board holds NOW (the live half of the
@@ -5819,9 +5822,10 @@ def _rule_filing(board, monkeypatch, led, *, win_ids, on_disk, machine,
     # having disagreed about EVERY id this filing will name — the tick's as well as the
     # window's — so these nodes keep testing abstention and row provenance rather than
     # silently becoming guard tests. The guard's own nodes are below.
-    sides = {i: RULED_SIDES.get(i, ("up_next", "has a confirmed triage with acceptance text"))
+    sides = {i: (sides or {}).get(i) or RULED_SIDES.get(
+                 i, ("up_next", "has a confirmed triage with acceptance text"))
              for i in list(tick_ids) + list(win_ids)}
-    _ruled_tick(led, list(tick_ids) + list(win_ids), sides=sides)
+    _ruled_tick(led, list(tick_ids) + list(win_ids), sides=sides, proposals=proposals)
     monkeypatch.setattr(B, "desired_statuses", lambda ledger: dict(machine))
     out = file_or_update(_agree(*tick_ids), DIS_MOVES, DIS_EXPECTED,
                          window=_window7(disagree_ids=list(tick_ids) + list(win_ids)),
@@ -5911,6 +5915,113 @@ def test_a_window_id_whose_status_now_matches_the_machine_is_abstained(
         f"all four must say which arm abstained them: {cov}")
 
 
+# ── #4405: a row whose two sides now agree is retired, whatever the file says ──
+#
+# Post-flip `desired_statuses` abstains on an item the steward wrote and echoes its status,
+# while the file moves on `reconcile_statuses`' own 900 s clock. #4394 read `draft` on disk
+# for 74 minutes after its `steward_move` to `up_next` while the live answer was already
+# `up_next`; the disk-equality arm saw `draft` != `up_next` and kept the row, and #4397 was
+# filed on it alone. Seeded here in #4394's shape, since the live instance self-healed.
+
+#: #4394's shape: the steward's recorded proposal, the tick's recorded machine side, and
+#: what the machine answers NOW.
+STEWARD_ECHO_ID = 4394
+STEWARD_ECHO_SIDE = ("draft", "triage confirmed it; held until the implement pool has room")
+STEWARD_ECHO_LIVE = ("up_next", "the board steward moved it to up_next; the machine abstains")
+
+
+def test_a_window_id_the_machine_now_answers_as_the_steward_proposed_is_abstained(
+        board, tmp_path, monkeypatch):
+    """#4405 clause 1. File at `draft`, steward proposal `up_next`, live answer `up_next`:
+    `ruled_ids` gives a reason for it instead of `{}`, and the filing stops printing its
+    row. Without the row's steward side (the pre-#4405 call) the same read returns `{}`,
+    which is the before half of the pair."""
+    led = tmp_path / "ledger.jsonl"
+    on_disk = {STEWARD_ECHO_ID: "draft", LIVE_ID: "draft"}
+    machine = {STEWARD_ECHO_ID: STEWARD_ECHO_LIVE,
+               LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")}
+    body = _rule_filing(board, monkeypatch, led, win_ids=[STEWARD_ECHO_ID, LIVE_ID],
+                        on_disk=on_disk, machine=machine,
+                        proposals={STEWARD_ECHO_ID: "up_next"},
+                        sides={STEWARD_ECHO_ID: STEWARD_ECHO_SIDE})
+
+    assert D.ruled_ids([STEWARD_ECHO_ID], backlog_dir=board, ledger=led) == {}, (
+        "the fixture is not #4394's shape: the disk-equality arm already retires it")
+    got = D.ruled_ids([STEWARD_ECHO_ID], backlog_dir=board, ledger=led,
+                      proposed={STEWARD_ECHO_ID: "up_next"})
+    assert got.get(STEWARD_ECHO_ID), (
+        f"the machine now answers the steward's `up_next`, so the row's two sides agree "
+        f"and the id is ruled; got {got}")
+    assert "`up_next`" in got[STEWARD_ECHO_ID]
+    assert STEWARD_ECHO_LIVE[1] not in got[STEWARD_ECHO_ID], (
+        "the reason was taken from the live table's `why`; it must come from the row")
+
+    assert not [ln for ln in _rows(body) if ln.startswith(f"- #{STEWARD_ECHO_ID}")], (
+        f"#{STEWARD_ECHO_ID}'s row still prints although its steward side and the live "
+        f"machine answer agree: {_rows(body)}")
+    assert [ln for ln in _rows(body) if ln.startswith(f"- #{LIVE_ID}")], (
+        "the genuinely live id must still print")
+
+
+def test_a_row_whose_steward_side_differs_from_the_live_answer_still_prints(
+        board, tmp_path, monkeypatch):
+    """#4405 clause 2. The new arm abstains only where the row's steward side and the live
+    answer agree: steward `up_next`, machine `in_progress`, file `draft` (equal to
+    neither) is a live disagreement and prints."""
+    led = tmp_path / "ledger.jsonl"
+    body = _rule_filing(
+        board, monkeypatch, led, win_ids=[STEWARD_ECHO_ID, LIVE_ID],
+        on_disk={STEWARD_ECHO_ID: "draft", LIVE_ID: "draft"},
+        machine={STEWARD_ECHO_ID: ("in_progress", "its round is not over"),
+                 LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")},
+        proposals={STEWARD_ECHO_ID: "up_next"},
+        sides={STEWARD_ECHO_ID: STEWARD_ECHO_SIDE})
+    assert D.ruled_ids([STEWARD_ECHO_ID], backlog_dir=board, ledger=led,
+                       proposed={STEWARD_ECHO_ID: "up_next"}) == {}
+    row = [ln for ln in _rows(body) if ln.startswith(f"- #{STEWARD_ECHO_ID}")]
+    assert len(row) == 1 and "steward proposed `up_next`" in row[0], (
+        f"a row whose two sides still differ was abstained: {_rows(body)}")
+    assert "- 0 of the window's ids were abstained as already ruled." in body, body
+
+
+def test_the_steward_side_arm_only_subtracts_and_fails_open(board, tmp_path, monkeypatch):
+    """#4405 clause 5. An id THIS tick scored is printed even in the new arm's shape, and an
+    unreadable board or ledger returns `{}` so every row prints."""
+    from workers.board_disagreement import file_or_update
+
+    led = tmp_path / "ledger.jsonl"
+    tick = DIS_AGREE[0]
+    _write(board, tick, "draft")
+    _ruled_tick(led, list(DIS_AGREE), proposals={tick: "up_next"},
+                sides={i: STEWARD_ECHO_SIDE for i in DIS_AGREE})
+    monkeypatch.setattr(B, "desired_statuses",
+                        lambda ledger: {tick: STEWARD_ECHO_LIVE})
+    assert tick in D.ruled_ids([tick], backlog_dir=board, ledger=led,
+                               proposed={tick: "up_next"}), (
+        "the fixture is not the case: the new arm must call this tick's id ruled")
+    moves = [dict(m, status="up_next") if m["item_id"] == tick else m for m in DIS_MOVES]
+    out = file_or_update(_agree(*DIS_AGREE), moves, DIS_EXPECTED,
+                         window=_window7(disagree_ids=list(DIS_AGREE)),
+                         backlog_dir=board, ledger=led)
+    assert out is not None and out["action"] == "filed", out
+    body = _filed(board)[0].body
+    assert any(ln.startswith(f"- #{tick}") for ln in _rows(body)), (
+        "an id this tick scored was dropped by the steward-side arm")
+
+    def boom(ledger):
+        raise OSError("ledger unreadable")
+    monkeypatch.setattr(B, "desired_statuses", boom)
+    assert D.ruled_ids([tick], backlog_dir=board, ledger=led,
+                       proposed={tick: "up_next"}) == {}, (
+        "an unreadable ledger must fail OPEN to `{}`, never retire a row")
+    monkeypatch.setattr(B, "desired_statuses", lambda ledger: {tick: STEWARD_ECHO_LIVE})
+    monkeypatch.setattr(B, "all_items", lambda *a, **kw: (_ for _ in ()).throw(
+        OSError("board unreadable")))
+    assert D.ruled_ids([tick], backlog_dir=board, ledger=led,
+                       proposed={tick: "up_next"}) == {}, (
+        "an unreadable board must fail OPEN to `{}`, never retire a row")
+
+
 def test_coverage_states_the_abstention_figure_and_names_each_abstained_id(
         board, tmp_path, monkeypatch):
     """Clause 3. Removing a row is a claim about the window, and the Coverage section is
@@ -5919,18 +6030,37 @@ def test_coverage_states_the_abstention_figure_and_names_each_abstained_id(
     difference between abstaining and losing rows."""
     led = tmp_path / "ledger.jsonl"
     body = _rule_filing(
-        board, monkeypatch, led, win_ids=[RULED_FOUR[0], RULED_FOUR[1], LIVE_ID],
+        board, monkeypatch, led, win_ids=[RULED_FOUR[0], RULED_FOUR[1], RULED_FOUR[2],
+                                          LIVE_ID],
         on_disk={RULED_FOUR[0]: "done",          # off the board
                  RULED_FOUR[1]: "draft",         # equals the live machine answer
+                 RULED_FOUR[2]: "draft",         # #4405: equals neither side
                  LIVE_ID: "draft"},
+        # #4405's shape for RULED_FOUR[2]: the steward proposed `up_next`, its tick's
+        # machine side was a pool hold at `draft`, and the live machine now echoes the
+        # steward's `up_next` while the file still lags at `draft`.
+        proposals={RULED_FOUR[2]: "up_next"},
+        sides={RULED_FOUR[2]: ("draft", "triage confirmed it; held until the implement "
+                                        "pool has room")},
         machine={RULED_FOUR[1]: ("draft", "its hand_run is still unexecuted"),
+                 RULED_FOUR[2]: ("up_next", "the machine abstains until this item lands"),
                  LIVE_ID: ("up_next", "has a confirmed triage with acceptance text")})
     cov = body[body.index("## Coverage"):]
 
-    assert "- 2 of the window's ids were **abstained, not dropped**" in cov, cov
+    assert "- 3 of the window's ids were **abstained, not dropped**" in cov, cov
     assert f"#{RULED_FOUR[0]} (its item is off the board (`done`))" in cov, cov
     assert f"#{RULED_FOUR[1]} (its status on disk (`draft`) is what the state machine " \
            "answers for it now)" in cov, cov
+    # #4405: the steward-side arm names the RECORDED proposal and claims nothing about the
+    # file, which is at `draft` and matches neither side.
+    assert f"#{RULED_FOUR[2]} (the state machine now answers `up_next`, the status the " \
+           "steward proposed in its row)" in cov, cov
+    bullet = cov[cov.index(f"#{RULED_FOUR[2]} ("):]
+    bullet = bullet[:bullet.index(")") + 1]
+    assert "its status on disk" not in bullet and "draft" not in bullet, (
+        f"the steward-side abstention borrowed the disk arm's claim: {bullet}")
+    assert "the machine abstains until this item lands" not in body, (
+        "the live table's `why` reached the body; the reason must come from the row")
     assert f"#{LIVE_ID}" not in cov, "a live id may not appear in the abstention list"
     # Beside the existing figures, not after them: the count above moves the `un` in the
     # "not represented here" bullet, so the two have to be read together.
@@ -6012,8 +6142,13 @@ def test_rows_that_survive_the_abstention_are_the_bytes_this_build_already_print
         monkeypatch.setattr(S, "LEDGER_PATH", led)
         _write(d, RULED_FOUR[0], disk)
         _write(d, LIVE_ID, "draft")
-        _ruled_tick(led, win, sides={RULED_FOUR[0]: RULED_SIDES[RULED_FOUR[0]],
-                                     LIVE_ID: ("up_next", "has a confirmed triage")})
+        # #4405: the steward's half is `up_next`, not `_ruled_tick`'s default `draft`. A
+        # `draft` proposal equals the live machine answer below, and the steward-side arm
+        # would then retire the row on BOTH boards, whatever the file says; `up_next` keeps
+        # the board's move the single difference between the two copies.
+        _ruled_tick(led, win, proposals={RULED_FOUR[0]: "up_next"},
+                    sides={RULED_FOUR[0]: ("draft", "its hand_run is still unexecuted"),
+                           LIVE_ID: ("up_next", "has a confirmed triage")})
         monkeypatch.setattr(B, "desired_statuses", lambda ledger: dict(machine))
         out = file_or_update(_agree(*DIS_AGREE), DIS_MOVES, DIS_EXPECTED,
                              window=_window7(disagree_ids=list(DIS_AGREE) + list(win)),
