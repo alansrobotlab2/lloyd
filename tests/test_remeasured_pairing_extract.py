@@ -38,8 +38,9 @@ re-derive them. The coupling is paid for the same way there: every assertion is
 structural or content-addressed (a sha256 re-derived from the bytes beside it, a column
 list, a sign split, an `iterdump` census) rather than a quote of prose that will drift,
 and a missing artifact SKIPS rather than reddens — so the one realistic rewrite of this
-directory, a retention sweep that ages the file out, takes the module out of the run
-instead of failing the next author for the previous writer's change.
+directory, a retention sweep that ages the file out, makes these artifact-reading nodes
+skip instead of failing the next author for the previous writer's change. The nodes
+about the page's own citation read the checkout, not the vault, and stay in the run.
 """
 
 from __future__ import annotations
@@ -341,8 +342,9 @@ def test_the_two_published_blocks_recompute_from_the_committed_bytes():
     18 pairs with 12 up / 6 down is a different measurement wearing its clothes.
 
     The median convention is `statistics.median`, the even-n mean, and it is
-    load-bearing rather than house style: nearest-rank over these same bytes returns
-    44,512.5 and 86,473, neither of which is a figure on the page. The published
+    load-bearing rather than house style: the upper-middle nearest-rank delta (index n//2)
+    over these same bytes is 44,512.5 and 86,473, neither of which is a figure on the
+    page. The published
     `+36,461` is 36,460.75 rounded to the whole token; `+84,474` is exact.
 
     The regime count is the third block of the page's own claim — 0 knob-on sidecar
@@ -585,8 +587,9 @@ def test_the_sibling_marker_names_the_keys_the_reader_and_what_the_bytes_cannot_
             "loops over every block on the page has to be told, or it reports a "
             "truncated window as a wrong figure")
     assert "_sidecar_flags" in flat and "statistics.median" in flat, (
-        "the marker does not name the median convention, and nearest-rank over these "
-        "same bytes returns 44,512.5 and 86,473 — a different statistic, not a drift")
+        "the marker does not name the median convention, and the upper-middle "
+        "nearest-rank delta (index n//2) over these same bytes is 44,512.5 and 86,473 "
+        "— a different statistic, not a drift")
 
     data_dir = path.parent
     for sibling in ("2026-10-31.3631-lloyd-data-usage.db-wal",
@@ -1407,3 +1410,60 @@ def test_the_page_names_the_flip_projection_and_its_own_recomputer():
         assert figure not in flat, (
             f"{figure} is a single-rank reading of the truncated 2026-10-02 block over "
             "these bytes; it belongs in this comment and not on the page")
+
+
+# ── #4250: the two nearest-rank sentences name their rank ────────────────────
+#
+# "Nearest-rank" over an even n is two values; these bytes give a lower and an
+# upper middle, and the file quotes the upper one. Unqualified, a reader who
+# recomputes the lower rank reads the sentence as wrong. Every needle below is
+# built by concatenation, in the `DOC_TEXT_ONLY_MARKERS` style, because this node
+# reads this module's own source and a literal needle would match itself.
+
+#: The upper-middle figures the two sites quote, and the qualifier each must carry.
+_UPPER_MIDDLE_FIGURE = "44,512" + ".5"
+_RANK_QUALIFIER = ("upper" + "-middle", "index " + "n//2")
+#: The lower-middle figures over the same bytes: never published, here or anywhere.
+_LOWER_MIDDLE_FIGURES = ("28,40" + "9", "82,47" + "5")
+#: The header's claim the round measured false (three nodes stay in the run).
+_SWEPT_OUT_CLAIM = "out of " + "the run"
+
+
+def test_the_nearest_rank_sentences_name_the_upper_middle_rank():
+    import ast
+
+    src = Path(__file__).read_text(encoding="utf-8")
+    tree = ast.parse(src)
+    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+
+    def _flat_source(name: str) -> str:
+        return " ".join(ast.get_source_segment(src, funcs[name]).split())
+
+    sites = {
+        "test_the_two_published_blocks_recompute_from_the_committed_bytes":
+            " ".join((ast.get_docstring(funcs[
+                "test_the_two_published_blocks_recompute_from_the_committed_bytes"])
+                or "").split()),
+        "test_the_sibling_marker_names_the_keys_the_reader_and_what_the_bytes_cannot_answer":
+            _flat_source("test_the_sibling_marker_names_the_keys_the_reader_and_what_"
+                         "the_bytes_cannot_answer").replace('" "', ""),
+    }
+    for name, text in sites.items():
+        at = text.find(_UPPER_MIDDLE_FIGURE)
+        assert at >= 0, f"{name} no longer quotes the upper-middle figure"
+        window = text[max(0, at - 120):at]
+        for qualifier in _RANK_QUALIFIER:
+            assert qualifier in window, (
+                f"{name}'s nearest-rank sentence does not say {qualifier!r} beside "
+                f"{_UPPER_MIDDLE_FIGURE}: {window!r}")
+
+    header = " ".join((ast.get_docstring(tree) or "").split())
+    assert header, "the module lost its header"
+    assert _SWEPT_OUT_CLAIM not in header, (
+        "the header still says a swept artifact takes the module " + _SWEPT_OUT_CLAIM
+        + "; the page-citation nodes deliberately keep running without it")
+    for figure in _LOWER_MIDDLE_FIGURES:
+        assert figure not in src, (
+            f"{figure} is the lower-middle rank over these bytes, a figure this module "
+            "does not publish")
+
