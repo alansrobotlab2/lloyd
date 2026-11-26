@@ -369,15 +369,28 @@ compare against: `fact_entity_recall` **0.421** — 20 queries, 19 answered, `er
 `seed_top_k=10`, `semantic_seeding={'enabled': True, 'k': 3}`, and `expand_graph=True`
 (the one knob above that is not production's). Command:
 `cd ~/lloyd && PYTHONDONTWRITEBYTECODE=1 .venvs/lloyd/bin/python -c 'from agent_mcp import fact_improvement as fi; d = fi._fact_entity_recall_detail(20); print(d["score"], d["queries_answered"], d["errors"], d["run_config"])'`.
-One measurement of a corpus that moves daily, not a trend line, and one arm of two:
-the improvement pass scores nothing itself — its shipped invocation never passes
-`--report-eval`, and every nightly record back to 2026-10-03 now says so in the open
-as `fact_entity_recall_status: not_requested` (#3008) — while the standing daily
-measurement of this metric is autonomy task #82's: production defaults, `expand_graph`
-off, written to `~/lloyd-data/eval/baselines/nightly-*.json`, `0.523` on the 2026-11-17
-row over a 53-file series. The two arms differ by the one knob named above, so reading
-this figure against that series measures `expand_graph` and not the loop; which of the
-two is #376's bar is #4258's to settle.
+One measurement of a corpus that moves daily, not a trend line. The improvement pass
+scores nothing itself — its shipped invocation never passes `--report-eval`, and every
+nightly record back to 2026-10-03 now says so in the open as
+`fact_entity_recall_status: not_requested` (#3008) — while the standing daily
+measurement of this metric is autonomy task #82's, written to
+`~/lloyd-data/eval/baselines/nightly-*.json`. That is the same arm, not a second one:
+#82 runs production defaults with graph expansion ON (it never passes `--no-graph`),
+and its records say so in their own fields — `expand_graph: true`,
+`expand_graph_matches_production: false`, `matches_production_defaults: true` on
+`nightly-20261118-20261118-181634.json` and on every row since. `RECALL_EXPAND_GRAPH =
+False` is the served `vault_recall` tool's default for a caller who omits the knob;
+no eval arm runs it. What separates this figure from #82's `0.523` is the query
+subset: `_fact_entity_recall_detail` scores `queries[:limit]`, the first 20 queries of
+`eval/vault_recall_queries.yaml`, while #82 scores the whole gold set (86 queries on
+that run). Off that one record, the first 20 give `0.4211` (19 answered) and all 86
+give `0.5227` (66 answered) — this paragraph's `0.421` reproduced from the run that
+stamped `0.523`. So a subset-versus-full comparison is legitimate, but the 0.421-vs-0.523
+gap measures which 20 questions were asked, not retrieval quality, and not
+`expand_graph`. #376's bar is read from #82's arm, as
+`agent_mcp/fact_improvement.py`'s own docstring rules ("not from a pass that did not
+score"); #4258, which asked, closed `stale` and this sentence replaces its deferral
+(#4271).
 
 An intermediate unguarded pass over the four entities that dominate the
 queries' fact pools moved the metric **0.35 → 0.30** — a regression, and the
@@ -549,7 +562,8 @@ a day before its code half).
   `fact_entity_recall_status: not_requested` (#3008, landed `d409b662`) with 0 actions,
   which is the state §2 already describes as that field's purpose. So §4 now names #82 as
   the standing scorer and says outright that its own `0.421` and #82's `0.523` are two
-  arms and not a trend. Filed **#4258** (two live arms, no ruling on which is #376's bar),
+  arms and not a trend (#4271 corrected that: they are one graph-ON arm at two query
+  subsets, the first 20 of the gold set against all of it). Filed **#4258** (two live arms, no ruling on which is #376's bar),
   **#4259** (the doc-grading test carries the same wrong `test_eval_scorer.py` pointer in
   its own comment, where no doc edit can reach it) and **#4260** (§2's
   `36 of 1,028 facts` / `3.5%` is a corpus measurement pinned as a literal needle by a
