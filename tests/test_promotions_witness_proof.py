@@ -11,7 +11,7 @@ published line for `2026-11-02.3718` is 254 rows, and
 `grep -F -f backlog/data/2026-11-02.3718-lloyd-automod-promotions.jsonl ~/.local/state/lloyd-automod/promotions.jsonl | wc -l`
 returned **226** the day this file was written.
 
-Measured 2026-11-08, over the corpus of **33** dated promotions extracts:
+Measured 2026-11-08, over the dated promotions extracts committed that day:
 **26** come back byte-for-byte out of the union of the live ledger plus its monthly
 rotations, and **22 of those 26 are already short against the live file alone** — 4 are
 still live-complete today (3367 23/23, 3683 10/10, 3619 3/3, 3461 2/2) and the fold is
@@ -45,11 +45,11 @@ pins that population against the glob on disk so a redirected seam cannot pass b
 Discovery is the other half of "reads the right population", and the shipped pattern is not
 enough. `_promotion_extract_findings` (`tests/test_failure_ledger_witness.py:810`) globs
 `*.????-*promotions.jsonl`, and in `fnmatch` the tail of that pattern is LITERAL: it ends at
-`promotions.jsonl`, so it reaches the 31 `-lloyd-automod-promotions.jsonl` files and cannot
-reach the 2 `-promotions-witness.jsonl` files at all — including
+`promotions.jsonl`, so it reaches the `-lloyd-automod-promotions.jsonl` family and cannot
+reach the `-promotions-witness.jsonl` family at all — including
 `2026-10-08.2383-promotions-witness.jsonl`, which is one of the 7 cuts and has to be
 reachable for its exemption to be checkable. This file's corpus pattern widens that one
-`-` and covers both families (33 hits); `test_the_corpus_glob_reaches_every_dated_promotions_extract`
+`-` and covers both families; `test_the_corpus_glob_reaches_every_dated_promotions_extract`
 pins the superset relation, and its family rail means a THIRD suffix family landing is a
 finding rather than another silent drop, which is how 2383 and 2079 came to be uncovered in
 the first place.
@@ -58,7 +58,15 @@ Nothing here edits a historical marker or restates a published figure: the extra
 and never written, and every number quoted above is recomputed by a node rather than
 carried as an assertion, so the dated prose in the vault stays verbatim.
 
-It ships 9 nodes: `test_the_corpus_glob_reaches_every_dated_promotions_extract`,
+The corpus carries no size (#4584). Presence is the dated extracts on disk compared with
+the same family in the vault's git index — two instruments, so a file lost from disk is red
+and growth needs no edit — and freshness is the newest extract's own date against the live
+ledger's newest row, inside `_RECENCY_WINDOW_DAYS`.
+
+It ships 12 nodes: `test_the_corpus_glob_reaches_every_dated_promotions_extract`,
+`test_an_extract_lost_from_disk_is_named_missing_against_the_vault_index`,
+`test_the_loop_has_published_a_witness_extract_within_the_window_of_its_ledger`,
+`test_the_recency_alarm_passes_inside_its_window_and_fails_beyond_it`,
 `test_every_verbatim_extract_is_recoverable_byte_for_byte_from_the_ledger_union`,
 `test_the_union_under_test_is_the_shipped_reader_behind_the_home_seam`,
 `test_the_non_verbatim_allow_list_is_exactly_the_cuts_and_each_names_a_live_file`,
@@ -95,7 +103,7 @@ _PROMOTION_SUBDIR = "backlog/data"
 #: `_promotion_extract_findings` uses `*.????-*promotions.jsonl`, whose fnmatch tail is a
 #: literal `promotions.jsonl` and so cannot match `...-promotions-witness.jsonl`; widening
 #: the tail to `*` is the one change that makes both families in scope, which clause 3's
-#: own 2383 entry requires. 33 hits measured 2026-11-08 against those 31.
+#: own 2383 entry requires.
 _CORPUS_GLOB = "*.????-*promotions*.jsonl"
 
 #: The shipped pattern, kept here so the node below can pin the relation rather than
@@ -117,10 +125,24 @@ _KNOWN_SUFFIXES = ("-lloyd-automod-promotions.jsonl", "-promotions-witness.jsonl
 #: directory the day the 34th extract lands, which is how seven extracts stayed unpinned.
 _ITEM_ID = re.compile(r"^\d{4}-\d{2}-\d{2}\.(\d+)-")
 
-#: A FLOOR, not an equality: extracts are only ever added, so a floor cannot rot the way
-#: `== 33` would and still turns the suite red the first time one goes missing. 33 is the
-#: corpus as at this file's writing (31 `-lloyd-automod-` + 2 `-witness`).
-_MIN_CORPUS_EXTRACTS = 33
+#: No corpus SIZE is carried here (#4584). The floor that stood in this slot was a hand-typed
+#: count, re-derived by nobody, that had gone five extracts slack within three weeks — and a
+#: bumped literal is the same hand-named node wearing a new number. Presence is instead the
+#: dated extracts on disk against the same family as the vault's git index records it
+#: (`_presence_findings`): loss from disk is red, growth is free. Its stated limit: a `git rm`
+#: committed beside the deletion moves both instruments together, which is what the
+#: named-presence nodes in this file and `tests/test_failure_ledger_witness.py` are for.
+
+#: The freshness window, in days: the newest dated extract's own date may trail the live
+#: ledger's newest row by at most this much. Its purpose: catch a fold season in which the
+#: loop keeps writing (and folding) the ledger but publishes no witness extract, which a
+#: presence check cannot see — a corpus frozen at any size reads complete forever. 14 is
+#: `LEDGER_ARCHIVE_AGE_DAYS` (`scripts/groundskeeper/retention-sweep.py`): a window that
+#: long means every row live at the newest extract has since been folded out of the live
+#: file. The widest gap between consecutive extract dates through 2026-11-23 was 9 days
+#: (11-08 to 11-17). Measured against the LEDGER, not the wall clock: an idle loop that
+#: writes no rows owes no witness, and a test rung may not depend on today's date.
+_RECENCY_WINDOW_DAYS = 14
 
 #: Every exemption reason must say, in these words, what it is excusing. The point is not
 #: the phrase; it is that an exemption has to state a property of the FILE rather than a
@@ -325,6 +347,91 @@ def _corpus_findings(rows: dict[str, tuple[str | None, list[bytes], int]], live:
     return findings, detail
 
 
+def _indexed_names(vault: Path) -> set[str]:
+    """The corpus family as the vault's git INDEX records it, by basename.
+
+    The index, not a commit: `ls-files` is what the vault says it holds, independent of
+    what is on disk, which is what makes it a second instrument. `--no-optional-locks`
+    so the read never refreshes the index under a live vault.
+    """
+    import subprocess
+
+    out = subprocess.run(
+        ["git", "--no-optional-locks", "-C", str(vault), "ls-files", "-z", "--",
+         _PROMOTION_SUBDIR], capture_output=True, check=True).stdout
+    names = set()
+    for raw in out.split(b"\0"):
+        rel = Path(raw.decode()) if raw else None
+        if rel is not None and rel.parent.as_posix() == _PROMOTION_SUBDIR \
+                and fnmatch(rel.name, _CORPUS_GLOB):
+            names.add(rel.name)
+    return names
+
+
+def _presence_findings(data: Path, indexed: set[str]) -> list[str]:
+    """Every dated extract the index lists that is not on disk, named by item id.
+
+    One-directional on purpose: an extract on disk and not yet indexed is a round's
+    work in progress, never a loss, and publishing extracts is a routine side effect of
+    ordinary rounds — a guard that reddened on growth would gate every one of them.
+    """
+    on_disk = {path.name for path in data.glob(_CORPUS_GLOB)}
+    if not indexed:
+        return [f"the vault index lists no `{_CORPUS_GLOB}` file under {_PROMOTION_SUBDIR}, "
+                "so there is no committed witness corpus for this file to guard at all"]
+    missing = sorted(indexed - on_disk)
+    if not missing:
+        return []
+    ids = sorted({(m.group(1) if (m := _ITEM_ID.match(name)) else name) for name in missing})
+    return [f"{len(missing)} dated promotions extract(s) the vault index still lists are gone "
+            f"from disk — items {', '.join('#' + i for i in ids)} ({', '.join(missing)}): a "
+            "witness someone owes has left the tree"]
+
+
+_EXTRACT_DATE = re.compile(r"^(\d{4}-\d{2}-\d{2})\.")
+
+
+def _recency_finding(names: set[str], ledger_newest, *,
+                     window_days: int = _RECENCY_WINDOW_DAYS) -> str | None:
+    """Whether the newest dated extract trails the ledger's newest row by more than the window.
+
+    `ledger_newest` is a `date`: the day of the live ledger's newest row. Reads each
+    extract's date off its own NAME, the date every extract in this family carries.
+    """
+    from datetime import date
+
+    dates = [date.fromisoformat(m.group(1)) for n in names if (m := _EXTRACT_DATE.match(n))]
+    if not dates:
+        return "no dated promotions extract is on disk, so the loop has published no witness"
+    newest = max(dates)
+    lag = (ledger_newest - newest).days
+    if lag <= window_days:
+        return None
+    return (f"the loop keeps folding the ledger but has published no witness extract: the "
+            f"newest dated promotions extract is {newest.isoformat()}, {lag} days behind the "
+            f"ledger's newest row ({ledger_newest.isoformat()}), past the "
+            f"{window_days}-day `_RECENCY_WINDOW_DAYS` window — a fold season with no witness")
+
+
+def _ledger_newest_day(live: Path):
+    """The `created_at` day of the live ledger's last row, read from the file's tail only."""
+    import json
+    from datetime import date
+
+    with open(live, "rb") as handle:
+        handle.seek(0, 2)
+        size = handle.tell()
+        handle.seek(max(0, size - 65536))
+        tail = handle.read()
+    for line in reversed([ln for ln in tail.split(b"\n") if ln.strip()]):
+        try:
+            stamp = json.loads(line).get("created_at") or ""
+            return date.fromisoformat(str(stamp)[:10])
+        except (ValueError, AttributeError):
+            continue
+    return None
+
+
 # ── clause 1: discovery, and the population it reaches ─────────────────────
 
 
@@ -333,10 +440,10 @@ def test_the_corpus_glob_reaches_every_dated_promotions_extract():
 
     The shipped pattern `_promotion_extract_findings` uses cannot be the discovery here, and
     not for a stylistic reason: `fnmatch` treats the pattern's tail as literal, so
-    `*.????-*promotions.jsonl` matches 31 `-lloyd-automod-promotions.jsonl` files and zero
+    `*.????-*promotions.jsonl` matches the `-lloyd-automod-promotions.jsonl` files and zero
     `-promotions-witness.jsonl` files, one of which (`2026-10-08.2383-...`) is a cut that
     clause 3 requires to be exempted BY NAME and re-checked for still existing. A node using
-    the shipped pattern would report a 31-file corpus, pass, and have dropped two extracts —
+    the shipped pattern would report the narrower corpus, pass, and have dropped two extracts —
     the same silent narrowing this item is about, reproduced inside its own guard. So the
     first assertion is about the patterns themselves, where `fnmatch` can be asked, and the
     rest is about the directory.
@@ -359,10 +466,8 @@ def test_the_corpus_glob_reaches_every_dated_promotions_extract():
         f"{sorted(corpus ^ shipped)[:5]} are matched by one pattern and not the other in a "
         "direction that should not exist: the corpus pattern is a widening of the shipped "
         "one, so everything the sibling node sees has to be in scope here too")
-    assert len(corpus) >= _MIN_CORPUS_EXTRACTS, (
-        f"{len(corpus)} dated promotions extracts are on disk, fewer than the "
-        f"{_MIN_CORPUS_EXTRACTS} present as at this file's writing: a witness someone owes "
-        "has left the tree")
+    presence = _presence_findings(data, _indexed_names(vault_root()))
+    assert presence == [], presence[0]
     assert corpus - shipped, (
         "no file the shipped pattern misses is on disk, so the `-promotions-witness.jsonl` "
         "family has gone and `NON_VERBATIM_CUTS`'s 2383 entry is naming a file that is not "
@@ -660,6 +765,80 @@ def test_the_corpus_check_skips_rather_than_fails_when_no_store_is_present(tmp_p
         f"an archive with no live ledger beside it did not come out clean, so mid-fold the "
         f"guard goes wrong instead of running: {findings}")
     assert detail["2026-01-05.4999-lloyd-automod-promotions.jsonl"] == (2, 2), detail
+
+
+# ── #4584: presence without a hand-typed size, and freshness ───────────────
+
+
+def test_an_extract_lost_from_disk_is_named_missing_against_the_vault_index(tmp_path):
+    """The presence alarm still catches the loss it exists for, with no count anywhere.
+
+    A constructed vault: three dated extracts committed, so disk and index agree and the
+    check is clean; one removed from disk while the index still lists it, and the finding
+    names that item; one added on disk and not yet indexed, and nothing reddens.
+    """
+    import subprocess
+
+    vault = tmp_path / "vault"
+    data = vault / _PROMOTION_SUBDIR
+    data.mkdir(parents=True)
+    names = ["2026-01-05.4997-lloyd-automod-promotions.jsonl",
+             "2026-01-06.4998-lloyd-automod-promotions.jsonl",
+             "2026-01-07.4999-promotions-witness.jsonl"]
+    for name in names:
+        (data / name).write_bytes(_fixture_rows(1)[0] + b"\n")
+    git = ["git", "-C", str(vault), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(git + ["init", "-q"], check=True)
+    subprocess.run(git + ["add", "-A"], check=True)
+    subprocess.run(git + ["commit", "-qm", "seed"], check=True)
+
+    assert _indexed_names(vault) == set(names)
+    assert _presence_findings(data, _indexed_names(vault)) == []
+
+    (data / names[1]).unlink()
+    found = _presence_findings(data, _indexed_names(vault))
+    assert len(found) == 1 and "#4998" in found[0] and names[1] in found[0], found
+    assert "#4997" not in found[0] and "#4999" not in found[0], found
+
+    (data / names[1]).write_bytes(b"{}\n")
+    (data / "2026-01-08.5000-lloyd-automod-promotions.jsonl").write_bytes(b"{}\n")
+    assert _presence_findings(data, _indexed_names(vault)) == [], (
+        "an extract on disk that is not yet indexed is growth, never a loss")
+
+
+def test_the_loop_has_published_a_witness_extract_within_the_window_of_its_ledger():
+    """The freshness alarm on the live tree: the newest dated extract's own date is within
+    `_RECENCY_WINDOW_DAYS` of the live ledger's newest row. Skips where this box has no
+    live ledger, like every store-reading node here: no ledger, nothing folding."""
+    live = live_ledger()
+    if not live.is_file():
+        pytest.skip(f"no live promotions ledger at {live}: nothing is folding to owe a witness")
+    newest = _ledger_newest_day(live)
+    assert newest is not None, f"{live}'s tail carries no row with a `created_at` day"
+    names = {path.name for path in _data_dir(vault_root()).glob(_CORPUS_GLOB)}
+    finding = _recency_finding(names, newest)
+    assert finding is None, finding
+
+
+def test_the_recency_alarm_passes_inside_its_window_and_fails_beyond_it():
+    """Both directions on constructed corpora, so the guard is pinned without waiting for
+    the wall clock (or the ledger) to reach the window."""
+    from datetime import date, timedelta
+
+    ledger_day = date(2026, 1, 31)
+    edge = ledger_day - timedelta(days=_RECENCY_WINDOW_DAYS)
+    inside = {f"{edge.isoformat()}.4998-lloyd-automod-promotions.jsonl",
+              "2025-12-01.4997-lloyd-automod-promotions.jsonl"}
+    assert _recency_finding(inside, ledger_day) is None, (
+        "an extract exactly at the window's edge is inside it")
+
+    stale = edge - timedelta(days=1)
+    beyond = {f"{stale.isoformat()}.4998-lloyd-automod-promotions.jsonl",
+              "2025-12-01.4997-promotions-witness.jsonl"}
+    finding = _recency_finding(beyond, ledger_day)
+    assert finding is not None and stale.isoformat() in finding, finding
+    assert "keeps folding the ledger but has published no witness extract" in finding, finding
+    assert _recency_finding(set(), ledger_day) is not None, "an empty corpus is never fresh"
 
 
 # ── the rail on this file's own prose ───────────────────────────────────────
