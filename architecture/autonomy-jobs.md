@@ -1278,7 +1278,7 @@ run is told not to take the offered `force` (`run_78_20261119_090855`: "The back
 refused, not filed"), so the board edge this paragraph calls the consumer is shut for #78
 while #80 still files through the same path (#4601).
 Measured 2026-11-26 over a real seven-day window (`/api/autonomy/health?days=7`, with both
-`oldest_input` and `window_clamped_to_hours` `null`), eight of the nine are green and the
+`oldest_input` and `window_clamped_to_hours` `null`), eight of the nine members are green and the
 group cost 2.10 GPU-h: #79 6 runs / 0.28 GPU-h, #81 7 / 0.36, #90 6 / 0.02, #104 6 / 0.10,
 #108 6 / 0.04, #110 7 / 0.03, #111 1 / 0.92, #80 1 / 0.02 — none paused, all `up_next`. The
 ninth is #78, whose one run in that window is a timeout: 1,200.2 s against `timeout_seconds:
