@@ -754,6 +754,25 @@ does not restate that list: the count it used to type here — and the four-name
 enumeration beside it — is a second definition of a set the owner enumerates,
 and it is the copy that rotted. The grant gate is still none of them.
 
+**The action-class arm (#4048) ships disarmed.** A grant bounds scope, not
+judgment; the arm is the outcome half, one more branch of the same
+`check_grants`, consulted before the tier-1 return (#628's precedent) because
+`automod_vault_land` is tier 1 and reaches no other gate. A frozen taxonomy in
+`app/harness/action_outcomes.py` maps two unattended terminal tools to classes —
+`automod_land` (graded by `rollback_succeeded` minus `promote_failed`, and by a
+`regression_check` regression with a non-empty `confirmed_by`) and `vault_land`
+(graded by `vault_land` ok:false, minus the "nothing to commit" no-ops) — and
+names the excluded classes (the durable-external ones, at zero calls) with why.
+Rows live in `action_outcomes`, in `GRANT_DDL` beside `authority_grants`. A class
+with a bad outcome in the last 30 days, or fewer than K = 30 graded outcomes, is
+on probation; K consecutive clean outcomes restore clearance (rule of three:
+the 95% bound on the bad rate is 3/K = 10%); an unrecognised class is never
+cleared. `harness.action_class_arm.enabled` is `false`, no code passes
+`class_arm=True`, and disarmed the check answers every call exactly as
+before (a pre-arm golden in `tests/unit/test_grant_policy.py`). Arming it is
+Alan's call after `scripts/automod/action_outcomes_backtest.py` (read-only,
+90 days over the live ledger and every archive).
+
 ---
 
 ## 11. The Background tab

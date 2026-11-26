@@ -1418,7 +1418,8 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                  tool_input: dict | None = None,
                  now: dt.datetime | None = None,
                  record: bool = True,
-                 destination: str | None = None) -> Decision:
+                 destination: str | None = None,
+                 class_arm: bool | None = None) -> Decision:
     """May this call proceed? The only question the dispatch hook asks.
 
     Tier 1 returns before the store is opened — that is what makes a dead
@@ -1441,6 +1442,14 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
     only a destination-scoped grant covering that host can pay for the call;
     omit it and a destination-scoped grant cannot pay for anything (see
     `_decide_destination` and the `match` loop).
+
+    `class_arm` (#4048) is the outcome-keyed action-class arm. None reads
+    `harness.action_class_arm.enabled`, which ships off and which nothing in the
+    tree sets; disarmed, nothing below the mint branch changes by a byte (pinned
+    against a pre-arm golden in `tests/unit/test_grant_policy.py`). Armed, an
+    unattended call to a class's terminal tool is withheld while the class is on
+    probation — consulted before the tier-1 return on #628's precedent, since
+    `automod_vault_land` is tier 1 and no later line would ever see it.
     """
     at = _utc(now or _now())
     tool = normalize_tool_name(tool_name)
@@ -1456,6 +1465,14 @@ def check_grants(store: GrantStore, *, scope: str, tool_name: Any,
                         "Authority is issued ahead of time by a human: "
                         + grant_shape(scope=scope, tool="<the tool you need>",
                                       tool_input={}, now=at))
+
+    if class_arm is None:
+        class_arm = _class_arm_armed()
+    if class_arm and not is_interactive_scope(scope):
+        withheld = _decide_action_class(store, scope=scope, tool=tool, at=at,
+                                        record=record)
+        if withheld is not None:
+            return withheld
 
     tier = effective_tier(tool, args)
     if tier == 1 and destination is None:
@@ -1641,7 +1658,8 @@ def install_policy_hook(hooks: HookRegistry, *, store: GrantStore | None = None,
         # to be the same number `check_grants` computes below, or the two gates
         # on one registry disagree about the same call.
         if (effective_tier(tool_name, tool_input) == 1
-                and tool_name != GRANT_MINT_TOOL):
+                and tool_name != GRANT_MINT_TOOL
+                and not _class_arm_reaches(tool_name)):
             return {}
         active = store
         try:
@@ -2078,3 +2096,51 @@ def first_arm_allowed(path: Any, old_fm: dict | None, new_fm: dict | None,
         "run, no park declared, and the only dispatch move is status draft -> up_next",
         task_id, path, (now or dt.datetime.now(dt.timezone.utc)).isoformat())
     return True
+
+
+# ---------------------------------------------------------------------------
+# #4048 — the action-class arm (`app/harness/action_outcomes.py`)
+# ---------------------------------------------------------------------------
+
+
+def _class_arm_armed() -> bool:
+    """#4048's switch, read per call so an edit to config is not cached past a
+    restart; False on any failure. Function-local import, as `_apply_grant_ddl`."""
+    from app.harness.action_outcomes import class_arm_armed
+    return class_arm_armed()
+
+
+def _class_arm_reaches(tool_name: Any) -> bool:
+    """Would an armed class arm answer this tool? Only the hook's own tier-1
+    short-circuit asks, so that it does not return before `check_grants` can.
+    Disarmed it is False for every tool, which keeps the short-circuit as it was."""
+    if not _class_arm_armed():
+        return False
+    from app.harness.action_outcomes import class_for_tool
+    return class_for_tool(normalize_tool_name(tool_name)) is not None
+
+
+def _decide_action_class(store: GrantStore, *, scope: str, tool: str,
+                         at: dt.datetime, record: bool) -> Decision | None:
+    """The class arm (#4048): a probation Decision for a class's terminal tool,
+    or None to fall through to the rest of the check unchanged.
+
+    A store that cannot be read raises like `store.live` does, so the hook
+    denies — an armed arm with no readable evidence has no track record."""
+    from app.harness import action_outcomes as AO
+    if AO.class_for_tool(tool) is None:
+        return None
+    try:
+        standing = AO.withheld(store, tool=tool, now=at)
+    except Exception as exc:
+        raise GrantError(f"action-outcome store unreadable "
+                         f"({exc.__class__.__name__}: {exc})")
+    if standing is None:
+        return None
+    reason = AO.denial_reason(standing, tool=tool, scope=scope)
+    if record:
+        store.record_dispatch(scope=scope, tool=tool, decision="deny",
+                              reason=reason, now=at)
+    logger.warning("[grants] withheld tool=%s scope=%s class=%s — %s", tool, scope,
+                   standing.action_class, standing.why)
+    return Decision(False, None, reason)

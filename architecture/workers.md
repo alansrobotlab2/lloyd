@@ -81,11 +81,14 @@ the backend ask `configured_db_path()` instead of inventing a path.
 Three tables are this file's own. `queue` is the work, `runs` is the history,
 `watermarks` is whatever a source needs to remember between ticks.
 
-Four more share the database, and each is here because *this* file owns it:
+Five more share the database, and each is here because *this* file owns it:
 `authority_grants` and `grant_dispatch` (#534) are declared in `queue.py`'s
 `GRANT_DDL` and read by `app/harness/policy.py` rather than redeclared there —
 two definitions of a table whose NOT-NULL `expires_at` is the whole safety
-property is how one of them stops being true; `pause_journal` (#2615) is in the
+property is how one of them stops being true; `action_outcomes` (#4048) is in
+`GRANT_DDL` beside them, one row per graded automod-ledger event with a NOT-NULL
+`outcome` and `evidence_ref`, read by the (disarmed by default) action-class arm
+inside the same `check_grants` (`app/harness/action_outcomes.py`); `pause_journal` (#2615) is in the
 same `_SCHEMA`, one row per take and per lift of the durable pool hold with its
 `holder_kind`, its `actor` and the `hold_id` of the take it lifts, which is the
 history §7's overwritten-in-place `watermarks` pair cannot carry; `hold_journal`
@@ -99,9 +102,9 @@ hold had `owed-check` waiting 8 h 53 m); and
 `tool_effects` (#544) is created by `agent_mcp/_tool_effects.py` against
 `configured_db_path()`. One more shares the file without being *owned* here:
 `egress_events` (#628), created by `agent_mcp/egress.py`, the egress guard's
-record of every destination it saw. So `.tables` shows nine (`queue`, `runs`,
-`watermarks`, `authority_grants`, `grant_dispatch`, `pause_journal`, `hold_journal`,
-`tool_effects`, `egress_events`), and only the first three are the work the pool
+record of every destination it saw. So `.tables` shows ten (`queue`, `runs`,
+`watermarks`, `authority_grants`, `grant_dispatch`, `action_outcomes`, `pause_journal`,
+`hold_journal`, `tool_effects`, `egress_events`), and only the first three are the work the pool
 runs: `pause_journal` and `hold_journal` are the pool's own state
 rather than a unit of work — and what bounds each differs, because `pause_journal`'s
 horizon is enforced by the groundskeeper's sweep (`PAUSE_JOURNAL_MAX_AGE_DAYS`) while

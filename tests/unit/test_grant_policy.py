@@ -26,6 +26,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import re
 import sqlite3
 import sys
 import tempfile
@@ -337,9 +338,12 @@ def test_an_existing_database_gets_the_table_on_next_init(tmp_path):
     # `pause_journal_holds`), so a gate's engage written there would inflate "how many
     # times was the fleet held" for every existing reader. The exact equality is doing
     # its job here — it caught the new store instead of letting it land unnamed.
+    #
+    # `action_outcomes` is #4048's graded-outcome ledger, in `GRANT_DDL` beside
+    # `authority_grants` because the class arm reads it from inside `check_grants`.
     assert kept == {"queue", "sqlite_sequence", "runs", "watermarks",
                     "authority_grants", "grant_dispatch", "pause_journal",
-                    "hold_journal"}
+                    "hold_journal", "action_outcomes"}
 
 
 # ── Hook wiring: the non-interactive dispatch paths ────────────────────────
@@ -1834,3 +1838,221 @@ def test_the_withdrawal_is_visible_to_the_store_the_hook_builds(tmp_path):
     assert "target #68" in d.reason, d.reason
     assert d.grant_id is None, (
         f"the denial still names a paying row: grant #{d.grant_id}")
+
+
+# ── #4048: the action-class arm, and the disarmed path that must not move ────
+#
+# The arm (`app/harness/action_outcomes.py`) is consulted inside `check_grants`
+# BEFORE the tier-1 early return, which is the only place an outcome-keyed
+# withdrawal can reach `automod_vault_land` (tier 1, so no other gate sees it).
+# That placement is also the hazard: every unattended dispatch passes the new
+# line. So the disarmed answer is pinned against a golden captured from the code
+# BEFORE the arm existed (base `8cd22d7b`): the corpus below was run once against
+# that tree and its answers written to `GOLDEN_4048`, and the test replays the
+# same corpus against today's code with the arm off and compares every field of
+# every Decision, every grant_dispatch row the calls ledgered, and every grant's
+# consumed count. A new arm that changes one byte of a disarmed answer fails it.
+
+GOLDEN_4048 = (LLOYD_HOME / "tests" / "fixtures"
+               / "grant_policy_disarmed_golden_4048.jsonl")
+
+#: The representative call set: every exit `check_grants` has (mint refusal and
+#: mint allow, tier-1 return, interactive return, destination allow and deny,
+#: grant allow, quota-spent deny, expiry deny, predicate deny, Bash shape deny,
+#: schedule-state deny) plus the two terminal tools the arm maps — reached from
+#: an unattended scope, where an armed arm would answer them.
+_CORPUS_4048 = (
+    ("worker:autocode", "Read", {"file_path": "/x"}, None),
+    ("worker:autocode", "automod_land", {"round_id": "SM_1"}, None),
+    ("autonomy-task:39", "automod_vault_land", {"paths": ["a.md"]}, None),
+    ("worker:autocode", "automod_vault_land", {"paths": ["a.md"]}, None),
+    ("autonomy-task:39", "email_send", {"to": "a@b.c", "body": "hi"}, None),
+    ("autonomy-task:39", "email_send", {"to": "a@b.c", "body": "hi"}, None),
+    ("autonomy-task:39", "email_send", {"to": "a@b.c", "body": "hi"}, None),
+    ("interactive", "email_send", {"to": "a@b.c"}, None),
+    ("interactive", "automod_vault_land", {"paths": ["a.md"]}, None),
+    ("worker:autocode", GRANT_MINT_TOOL, {}, None),
+    ("interactive", GRANT_MINT_TOOL, {}, None),
+    ("worker:cal", "calendar_create", {"title": "short"}, None),
+    ("worker:cal", "calendar_create", {"title": "far too long a title"}, None),
+    ("autonomy-task:39", "contacts_delete", {"id": 3}, None),
+    ("autonomy-task:39", "Bash", {"command": "ls -la"}, None),
+    ("worker:autocode", "Bash", {"command": "rm -rf ~/obsidian/x"}, None),
+    ("worker:autocode", "Bash",
+     {"command": "supervisorctl restart lloyd-mc:lloyd-backend"}, None),
+    ("worker:fetch", "web_fetch", {"url": "https://api.example.com/v1"},
+     "api.example.com"),
+    ("worker:fetch", "web_fetch", {"url": "https://attacker.tld/"},
+     "attacker.tld"),
+    ("autonomy-task:40", "autonomy_write_task",
+     {"id": 68, "status": "up_next"}, None),
+    ("", "email_delete", {"id": 1}, None),
+    ("worker:autocode", "mcp__lloyd__email_send", {"to": "x"}, None),
+)
+
+
+def _seed_corpus_store(store) -> None:
+    _mint(store, scope="autonomy-task:39", tool="email_send", quota=2)
+    _mint(store, scope="worker:cal", tool="calendar_create",
+          predicate="len(title)<=10")
+    _mint(store, scope="autonomy-task:39", tool="contacts_delete", expires=-2.0)
+    store.mint(scope="worker:fetch", tool_pattern="web_fetch", issued_by="alan",
+               expires_at=_iso(24.0), destination="api.example.com")
+
+
+def _corpus_answers(store, **extra) -> list[dict]:
+    """Run `_CORPUS_4048` through `check_grants` and return every observable:
+    the Decision's fields per call, then the ledger rows, then the grants."""
+    _seed_corpus_store(store)
+    out: list[dict] = []
+    for scope, tool, args, dest in _CORPUS_4048:
+        d = check_grants(store, scope=scope, tool_name=tool, tool_input=args,
+                         now=NOW, destination=dest, **extra)
+        out.append({"call": [scope, tool, args, dest], "allowed": d.allowed,
+                    "grant_id": d.grant_id, "reason": d.reason})
+    out.append({"dispatch": [
+        {k: r[k] for k in ("at", "scope", "tool", "grant_id", "decision", "reason")}
+        for r in reversed(store.dispatch_rows(limit=1000))]})
+    with sqlite3.connect(str(store.db_path)) as conn:
+        out.append({"grants": [list(r) for r in conn.execute(
+            "SELECT id, scope, tool_pattern, consumed, revoked_at FROM "
+            "authority_grants ORDER BY id")]})
+    return out
+
+
+def _golden_4048() -> list[dict]:
+    return [json.loads(line) for line in
+            GOLDEN_4048.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+@pytest.mark.parametrize("arm", [False, None], ids=["class_arm=False", "config-default"])
+def test_disarmed_check_grants_answers_exactly_as_before_the_arm(tmp_path, arm):
+    """Clause 5's last half: with the arm disarmed — explicitly, and by the
+    shipped config — every call in the corpus gets the Decision, the ledger row
+    and the quota draw it got from the pre-arm code, field for field. The store
+    also holds a fresh bad outcome for both mapped classes, so a disarmed arm
+    that still read it would show up as a changed answer."""
+    from app.harness import action_outcomes as AO
+    s = GrantStore(tmp_path / "workers.db")
+    s.ensure_schema()
+    with s._connect() as conn:
+        for cls in AO.ACTION_CLASSES:
+            conn.execute(
+                f"INSERT INTO {AO.OUTCOME_TABLE} (action_class, outcome, source_event,"
+                " source_event_id, ts, evidence_ref, recorded_at) VALUES"
+                " (?,?,?,?,?,?,?)", (cls, "bad", AO.ACTION_CLASSES[cls].sources[0],
+                                     f"seed-{cls}", _iso(-1.0)[:19] + "+00:00",
+                                     f"seed-{cls}", _iso(0)))
+    extra = {} if arm is None else {"class_arm": arm}
+    got = json.loads(json.dumps(_corpus_answers(s, **extra), sort_keys=True))
+    want = _golden_4048()
+    assert len(got) == len(want) == len(_CORPUS_4048) + 2
+    for g, w in zip(got, want):
+        assert g == w, f"disarmed answer moved:\n got  {g}\n want {w}"
+
+
+def test_the_disarmed_golden_is_not_vacuous():
+    """The golden holds denies, allows, a grant payment, a quota draw and a
+    tier-1 terminal-tool allow — so the comparison above covers every exit."""
+    rows = _golden_4048()
+    calls = rows[:-2]
+    assert any(r["allowed"] for r in calls) and any(not r["allowed"] for r in calls)
+    assert any(r["grant_id"] for r in calls)
+    assert any(r["call"][1] == "automod_vault_land" and r["allowed"] for r in calls)
+    assert rows[-2]["dispatch"] and any(g[3] for g in rows[-1]["grants"])
+
+
+def test_the_arm_ships_disarmed_and_nothing_arms_it():
+    import yaml
+
+    from app.harness import action_outcomes as AO
+    cfg = yaml.safe_load((LLOYD_HOME / "config.yaml").read_text(encoding="utf-8"))
+    assert cfg["harness"]["action_class_arm"]["enabled"] is False
+    assert AO.class_arm_armed() is False
+    # No runtime code passes `class_arm=True` or arms the switch.
+    offenders = []
+    for root in ("app", "agent_mcp", "workers", "scripts", "server.py"):
+        base = LLOYD_HOME / root
+        for p in ([base] if base.is_file() else base.rglob("*.py")):
+            text = p.read_text(encoding="utf-8", errors="replace")
+            if re.search(r"class_arm\s*=\s*True|action_class_arm[^\n]*enabled[^\n]*True",
+                         text):
+                offenders.append(str(p.relative_to(LLOYD_HOME)))
+    assert offenders == [], offenders
+
+
+def _seed_outcomes(store, cls: str, outcomes: list[str], *, start_hours=-48.0):
+    from app.harness import action_outcomes as AO
+    with store._connect() as conn:
+        for i, o in enumerate(outcomes):
+            ts = (NOW + dt.timedelta(hours=start_hours + i * 0.1)).strftime(
+                "%Y-%m-%dT%H:%M:%S+00:00")
+            conn.execute(
+                f"INSERT INTO {AO.OUTCOME_TABLE} (action_class, outcome, source_event,"
+                " source_event_id, ts, evidence_ref, recorded_at) VALUES"
+                " (?,?,?,?,?,?,?)",
+                (cls, o, AO.ACTION_CLASSES[cls].sources[0], f"{cls}-{i}", ts,
+                 f"promotions ledger {cls}#{i}-{o}", ts))
+
+
+def test_armed_arm_withholds_a_tier1_terminal_call_naming_class_and_evidence(store):
+    """Clause 5: consulted before the tier-1 return. `automod_vault_land` is
+    tier 1 — it reaches no other gate — and a probation class withholds it, with
+    the class and the evidence_ref of the bad row in the denial."""
+    from app.harness import action_outcomes as AO
+    K = AO.CLEARANCE_STREAK_K
+    assert effective_tier("automod_vault_land", {}) == 1
+    _seed_outcomes(store, "vault_land", ["clean"] * K + ["bad"] + ["clean"] * 3)
+    d = check_grants(store, scope="autonomy-task:39", tool_name="automod_vault_land",
+                     tool_input={"paths": ["a.md"]}, now=NOW, class_arm=True)
+    assert d.allowed is False
+    assert "'vault_land'" in d.reason and "probation" in d.reason
+    assert f"promotions ledger vault_land#{K}-bad" in d.reason, d.reason
+    row = store.dispatch_rows(limit=1)[0]
+    assert row["decision"] == "deny" and row["tool"] == "automod_vault_land"
+    # The same call, disarmed, is the tier-1 allow it always was.
+    assert check_grants(store, scope="autonomy-task:39",
+                        tool_name="automod_vault_land", tool_input={}, now=NOW,
+                        class_arm=False) == policy.Decision(True, None, "")
+
+
+def test_armed_arm_clears_a_class_with_a_clean_streak_and_leaves_other_tools(store):
+    from app.harness import action_outcomes as AO
+    K = AO.CLEARANCE_STREAK_K
+    _seed_outcomes(store, "automod_land", ["bad"] + ["clean"] * K)
+    d = check_grants(store, scope="worker:autocode", tool_name="automod_land",
+                     tool_input={}, now=NOW, class_arm=True)
+    assert d == policy.Decision(True, None, "")
+    # A tool no class maps is answered by the rest of the check, unchanged.
+    for tool, args in (("Read", {}), ("email_send", {"to": "x"})):
+        assert check_grants(store, scope="worker:autocode", tool_name=tool,
+                            tool_input=args, now=NOW, record=False,
+                            class_arm=True) == check_grants(
+            store, scope="worker:autocode", tool_name=tool, tool_input=args,
+            now=NOW, record=False, class_arm=False)
+
+
+def test_armed_arm_with_no_track_record_withholds_and_spares_interactive(store):
+    d = check_grants(store, scope="worker:autocode", tool_name="automod_land",
+                     tool_input={}, now=NOW, class_arm=True)
+    assert d.allowed is False and "'automod_land'" in d.reason
+    assert "evidence_ref: none" in d.reason and "fewer than K=" in d.reason
+    # A person on the turn is never withheld: the arm is for unattended scopes.
+    assert check_grants(store, scope="interactive", tool_name="automod_land",
+                        tool_input={}, now=NOW, class_arm=True).allowed is True
+
+
+def test_armed_hook_reaches_the_tier1_terminal_tool_and_disarmed_does_not(
+        store, monkeypatch):
+    """The hook's own tier-1 short-circuit must not return before the arm can
+    answer — and disarmed it must return exactly as before."""
+    _seed_outcomes(store, "vault_land", ["bad"])
+    hooks = HookRegistry()
+    install_policy_hook(hooks, store=store, scope="autonomy-task:39", now=NOW)
+    assert _fire(hooks, "automod_vault_land", {"paths": ["a.md"]}) == {}
+    monkeypatch.setattr(policy, "_class_arm_armed", lambda: True)
+    out = _fire(hooks, "automod_vault_land", {"paths": ["a.md"]})
+    assert _denied(out), out
+    assert "'vault_land'" in out["hookSpecificOutput"]["permissionDecisionReason"]
+    # Armed, an unmapped tier-1 tool still never opens the store.
+    assert _fire(hooks, "Read", {"file_path": "/x"}) == {}

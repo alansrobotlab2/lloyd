@@ -62,6 +62,26 @@ CREATE TABLE IF NOT EXISTS grant_dispatch (
   decision  TEXT NOT NULL,
   reason    TEXT
 );
+
+-- #4048: graded outcomes per unattended action class, read by the class arm in
+-- the same `check_grants` the grants answer (`app/harness/action_outcomes.py`).
+-- One row per graded automod-ledger event. `outcome` and `evidence_ref` are NOT
+-- NULL because a row that cannot say what happened, or where that is written
+-- down, is not evidence; `source_event_id` (sha256 of the ledger line) is
+-- UNIQUE so re-reading a folded archive inserts nothing twice.
+CREATE TABLE IF NOT EXISTS action_outcomes (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  action_class     TEXT NOT NULL,
+  outcome          TEXT NOT NULL CHECK (outcome IN ('clean', 'bad', 'neutral')),
+  source_event     TEXT NOT NULL,
+  source_event_id  TEXT NOT NULL UNIQUE,
+  ts               TEXT NOT NULL,
+  evidence_ref     TEXT NOT NULL,
+  subject          TEXT,
+  recorded_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_action_outcomes_class_ts
+  ON action_outcomes(action_class, ts);
 """
 
 

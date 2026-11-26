@@ -595,6 +595,14 @@ harness:
     token_estimate: 1500
     dedup_max_consecutive: 2
   stream_chunk_timeout_seconds: 60
+  # #4048: the outcome-keyed action-class arm in check_grants
+  # (app/harness/action_outcomes.py). Armed, an unattended automod_land /
+  # automod_vault_land is withheld while its class is on probation (a bad graded
+  # outcome in 30 d, or fewer than K=30 graded outcomes). Ships OFF and stays
+  # off: arming it changes what every unattended dispatch may do — Alan's call,
+  # after the 90-day backtest (scripts/automod/action_outcomes_backtest.py).
+  action_class_arm:
+    enabled: false
   # Request manifests (app/component_manifest.py): the primary's chat template,
   # hashed into every line so a template change shows in the prompt diff.
   component_manifest:
