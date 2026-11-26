@@ -436,6 +436,7 @@ GIST_LOSS_EXCEPTIONS: dict[str, str] = {
     # to survive `CATALOG_GIST_CHARS` whole, so the routing clause ships in the gist and
     # nothing is lost to truncate. The node's own anti-rot arm required the removal.
     "vault_overview": "'orient before searching' is ordering advice; the gist says summarize",
+    "automod_vault_land": "'never lands twice' (#4583) describes a second call during a live land, not when to choose the tool",
 }
 
 

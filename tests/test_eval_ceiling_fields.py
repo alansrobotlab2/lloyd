@@ -1733,10 +1733,12 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
     `main`, so no cited line moved and only the total below did (3,131 → 3,218). #4297
     did the same with the refused-ceiling escalation: one call below the baseline write
     (line 3097, the last line cited) and the function after `main` (3,218 → 3,301).
+    #4033 (2026-11-26) took it too: `--linked-notes` is five line-for-line edits above
+    `main` and its helpers are appended after it (3,301 → 3,348).
     """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3301, (
-        f"eval/run_eval.py is {len(lines)} lines, not the 3,301 #4285 and #4297 left it "
+    assert len(lines) == 3348, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 3,348 #4285, #4297 and #4033 left it "
         "at by appending after `main` (every `architecture/` line citation and this list were "
         "re-numbered to 3,131 on 2026-11-25, when #4399's "
         "skills_search arm grew it from the 2,975 #4404's episodic-floor leg had reached "
