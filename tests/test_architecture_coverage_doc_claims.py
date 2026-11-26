@@ -11331,10 +11331,15 @@ def test_the_hub_remeasure_node_skips_rather_than_passes_on_an_absent_store(tmp_
 # replaced the literal `params.get("expand_graph", False)` with the named constant:
 # production defaulted False before that commit and after it, so there was no flip to
 # be the divergence. And the same commit DELETED `and not args.no_graph` from the
-# parity conjunction and ADDED `expand_graph_matches_production` — which is why the
-# flag reads True for the graph-expanded arm today, as `tests/test_eval_scorer.py:774`
-# and `tests/test_eval_corpus_guard.py:634-640` both pin. A reader who believes the
-# page looks for a knob bug that the record says does not exist.
+# parity conjunction and ADDED `expand_graph_matches_production` — which is why
+# `matches_production_defaults` reads True for a default run while
+# `expand_graph_matches_production` reads False for the graph-expanded default arm
+# and True only for a `--no-graph` run, as
+# `test_matches_production_defaults_never_claims_graph_parity` in
+# `tests/test_eval_scorer.py` and `test_a_default_run_records_production_config` in
+# `tests/test_eval_corpus_guard.py` both pin (cited by node, never by line: #4259).
+# A reader who believes the page looks for a knob bug that the record says does not
+# exist.
 
 #: The two claims the page must stop making. Both are substrings of sentences it
 #: wrote about itself, and both are refuted above.
@@ -16510,3 +16515,75 @@ def test_the_subliminal_page_names_the_command_that_decides_the_followup_arm():
     assert _stale_flag_claims(old_sentence) == list(_FOCUS_LEGS_FLAG_MISSTATEMENTS), (
         "the banned fragments no longer match the sentence they were written to catch, so "
         "this node would pass over the very wording it exists to retire")
+
+
+# ── #4259: the #3009 header cites its pins by node name, never by line ───────
+#
+# The comment above `_RETIRED_PARITY_CLAIMS` pointed at `tests/test_eval_scorer.py`
+# by a line some 620 lines from the node that pins the parity field, and stated the
+# flag's direction backwards. No rail here reads a `tests/*.py` comment, so the
+# node below reads this file's own text: the block may carry no line number into
+# either pinning file, every test node it names must be a `def test_` in the file
+# named beside it, and the refuted direction may not come back.
+
+_PARITY_PIN_FILES = ("test_eval_scorer.py", "test_eval_corpus_guard.py")
+#: The wording the #3009 header used to carry; both pins assert the opposite.
+_REFUTED_PARITY_DIRECTION = "flag reads True for the graph-expanded arm"
+
+
+def _comment_block_3009(src: str) -> str:
+    """The `#3009` header comment, `# ` prefixes stripped and whitespace flattened."""
+    start = src.index("# ── #3009:")
+    end = src.index("_RETIRED_PARITY_CLAIMS =", start)
+    lines = [ln.strip() for ln in src[start:end].splitlines()]
+    text = " ".join(ln[1:].strip() for ln in lines if ln.startswith("#"))
+    return " ".join(text.split())
+
+
+def _parity_pin_comment_problems(block: str) -> list[str]:
+    """Everything wrong with the header comment's pointers, as readable findings."""
+    problems: list[str] = []
+    for name in _PARITY_PIN_FILES:
+        if re.search(re.escape(name) + r":[0-9]", block):
+            problems.append(f"a line-number pointer into {name}")
+    pairs = re.findall(r"`(test_\w+)` in `(tests/\w+\.py)`", block)
+    cited = set(re.findall(r"`(test_\w+)`", block))
+    unpaired = cited - {node for node, _ in pairs}
+    if unpaired:
+        problems.append(f"node(s) cited without the file they live in: {sorted(unpaired)}")
+    for node, rel in pairs:
+        path = ROOT / rel
+        defs = ({n.name for n in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+                 if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))}
+                if path.is_file() else set())
+        if node not in defs:
+            problems.append(f"`{node}` is not a def in {rel}")
+    named = {rel.rsplit("/", 1)[1] for _, rel in pairs}
+    for name in _PARITY_PIN_FILES:
+        if name not in named:
+            problems.append(f"no pinning node named in {name}")
+    if _REFUTED_PARITY_DIRECTION in block:
+        problems.append("the refuted direction is back")
+    if not ("`expand_graph_matches_production` reads False for the graph-expanded "
+            "default arm and True only for a `--no-graph` run") in block:
+        problems.append("the pins' direction (False by default, True only for "
+                        "--no-graph) is not stated")
+    return problems
+
+
+def test_the_3009_header_cites_its_parity_pins_by_node_name():
+    """#4259: the header comment points at both pins by `def test_` name, resolves
+    each in the named file's AST, and states the flag the way the pins assert it."""
+    block = _comment_block_3009(Path(__file__).read_text(encoding="utf-8"))
+    assert "_RETIRED_PARITY_CLAIMS" not in block and block, block[:300]
+    assert _parity_pin_comment_problems(block) == [], block
+    # Can it fail? Each mutation is the defect #4259 was filed for, or its sibling.
+    stale = block.replace("`tests/test_eval_scorer.py`",
+                          "`tests/test_eval_scorer.py:" + "774`")
+    assert _parity_pin_comment_problems(stale), "a re-added line number passed"
+    ghost = block.replace("test_a_default_run_records_production_config",
+                          "test_a_node_that_does_not_exist")
+    assert _parity_pin_comment_problems(ghost), "a node absent from its file passed"
+    backwards = block + " so the " + _REFUTED_PARITY_DIRECTION + " today."
+    assert _parity_pin_comment_problems(backwards), "the refuted direction passed"
+
