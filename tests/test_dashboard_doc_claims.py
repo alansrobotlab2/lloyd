@@ -671,3 +671,56 @@ def test_the_section_error_helpers_have_a_spec_the_suite_actually_runs():
         assert behaviour in joined, (
             f"no api.test.ts case covers {behaviour!r} any more: the spec that "
             "this node runs has stopped pinning clause 3")
+
+
+# ── #4268: every `app.frontmatter.<x>` / `_fm.<x>` the router cites resolves ──
+#
+# `_frontmatter_from_block`'s docstring once cited a memo entry point in
+# `app.frontmatter` that never existed (written that way at `febf0a6b`, the
+# commit that moved the memo there). Nothing checked a cited name, so it read
+# as a door for a year of readers. This rule is separate from the quantity
+# rule above and covers the whole file — code, comments and docstrings — since
+# a citation is wrong wherever it sits.
+FM_CITATION = re.compile(r"(?:\bapp\.frontmatter|(?<![\w.])_fm)\.([A-Za-z_]\w*)")
+
+
+def _frontmatter_citations(text: str) -> list[str]:
+    return sorted(set(FM_CITATION.findall(text)))
+
+
+def test_every_cited_frontmatter_name_resolves():
+    from app import frontmatter
+
+    text = DASHBOARD.read_text(encoding="utf-8")
+    cited = _frontmatter_citations(text)
+    print(f"dashboard.py: {len(text.splitlines())} lines, "
+          f"{len(cited)} app.frontmatter names cited — {cited}")
+    # Positive control: the names the router really calls must be found, so a
+    # pattern that matches nothing cannot pass as "no orphan".
+    for known in ("front_matter_text", "front_matter_of", "FM_MEMO"):
+        assert known in cited, f"citation pattern missed the known name {known!r}"
+    orphans = [name for name in cited if not hasattr(frontmatter, name)]
+    assert not orphans, (
+        f"app/routers/dashboard.py cites app.frontmatter names that do not exist: "
+        f"{orphans}")
+
+
+def test_the_citation_rule_fires_on_an_orphaned_name():
+    from app import frontmatter
+
+    planted = "the memo (`app.frontmatter.no_such_door`) and `_fm.also_missing(x)`"
+    cited = _frontmatter_citations(planted)
+    assert cited == ["also_missing", "no_such_door"]
+    assert not any(hasattr(frontmatter, name) for name in cited)
+
+
+def test_frontmatter_from_block_docstring_names_the_real_doors():
+    import app.routers.dashboard as dash
+
+    doc = " ".join((dash._frontmatter_from_block.__doc__ or "").split())
+    assert "`app.frontmatter.front_matter_of`" in doc
+    assert "`app.frontmatter.front_matter_text`" in doc
+    # The re-point kept the reason for the split (a re-citation, not a cut).
+    assert "tests/test_dashboard_yaml_loader.py" in doc
+    assert "counts constructions under a monkeypatch" in doc
+    assert "`_YamlLoader`" in doc

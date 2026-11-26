@@ -168,11 +168,11 @@ def _frontmatter(path, limit: int = 65536) -> dict:
 def _frontmatter_from_block(block: str) -> dict:
     """The block `_fm.front_matter_text` cut, as a dict — {} if it is not one.
 
-    Separate from the read because the memo hands a *block* to its caller's
-    parse (`app.frontmatter.memo_front_matter`), and because the loader rule
-    belongs to this module: `tests/test_dashboard_yaml_loader.py` proves the
-    loader by counting constructions under a monkeypatch of THIS module's
-    `_YamlLoader`, which only works if the `yaml.load` line lives here.
+    Separate from the read because the memo (`app.frontmatter.front_matter_of`)
+    hands its caller's parse a *block*, what `app.frontmatter.front_matter_text`
+    returns, and because the loader rule belongs to this module:
+    `tests/test_dashboard_yaml_loader.py` counts constructions under a monkeypatch
+    of THIS module's `_YamlLoader`, which only works if `yaml.load` lives here.
     """
     try:
         fm = yaml.load(block, Loader=_YamlLoader)
