@@ -472,16 +472,36 @@ fi
 # owed ruling 2 withheld. Exit 1 is the refusal; anything past 1 is the rung failing,
 # said out loud rather than read as clean, because a check that goes blind looks
 # exactly like a tree with no orphans.
+#
+# #4382: scoped to the caller's declared writes. The matcher reads the WHOLE index, so
+# one job's staged loaded-index removal used to refuse every other job's commit too
+# (the 2026-11-19 nightly chain, #4301). With a declared list (the same condition the
+# ownership block below uses: LLOYD_JOB + LLOYD_JOB_WRITES + a pathspec) a finding in a
+# loaded file outside that list is another job's: the rung warns, prints its path on
+# stdout, and this commit is made WITHOUT it — through a scratch copy of the index, so
+# the real index keeps it staged for the job that owes the disposition. It is never
+# unstaged (a quietly unstaged loaded-memory shrink is hidden, not retired) and never
+# committed here (that would strand the row under this job's name). With no declared
+# list every finding still hard-refuses, exactly as before.
 STRAND_RUNG="$SCRIPT_DIR/ledger_strand_findings.py"
+STRAND_EXCLUDE=()
+STRAND_ARGS=(--vault "$VAULT")
+if [ ${#DECLARED[@]} -gt 0 ] && [ ${#PATHSPEC[@]} -gt 0 ]; then
+    STRAND_ARGS+=(--paths "$(IFS=:; printf '%s' "${DECLARED[*]}")")
+fi
 if [ ! -f "$STRAND_RUNG" ]; then
     echo "vault-commit.sh: ledger strand CHECK SKIPPED (missing $STRAND_RUNG)" >&2
 elif [ -z "$PY" ]; then
     echo "vault-commit.sh: ledger strand CHECK SKIPPED (no python interpreter)" >&2
 else
     set +e
-    "$PY" "$STRAND_RUNG" --vault "$VAULT"
+    STRAND_FOREIGN="$("$PY" "$STRAND_RUNG" "${STRAND_ARGS[@]}")"
     STRAND_RC=$?
     set -e
+    if [ "$STRAND_RC" -eq 0 ] && [ -n "$STRAND_FOREIGN" ]; then
+        mapfile -t STRAND_EXCLUDE <<< "$STRAND_FOREIGN"
+        echo "vault-commit.sh: LEDGER STRAND left to its owner: ${#STRAND_EXCLUDE[@]} loaded index file(s) staged by another job stay staged and are NOT in this commit: ${STRAND_EXCLUDE[*]} (#4382)" >&2
+    fi
     if [ "$STRAND_RC" -eq 1 ]; then
         # Column 0 and before the index readback below, for the #1070 reason that
         # governs the no-change block: an indented leading token does not survive
@@ -642,6 +662,22 @@ fi
 # somebody else's staged entry, and it gets one below.
 git diff --cached --name-only -z > "$TMP_STAGED"
 mapfile -d '' -t STAGED < "$TMP_STAGED"
+if [ ${#STRAND_EXCLUDE[@]} -gt 0 ]; then
+    # #4382: what this commit will carry is the index minus the foreign strands.
+    _KEPT=()
+    for path in ${STAGED[@]+"${STAGED[@]}"}; do
+        _keep=1
+        for _ex in "${STRAND_EXCLUDE[@]}"; do
+            if [ "$path" = "$_ex" ]; then
+                _keep=0
+            fi
+        done
+        if [ "$_keep" -eq 1 ]; then
+            _KEPT+=("$path")
+        fi
+    done
+    STAGED=(${_KEPT[@]+"${_KEPT[@]}"})
+fi
 
 if [ ${#STAGED[@]} -eq 0 ]; then
     echo "vault-commit.sh: nothing to commit (clean tree on main)" >&2
@@ -783,7 +819,24 @@ fi
 # `git log -1 -g` is. The message and `--trailer` are commit options, so they stay
 # after, and git appends the trailer to the end of the whole message — so the
 # unattributed block sits between the subject and `Job:`, and both survive.
+if [ ${#STRAND_EXCLUDE[@]} -gt 0 ]; then
+    # #4382: commit from a scratch copy of the index with the foreign loaded files reset
+    # to HEAD, so they are absent from this commit while the REAL index keeps them
+    # staged. The scratch index lives in the vault's own git dir and is removed after.
+    STRAND_INDEX="$(git rev-parse --git-path index).vault-commit-$$"
+    cp "$(git rev-parse --git-path index)" "$STRAND_INDEX"
+    GIT_INDEX_FILE="$STRAND_INDEX" git reset -q -- "${STRAND_EXCLUDE[@]}"
+    set +e
+    GIT_INDEX_FILE="$STRAND_INDEX" git "${GIT_ARGS[@]+"${GIT_ARGS[@]}"}" commit "${MSG_ARGS[@]}" "${TRAILER_ARGS[@]+"${TRAILER_ARGS[@]}"}"
+    STRAND_COMMIT_RC=$?
+    set -e
+    rm -f "$STRAND_INDEX"
+    if [ "$STRAND_COMMIT_RC" -ne 0 ]; then
+        exit "$STRAND_COMMIT_RC"
+    fi
+else
 git "${GIT_ARGS[@]+"${GIT_ARGS[@]}"}" commit "${MSG_ARGS[@]}" "${TRAILER_ARGS[@]+"${TRAILER_ARGS[@]}"}"
+fi
 
 # ── the loaded-memory post-flight check, as a command (#2184) ──────────────
 #

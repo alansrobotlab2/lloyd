@@ -86,7 +86,13 @@ disagree about what a row or an orphan is. This module does not call `status()`.
 
 Usage::
 
-    ledger_strand_findings.py [--vault DIR] [--json]
+    ledger_strand_findings.py [--vault DIR] [--json] [--paths a:b:c]
+
+`--paths` (#4382) scopes the refusal to the caller's declared writes: a finding in a
+loaded file the caller did not declare is another job's staged defect, printed as a
+warning, its path written to stdout, and exit 0 if the caller's own paths are clean —
+the wrapper then commits without it and leaves it staged. Without `--paths` (a human,
+a bare call, the `vault_round` door) every finding refuses, as before.
 
 Exit 0 when no staged line is stranded; exactly 1 when at least one is, whatever the
 count — `#3236`'s sibling returns `1 + n`, which its bash caller reads as "the rung
@@ -514,6 +520,66 @@ def findings(vault: str | Path) -> tuple[list[str], str]:
     return lines, unread
 
 
+def parse_declared(spec: str | None) -> list[str]:
+    """`a:b\nc` -> `["a", "b", "c"]`: the wrapper's own `LLOYD_JOB_WRITES` separator rule.
+
+    `:` or newline, padding ignored, empty entries dropped (#4382). Returned as a list
+    rather than a set so a caller can print it back in the order it was declared.
+    """
+    if not spec:
+        return []
+    out: list[str] = []
+    for part in spec.replace("\n", ":").split(":"):
+        part = part.strip()
+        if part and part not in out:
+            out.append(part)
+    return out
+
+
+def declares(path: str, declared: list[str]) -> bool:
+    """Is `path` one of the caller's declared writes — equal to an entry, or under one?
+
+    The wrapper's `owns_one_of` rule, restated for the one comparison this module makes:
+    `memory/` covers `memory/x.md`, `mem` does not cover `memory/x.md` (#1593's sibling-
+    prefix trap).
+    """
+    for spec in declared:
+        spec = spec.rstrip("/")
+        if path == spec or path.startswith(spec + "/"):
+            return True
+    return False
+
+
+def split_by_scope(records: list[dict], declared: list[str]) -> tuple[list[dict], list[dict]]:
+    """`(own, foreign)` — records whose loaded index the caller declared, and the rest (#4382).
+
+    With NO declared list every record is the caller's, which is today's hard refusal for a
+    human or bare call. With one, a strand or unrepresentable addition in a loaded file the
+    caller never said it wrote is another job's owed disposition: the bash door names it,
+    leaves it staged, and keeps it out of THIS commit, rather than refusing a commit whose
+    own paths are clean (the 2026-11-19 nightly chain, #4301). Nothing is unstaged — a
+    quietly unstaged loaded-memory shrink is hidden instead of retired (#4301's finding).
+    """
+    if not declared:
+        return list(records), []
+    own = [r for r in records if declares(_loaded_of(r), declared)]
+    foreign = [r for r in records if not declares(_loaded_of(r), declared)]
+    return own, foreign
+
+
+def _loaded_of(rec: dict) -> str:
+    """A strand record names its file `loaded`, an addition record `file`."""
+    return rec.get("loaded") or rec.get("file") or ""
+
+
+def foreign_text(rec: dict) -> str:
+    """The warning line for a finding in a loaded file outside the caller's declared paths."""
+    return (f"LEDGER STRAND (another job's, not this commit's): {_loaded_of(rec)} is "
+            f"staged with a ledger defect this caller did not declare writing — it stays "
+            f"staged and is left OUT of this commit, owed by whichever job staged it "
+            f"(#4382). Anchor: {rec['anchor']!r}.")
+
+
 def main(argv: list[str] | None = None) -> int:
     # `__doc__ or ""` because `python -OO` strips docstrings, and an AttributeError
     # raised here — before the vault argument is even parsed — would reach the caller as
@@ -525,7 +591,14 @@ def main(argv: list[str] | None = None) -> int:
                     help="vault root (default $LLOYD_VAULT, else ~/obsidian)")
     ap.add_argument("--json", action="store_true",
                     help="print the findings to stdout instead of the refusal block")
+    ap.add_argument("--paths", default=None,
+                    help="the caller's declared writes (`:`/newline separated, the "
+                         "wrapper's LLOYD_JOB_WRITES). A finding in a loaded file outside "
+                         "them is another job's: warned, not refused, and its path printed "
+                         "to stdout for the caller to leave out of its commit (#4382). "
+                         "Unset or empty keeps the hard refusal for every finding.")
     args = ap.parse_args(argv)
+    declared = parse_declared(args.paths)
     vault = Path(args.vault or (__import__("os").environ.get("LLOYD_VAULT") or
                                 (vault_root())))
     try:
@@ -558,9 +631,22 @@ def main(argv: list[str] | None = None) -> int:
         print(census, file=sys.stderr)
     elif census_unread:
         print(f"vault-commit-census: {census_unread}", file=sys.stderr)
+    # #4382: scope to the caller's declared writes. `records`/`additions` become the
+    # caller's own findings — the ones that still refuse — and the rest are warned.
+    records, foreign_records = split_by_scope(records, declared)
+    additions, foreign_additions = split_by_scope(additions, declared)
+    foreign = foreign_records + foreign_additions
     if args.json:
-        print(json.dumps(records + [{"addition": rec} for rec in additions],
+        print(json.dumps(records + [{"addition": rec} for rec in additions]
+                         + [{"foreign": rec} for rec in foreign],
                          ensure_ascii=False, indent=2))
+    for rec in foreign:
+        print(foreign_text(rec), file=sys.stderr)
+    if foreign and not args.json:
+        # stdout carries exactly the loaded paths to leave out of the commit, one per
+        # line — the bash door reads it and nothing else is printed there in this mode.
+        for loaded in dict.fromkeys(_loaded_of(r) for r in foreign):
+            print(loaded)
     if not records and not additions:
         return 0
     for rec in records:

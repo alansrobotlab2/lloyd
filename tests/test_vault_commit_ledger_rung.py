@@ -765,3 +765,121 @@ def test_the_backtick_rule_is_rendered_at_both_doors(land_vault):
         V.land([MEMORY_REL], "knowledge write: add a backticked hook")
     assert "opens AND closes on a backtick" in str(exc.value), str(exc.value)
     assert _head(v) == before, "door two committed anyway"
+
+
+# ------------------------------------------- #4382: scoped to the caller's declared paths
+#
+# The matcher reads the whole index, so before #4382 ONE job's staged loaded-index
+# removal hard-refused every other job's path-scoped commit — the 2026-11-19 nightly
+# chain (#4301). With a declared write list the foreign strand is now named, left
+# staged for its owner, and kept OUT of this commit (it is never unstaged and never
+# committed under the wrong job's name); with no list the refusal is unchanged.
+
+JOB = "autonomy-data-pipeline"
+
+
+def _run_job_wrapper(vault: Path, msg: str, paths: list[str],
+                     writes: str | None) -> subprocess.CompletedProcess:
+    """Door one as a nightly job calls it: LLOYD_JOB + LLOYD_JOB_WRITES + a pathspec."""
+    argv = ["bash", str(WRAPPER), msg, "--", *paths]
+    env = dict(os.environ, VAULT_DIR=str(vault), LLOYD_VAULT=str(vault),
+               LLOYD_JOB_ID="test: ledger strand scope", LLOYD_JOB=JOB)
+    env.pop("LLOYD_JOB_WRITES", None)
+    env.pop("LLOYD_PYTHON", None)
+    if writes is not None:
+        env["LLOYD_JOB_WRITES"] = writes
+    return subprocess.run(argv, capture_output=True, text=True, timeout=180, env=env)
+
+
+def _stage_foreign_strand(vault: Path) -> None:
+    """Another job's refused fold: the GONE line removed and staged, its row still live."""
+    (vault / MEMORY_REL).write_text(_memory(gone=""))
+    _git(vault, "add", "--", MEMORY_REL)
+
+
+def _committed(vault: Path) -> list[str]:
+    return sorted(_git(vault, "show", "--name-only", "--format=", "HEAD").stdout.split())
+
+
+def test_a_foreign_staged_strand_no_longer_refuses_a_job_whose_own_paths_are_clean(vault):
+    """The coupling, reproduced: before #4382 this exited 1 and committed nothing."""
+    _stage_foreign_strand(vault)
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: draft\n---\n# item, edited\n")
+    before = _head(vault)
+
+    r = _run_job_wrapper(vault, "pipeline: run log", ["backlog/"], writes="backlog/9-item.md")
+
+    assert r.returncode == 0, f"the caller's clean commit was refused: {r.stderr}"
+    assert _head(vault) != before, "the caller's own path did not land"
+    assert _committed(vault) == ["backlog/9-item.md"], \
+        f"the foreign strand rode along in this job's commit: {_committed(vault)}"
+    # Left staged for its owner, never unstaged (#4301's finding) and named out loud.
+    assert _staged(vault) == [MEMORY_REL], _staged(vault)
+    assert "another job's" in r.stderr and MEMORY_REL in r.stderr, r.stderr
+    assert "#4382" in r.stderr, r.stderr
+    # The row the strand owes is untouched, and the strand itself is still caught.
+    assert LSF.stranded_rows(vault), "the foreign strand vanished instead of staying owed"
+
+
+def test_a_foreign_strand_alone_commits_nothing_and_stays_staged(vault):
+    _stage_foreign_strand(vault)
+    before = _head(vault)
+
+    r = _run_job_wrapper(vault, "pipeline: run log", ["backlog/"], writes="backlog/9-item.md")
+
+    assert r.returncode == 0, r.stderr
+    assert _head(vault) == before, "a commit carrying only the foreign strand was made"
+    assert _staged(vault) == [MEMORY_REL], _staged(vault)
+
+
+def test_a_caller_that_declares_the_loaded_file_is_still_refused(vault):
+    """Positive control: the rung still catches what it exists to catch."""
+    _stage_foreign_strand(vault)
+    before = _head(vault)
+
+    r = _run_job_wrapper(vault, "dream fold", ["lloyd/"], writes=f"{MEMORY_REL}:backlog/")
+
+    assert r.returncode == 1, f"a declared strand was let through: {r.stderr}"
+    assert "LEDGER STRAND REFUSED: lloyd/MEMORY.md" in r.stderr, r.stderr
+    assert _head(vault) == before
+    assert _staged(vault) == [MEMORY_REL]
+
+
+def test_a_caller_that_declares_nothing_keeps_the_hard_refusal(vault):
+    """No LLOYD_JOB_WRITES: a human or bare call is refused exactly as before."""
+    _stage_foreign_strand(vault)
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: draft\n---\n# item, edited\n")
+    before = _head(vault)
+
+    r = _run_job_wrapper(vault, "pipeline: run log", ["backlog/"], writes=None)
+
+    assert r.returncode == 1, r.stderr
+    assert "LEDGER STRAND REFUSED: lloyd/MEMORY.md" in r.stderr, r.stderr
+    assert _head(vault) == before
+
+
+def test_the_matcher_cli_scopes_on_paths_and_prints_the_foreign_path(vault, capsys):
+    _stage_foreign_strand(vault)
+
+    assert LSF.main(["--vault", str(vault)]) == 1, "unscoped: the hard refusal"
+    capsys.readouterr()
+    assert LSF.main(["--vault", str(vault), "--paths", "backlog/9-item.md"]) == 0
+    out = capsys.readouterr()
+    assert out.out.splitlines() == [MEMORY_REL], out.out
+    assert "another job's" in out.err, out.err
+    for declared in ("lloyd/", "lloyd/MEMORY.md", "backlog/x.md : lloyd/MEMORY.md"):
+        assert LSF.main(["--vault", str(vault), "--paths", declared]) == 1, declared
+    # `lloyd` covers `lloyd/MEMORY.md`, `llo` does not (the wrapper's owns_one_of rule).
+    assert LSF.declares(MEMORY_REL, ["lloyd"]) and not LSF.declares(MEMORY_REL, ["llo"])
+
+
+def test_a_foreign_unrepresentable_addition_is_scoped_the_same_way(vault):
+    (vault / MEMORY_REL).write_text(_memory() + PIPE_ADDED)
+    _git(vault, "add", "--", MEMORY_REL)
+    (vault / "backlog" / "9-item.md").write_text("---\nstatus: draft\n---\n# edited\n")
+
+    r = _run_job_wrapper(vault, "pipeline: run log", ["backlog/"], writes="backlog/")
+
+    assert r.returncode == 0, r.stderr
+    assert _committed(vault) == ["backlog/9-item.md"], _committed(vault)
+    assert _staged(vault) == [MEMORY_REL]
