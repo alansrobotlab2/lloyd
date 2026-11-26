@@ -1183,10 +1183,16 @@ again in a second repository — the only pair of them writing in none of the st
 this document is about: each changes state in
 another project's git history, which is why their `Writes?` cells read `yes` while the
 tier table still tiers both `Reports only`. Read the `Writes?` column as "changes state
-beyond its own output", or #90's row contradicts its own Role cell. One member of a
-different group performs this group's frontmatter/structure work from outside its roster:
+beyond its own output", or #90's row contradicts its own Role cell. #110 and #111, who
+joined on 2026-11-09, are none of these four shapes and the paragraph above never counts
+them: each repairs a store some other job owns — the guardian's daily-note alarms, the
+entity-vector index semantic seeding reads — and the tier table puts both in its top
+row, so this is the one group whose members sit at both extremes of the axis it opens on.
+One member of a different group performs this group's frontmatter/structure work from outside its roster:
 #24, which stays rostered under [Build the graph](#build-the-graph-24-51-74) and appears
-nowhere in this section, runs it nightly as Step 4 of the skill its own task names —
+nowhere in this section, runs it as Step 4 of the skill its own task names, once per #24
+run rather than nightly (`frequency: 6x-daily`: 33 runs in the seven days to 2026-11-26,
+so its run log takes several `## Run` sections a day) —
 frontmatter validation and a structure review written into
 `~/obsidian/memory/vault-maintenance/` — the same two checks this group's #78 and #80 only
 report on and never fix (#4588).
@@ -1203,12 +1209,12 @@ a task whose `skill_name` is that skill — the only route by which the orphan g
 | ID | Freq | Writes? | Role |
 |----|------|---------|---|
 | #81 | daily | yes | Prune orphaned qmd embedding chunks, backfill pending embeddings |
-| #79 | daily | yes | Retention over the 28 stores it now bounds (24 on 2026-10-27; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 28 lines measured 2026-11-12): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
+| #79 | daily | yes | Retention over the 30 stores it now bounds (24 on 2026-10-27, 28 on 2026-11-12; re-derive with `scripts/groundskeeper/retention-sweep.py` run without `--apply`, which prints one report line per store — 30 lines measured 2026-11-26): delete `_pipeline/tasks` background-bash logs over 30 days; gzip session transcripts inactive 90+ days, or 30+ for background sessions — the window that covers nearly every file in that store |
 | #78 | weekly | no | Broken backlinks, unreferenced notes, stale skill references, broken cross-links → a cleanup report |
 | #80 | weekly | no | OKF v0.1 conformance — `validate_okf.py` catches pages with no non-empty `type` or unparseable frontmatter |
 | #90 | daily | own series only | Shape of four nightly-written corpora — daily notes, `USER.md`/`MEMORY.md`, `SKILL.md` bodies, trajectory rows: counts, length p95, distinct-key ratio, duplicate and self-reference rate — written to `~/lloyd-data/_pipeline/metrics/corpus-shape-*.json`, one row per UTC day, and diffed against the newest row from an earlier day |
 | #104 | daily | yes | Keep `~/Projects/ArtCraft` current: one `sync.sh -j 6` call reads every repo there together with its upstream, advances each repo's current branch with `--ff-only`, and leaves behind those advanced pointers plus one closing `artcraft sync: updated=<N> current=<N> held=<N> failed=<N>` line — nothing in any store this fleet reads back. A repo the script held is the finding, not a flake: the run must never merge, rebase, stash, reset or force one, and never edit `sync.sh` or `sync.conf` to move it |
-| #108 | daily | yes | Keep one repo, `~/Projects/SolidCraft`, current: fetch every remote with `--prune`, then advance the *not-checked-out* `main` to `origin/main` with the single git command its skill lets it author (`git fetch origin main:main`), and report every row it printed plus one closing `solidcraft sync: fetch=<ok\|failed> main=<uptodate\|updated\|held> head=<branch> held=<N>` line. The only state it moves is that repository's own tracked branch pointer, on a pure fast-forward, so it too changes bytes in none of the stores this document governs; the working copy normally sits on a feature branch with unpushed work, which is why `held=1` is the expected reading and why `git status`/`git log` there answer about a stale `main` and a live fork. A branch it refused to move is the finding, not a flake: never checkout or switch, merge, rebase, stash, reset, clean or push, and never move a branch that needs a human's merge decision |
+| #108 | daily | yes | Keep one repo, `~/Projects/solidcraft`, current: fetch every remote with `--prune`, then advance the *not-checked-out* `main` to `origin/main` with the single git command its skill lets it author (`git fetch origin main:main`), and report every row it printed plus one closing `solidcraft sync: fetch=<ok\|failed> main=<uptodate\|updated\|held> head=<branch> held=<N>` line. The only state it moves is that repository's own tracked branch pointer, on a pure fast-forward, so it too changes bytes in none of the stores this document governs; the working copy normally sits on a feature branch with unpushed work, which is why `held=1` is the expected reading and why `git status`/`git log` there answer about a stale `main` and a live fork. A branch it refused to move is the finding, not a flake: never checkout or switch, merge, rebase, stash, reset, clean or push, and never move a branch that needs a human's merge decision |
 | #110 | daily | yes | Date the guardian alarm blocks a live re-read refutes: `scripts/maintenance/guardian_note_sweep.py` re-reads the four witnesses (`supervisorctl status`, the `/tmp` inode figure, the data/vault tripwires, the snapshot HEAD) and, on a second explicitly-flagged `--apply` pass only, appends a `dated:` retraction naming the reading that now contradicts the block — the repair the guardian cannot make itself, because `notify.DAILY_SCAN_DAYS = 3` means it rewrites only the last three daily notes and an older alarm there stands unretracted. The run never passes `--notes`, `--conf` or `--day`: the first two retarget the corpus or the supervisord, and `--day` is the date stamped onto the retraction, so back-dating one fabricates the observation the marker exists to record honestly |
 | #111 | weekly | yes | Rebuild the entity-vector index the semantic seeding leg serves: `scripts/memory/build_entity_vectors.py` re-embeds every live entity into `names.json`, `vectors.npy` and `build.json` under `~/lloyd-data/_pipeline/vault-derived/entity-vectors/`; the run is `--status` before, the build, `--status` after, and one `entity-vectors: before=… after=… status=…` line — it edits no file, files no item, and never names `--out` |
 
@@ -1220,8 +1226,8 @@ first — the stop, not the prune, was the risk.
 
 **#79** is the group's widest-reaching write, and the store list this section used
 to carry was the oldest number in it: the sweep began as the two unbounded-growth
-stores of the 2026-06-11 architecture review and bounds **24** as of 2026-10-27,
-counted from its own report lines. Four of those are the self-modification loop's
+stores of the 2026-06-11 architecture review and bounded **24** as of 2026-10-27,
+counted from its own report lines; the same dry run printed **30** lines on 2026-11-26. Four of those are the self-modification loop's
 own state — `~/lloyd-work/` round worktrees and that directory's non-round entries,
 `refs/heads/automod/*`, and `~/.local/state/lloyd-automod/promotions.jsonl` — and
 what bounds the reach is a tree-identity guard, not a scope list: run from any tree
@@ -1265,16 +1271,28 @@ rule's carriers are the two skills — `orphaned-reference-cleanup`'s Step 5 and
 task file, which is the half `_build_task_prompt` renders into the worker's prompt.
 Filing is routing, not repairing: neither job fixes what it names, and over the
 corpora the write-authority table still tiers both `Reports only` — the one item a
-run files is board bookkeeping, not a write into a corpus. Both are green as of 2026-10-27 — one weekly run each in
-the seven days to that date, no failure and no timeout, 0.06 GPU-h between them — and
-the group's other three ran seven times each over the same unclamped window, 0.53
-GPU-h across the group as it stood on that date. Nine members today, five of them
-over that window: #104 joined the group on 2026-10-29, #108 on 2026-11-03, and #110
-and #111 on 2026-11-09, all four after these seven days closed, so none of them is in any of these
-numbers. The number in this group worth
-watching is not a failure rate: #78's run of 2026-10-14 took 1,055.6 s of its
-1,200 s budget, 88% of it and the only approach to a cap any member has made, on a
-job whose own skill says a run killed at that cap records nothing at all (#3447).
+run files is board bookkeeping, not a write into a corpus — and on 2026-11-26 the routing
+has quietly stopped for #78: both its triggers now end in a **refused** create rather than a
+folded one, because the closed items #3760 and #4062 are judged to cover its finding and the
+run is told not to take the offered `force` (`run_78_20261119_090855`: "The backlog item was
+refused, not filed"), so the board edge this paragraph calls the consumer is shut for #78
+while #80 still files through the same path (#4601).
+Measured 2026-11-26 over a real seven-day window (`/api/autonomy/health?days=7`, with both
+`oldest_input` and `window_clamped_to_hours` `null`), eight of the nine are green and the
+group cost 2.10 GPU-h: #79 6 runs / 0.28 GPU-h, #81 7 / 0.36, #90 6 / 0.02, #104 6 / 0.10,
+#108 6 / 0.04, #110 7 / 0.03, #111 1 / 0.92, #80 1 / 0.02 — none paused, all `up_next`. The
+ninth is #78, whose one run in that window is a timeout: 1,200.2 s against `timeout_seconds:
+1200`, `status: failed` (`run_78_20261126_092334`). That is a cap kill in each of the last
+three scheduled weeks — `run_78_20261111_110704` 1,200.3 s, `run_78_20261119_024742`
+1,201.3 s, both failed — and the 2026-11-11 and 2026-11-19 weeks only produced a report
+because their retries finished inside the cap (1,089.6 s, 856.8 s). So what this section used
+to carry — that #78's 1,055.6 s run of 2026-10-14, 88% of its budget, was the only approach
+to a cap any member has made — is false: the cap has been reached and the run killed at it
+three times since, the outcome its own skill says records nothing at all (#3447), in the leg
+that skill's *Budget* table names as where runs actually die. The only other member with a
+cap reading worth quoting is #111: 3,296.3 s of its 7,200 s budget on the 2026-11-24
+rebuild, 46%. For the record of who sits inside those nine rows: #104 joined on
+2026-10-30, #108 on 2026-11-03, #110 and #111 on 2026-11-09.
 
 **#90 bounds growth the stores themselves cannot see.** #79 and #81 free bytes,
 and a memory file or a skills library can grow past its usefulness while every
