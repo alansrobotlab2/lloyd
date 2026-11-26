@@ -899,21 +899,30 @@ record; #74 re-types what #24 left untyped, after
 [Canonicalize](#canonicalize-48-67-84-98) has settled the names underneath. These
 are the only jobs that **create** edges and entities. #48 writes the same store
 unattended every night too — it rewrites edges onto the surviving name, writes
-aliases and moves fact files — but it creates no entity and no relation, only a
-decision about which of two names an existing pair always should have shared.
+aliases and moves fact files — but it creates no entity and no relation the pair
+did not already have: `edges.rewrite_endpoint` expires each edge and re-adds its
+restated copy, and the apply registers the surviving name only when the registry
+lacks it (`entities.register`, `scripts/memory/entity-resolution-sweep.py:1041`).
+What it adds is a decision about which of two names an existing pair always should
+have shared — a boundary this group is defined by and no check enforces.
 
 | ID | Freq | Depends | Role |
 |----|------|---------|---|
-| #24 | 6×/day | — | Content-hash-gated fact extraction over the vault corpus **allow-listed** in `scripts/memory/next-gen-memory/pipeline_config.yaml` — `knowledge`, `projects`, `people`, `personal`, `work`, and `memory` only once a daily note has settled — then index rebuild. The `kg_health` snapshot is **Step 0, launched ahead of every gate**, so a run that exits early still writes one; it is not a tail step. Emits `mentions` edges as it writes facts; no-ops when no source document changed |
-| #51 | daily | #56 | Session co-access pairs from trajectories → edges **typed by the Stage-2 classifier**, `co_accessed` only as the fallback when nothing classified the pair (#420, 2026-09-12), provenance `INFERRED`, the trajectory session as `source_doc`. Measured 2026-10-26: 562 conversation-origin edges in the store, **none** of them `co_accessed` (321 `related_to`, 129 `implements`, 84 `depends_on`, 23 `derived_from`, 5 other) |
+| #24 | 6×/day | — | Content-hash-gated fact extraction over the vault corpus **allow-listed** in `scripts/memory/next-gen-memory/pipeline_config.yaml` — `knowledge`, `projects`, `people`, `personal`, `work`, and `memory` only once a daily note has settled — then index rebuild, a **dry-run-only**
+stranded-entity linking step, and Step 4's nightly vault-maintenance pass
+(frontmatter validation, structure review, the `memory/vault-maintenance/` run log),
+which is a second function this group's axis does not describe (#4588). The `kg_health` snapshot is **Step 0, launched ahead of every gate**, so a run that exits early still writes one; it is not a tail step. Emits `mentions` edges as it writes facts; no-ops when no source document changed |
+| #51 | daily | #56 | Session co-access pairs from trajectories → edges **typed by the Stage-2 classifier**, `co_accessed` only as the fallback when nothing classified the pair (#420, 2026-09-12), provenance `INFERRED`, the trajectory session as `source_doc`. Measured 2026-11-26 through `app.kg_store`: 1,066 `conversation`-origin edge rows, 1,056 of them active, **none** of them `co_accessed` and none anywhere in the store — 604 `related_to`, 242 `implements`, 151 `depends_on`, 45 `derived_from`, 18 `supersedes`, 6 `conflicts_with`. The same reading on 2026-10-26 counted 562 rows, so the set has doubled in a month |
 | #74 | daily | #48 | Re-types active `mentions` edges with the v4 classifier and applies confident upgrades through `app.kg_store`. Runs after #48 so canonical names are settled first — true on the clock as well as the gate, measured 2026-10-30 and 2026-10-31, when #48 completed 15:04–15:07Z and #74 started 18:00Z |
 
-**#24 is the single most expensive job in the fleet** — 10.4 GPU-h over the seven
-days to 2026-10-26 (window unclamped), against 36 runs: 37% of the autonomy
-fleet's 27.9 h, and more than the next four tasks put together. The task this
+**#24 is the single most expensive job in the fleet** — 12.7 GPU-h over the seven
+days to 2026-11-26 (`window_clamped_to_hours: null`, so the payload spans the seven
+days asked for), against 33 runs: 38% of the autonomy fleet's 33.9 h, and more
+than the next four tasks put together (8.2 h). The task this
 sentence used to pair it with, #68, has been parked by Alan since 2026-09-17 and
 has logged nothing since, so the pairing is gone; the second-heaviest task is this
-group's own #74 at 2.0 h (7%).
+group's own #74 at 3.5 h (10%), and the group's three jobs together are 48% of the
+fleet's GPU-hours.
 
 **The `Depends` column is a freshness gate, not a clock order.** Measured over the
 seven days to 2026-10-26, #51 dispatched at ~06:00Z and its upstream #56 at
@@ -940,7 +949,12 @@ and that gap changed shape with the ordering: measured over the same two days it
 ~3 h wide and holds one #24 write (17:34Z on 10-30, 15:06Z on 10-31) against the two
 the 2026-10-26 measurement counted in the retired schedule's ~11 h — and those writes
 are still typed before #48 has seen their names, because #48's next apply follows #74's
-run on either schedule.
+run on either schedule. The predicted hour-shift has since happened: `preferred_hours`
+are machine-local (`_effective_preferred_hours`, `app/autonomy.py`), this box went to
+PST on 2026-11-01, and measured over the seven days to 2026-11-26 all four stamps sit
+an hour later in UTC — #56 ~09:00Z → #51 ~11:00Z, #48 ~16:00Z → #74 ~19:00Z — with
+both legs still dispatched in the order the column claims and #74's gap still ~3 h
+wide, holding one #24 write.
 
 **#51 produced no graph at all until 2026-09-04**, when approval only flipped a
 status field in a JSON file nothing downstream read. It also ran every 15 minutes
