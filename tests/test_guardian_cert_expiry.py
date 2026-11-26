@@ -538,3 +538,63 @@ def test_the_leaf_is_read_on_a_tick_that_returns_before_the_rollback_logic(
     assert len(fired) == 1, (condition, state, live_guardian._test_alerts)
     assert JOURNAL_CMD in fired[0][2], fired[0][2]
     assert crt.is_file()
+
+# ── #4593: the confinement is in the sink, so `absent` still pages ────────────
+
+def test_the_absent_leaf_still_pages_under_the_confined_sink(tmp_path, monkeypatch):
+    """#4593 clause 4: confining where an alarm may WRITE did not mute WHAT pages.
+
+    The temptation the fix invites is to quiet the page by making
+    `check_cert_expiry` bail when `self.repo` has no cert directory — but a leaf
+    that was NEVER MINTED on this box also reads `absent`
+    (`guardian.py:1898-1902`), and that is one of the two causes the body itself
+    names, so bailing on an empty cert dir is the exact false negative the watch
+    exists to catch. So this node puts a cert directory that exists and holds no
+    pair in a tmp repo — the same shape a pytest trial tree has — and asks whether
+    the page still happens while `tests/conftest.py`'s seam has the fan-out aimed
+    at a scratch vault.
+
+    Two things are asserted together, and neither is enough alone: the alert is
+    raised, naming the never-minted cause; and it is the REAL fan-out that raised
+    it, which the confined sink received. A `check_cert_expiry` that had learned to
+    skip a missing cert dir would fail the first; a sink confinement that muted the
+    alert instead of redirecting it would fail the second.
+    """
+    import guardian as G
+    import notify as notify_module
+    import policy
+
+    cert_dir = _cert_dir(tmp_path)
+    cert_dir.mkdir(parents=True)
+    (cert_dir / ".gitkeep").write_text("", encoding="utf-8")   # a dir, no pair
+
+    scratch = tmp_path / "scratch-vault"
+    (scratch / "memory").mkdir(parents=True)
+    monkeypatch.setattr(policy, "VAULT_ROOT", str(scratch))
+
+    g = G.Guardian.__new__(G.Guardian)
+    g.repo = str(tmp_path)
+    g.notifier = notify_module.Notifier(
+        ledger=scratch / "ledger.jsonl", state_dir=scratch,
+        vault_root=str(scratch))
+    g._alert_seen = {}
+    g._cert_leaf_alarm = None
+    g.last_alert = ""
+
+    g.check_cert_expiry()
+
+    note = scratch / "memory" / (
+        datetime.now().date().isoformat() + ".md")
+    assert note.is_file(), (
+        f"`check_cert_expiry` on a repo whose cert directory holds no pair wrote "
+        f"nothing to the vault it was confined to ({scratch}) — a check that skips "
+        f"a missing cert dir is the false negative this item forbids: an "
+        f"unminted leaf reads the same way")
+    text = note.read_text(encoding="utf-8")
+    assert f"## Self-mod guardian: {TITLE}" in text, text[:800]
+    assert "NEVER MINTED" in text, (
+        "the page lost the cause that makes an unminted leaf distinguishable from a "
+        f"quarantined one:\n{text[:800]}")
+    assert str(cert_dir) in text, (
+        "the page does not name the directory it looked in, so a reader cannot tell "
+        f"a trial tree from this machine:\n{text[:800]}")

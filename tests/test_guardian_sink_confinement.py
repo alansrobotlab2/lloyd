@@ -715,3 +715,259 @@ def test_with_nothing_promoted_the_published_route_is_the_checkout_not_the_round
     assert Path(control_script).is_file(), control_script
     assert control_script != script, (
         f"the promoted and unpromoted branches published the same route {script}")
+
+
+# ── #4593: the in-process sink, confined by one conftest seam ────────────────
+#
+# Everything above this line runs in a SUBPROCESS, and that is still right for
+# what it asks (which process may write at all). The question below is the other
+# one: a process that is *allowed* to write — pytest, the gate's own lane — must
+# not page the human for a condition that exists only inside its trial tree.
+#
+# The producer is any `tick()` on a real `Guardian` whose `repo` is a `tmp_path`:
+# `_tailnet_leaf_pair` (`guardian.py:1880-1881`) resolves the leaf under
+# `self.repo`, a tmp tree has no pair, so the reading is `absent`
+# (`guardian.py:1902`), and `check_cert_expiry` is called at `guardian.py:3373` —
+# above every early return in the method, so even a tick that bails at
+# `infra_down` has paged. The alert then goes to the vault `Guardian.__init__`
+# read off `policy.VAULT_ROOT` at construction time (`guardian.py:569`), and that
+# attribute was bound at import (`policy.py:626`). Thirteen test files build a
+# `Guardian` and call `.tick()`; the two the item names are
+# `tests/test_guardian_logtail.py::test_errors_from_before_the_window_cannot_condemn_a_promotion`
+# and `tests/test_guardian_voice_loss_escalation.py::
+# test_the_guardian_tick_runs_the_escalator_before_it_gives_up`.
+#
+# What those nodes write into `memory/<day>.md` cannot clear, because the tree it
+# names is deleted with the trial: `memory/2026-11-25.md` spent 1,952 of its
+# 2,562 bytes (76.2 %) on one check's 175 folded fires, and `memory/2026-11-26.md`
+# 2,614 of 2,739 (95.4 %), while the real pair sat valid at 4,837 B with
+# `notAfter=Dec 19 01:16:29 2026 GMT`.
+#
+# The seam lives in `tests/conftest.py` (`_guardian_vault_note_sink_to_scratch`)
+# and moves the ATTRIBUTE. It cannot move the environment variable: `vault_root()`
+# honours `LLOYD_VAULT_ROOT` only while the module is being imported, and this
+# file's own `LIVE_VAULT` (:71) resolves from that same variable — so a
+# suite-wide export would silently turn every leak assertion above into a
+# statement about an untouched scratch directory.
+
+#: The leaf alarm's title, read from the guardian rather than restated, so a title
+#: edit cannot make the sections below simply stop matching and read as "no leak".
+import time as _time          # noqa: E402  (appended section: local to #4593)
+import types as _types        # noqa: E402
+
+sys.path.insert(0, str(GUARDIAN_DIR))
+import guardian as _G         # noqa: E402  (guardian.py:50 binds `notify` as a sibling)
+import policy as _policy      # noqa: E402
+
+LEAF_TITLE = _G.CERT_LEAF_ALERT_TITLE
+
+
+def _today_note(vault: Path) -> Path:
+    """`<vault>/memory/<today>.md`, the path `Notifier._daily_note_path` writes."""
+    return vault / "memory" / (
+        _time.strftime("%Y-%m-%d") + ".md")
+
+
+def _note_bytes(vault: Path) -> "bytes | None":
+    """The daily note's bytes, or None where there is no note (a vault with no
+    `memory/` gets no note at all — `notify.py:1570-1573`)."""
+    note = _today_note(vault)
+    return note.read_bytes() if note.is_file() else None
+
+
+def _leaf_sections(vault: Path) -> "list[str]":
+    """Every `## Self-mod guardian: <leaf title>` section of today's note here.
+
+    Sliced on the prefix `notify.py:55` defines, to the next such heading, so a
+    folded `… earlier fires today folded` tail stays inside the section it belongs
+    to and a section for a different title is never counted.
+    """
+    note = _today_note(vault)
+    if not note.is_file():
+        return []
+    lines = note.read_text(encoding="utf-8").splitlines(keepends=True)
+    starts = [i for i, ln in enumerate(lines)
+              if ln.startswith(_G.notify_mod.DAILY_SECTION_PREFIX + LEAF_TITLE)]
+    bounds = [i for i, ln in enumerate(lines) if ln.startswith(_G.notify_mod.DAILY_SECTION_PREFIX)]
+    out = []
+    for s in starts:
+        end = next((b for b in bounds if b > s), len(lines))
+        out.append("".join(lines[s:end]))
+    return out
+
+
+def _tick_tmp_repo_guardian(tmp_path: Path, monkeypatch) -> str:
+    """One real `tick()` on a real `Guardian` whose repo is `tmp_path`.
+
+    Built exactly as `tests/test_guardian_voice_loss_escalation.py:942-959` builds
+    it — the shape #4593 names as a writer — and stubs the same six watches for the
+    same reason that file gives: the other watches act on this machine, and a test
+    of a sink is not entitled to restart anything. `check_cert_expiry` is the one
+    check left running, because it is the producer under test; the tick returns
+    `infra_down` at the supervisord return below the cert call, so nothing after it
+    is reached either.
+    """
+    args = _types.SimpleNamespace(
+        repo=str(tmp_path), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gdir"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = _G.Guardian(args)
+    monkeypatch.setattr(g, "collect", lambda: {
+        "now": _time.time(), "supervisord": "unreachable",
+        "supervisord_error": "ECONNREFUSED", "procs": {}, "probes": {}})
+    for name in ("drain_logs", "check_vault", "check_data", "check_memory",
+                 "check_tmp"):
+        monkeypatch.setattr(g, name, lambda: None)
+    monkeypatch.setattr(g, "check_pool", lambda snap: None)
+    monkeypatch.setattr(g, "check_voice_loss", lambda: None)
+    return g.tick()
+
+
+def test_a_tick_on_a_tmp_repo_pages_only_into_the_session_scratch_vault(
+        tmp_path, monkeypatch, guardian_sink_vault):
+    """Clause 1: a `tick()` over a throwaway tree cannot reach the human's note.
+
+    Three assertions, and each closes a different way to look green:
+
+    * the live note's bytes do not move (a fixture that redirects the sink is only
+      worth what its leak check is);
+    * the scratch vault's note DOES carry a leaf section naming this test's own
+      tmp tree — the positive control, without which the first assertion is the
+      zero of a scan that could not have found anything. A sink aimed at a
+      directory with no `memory/` writes nothing anywhere (`notify.py:1570-1573`
+      answers None for exactly that vault), which is how a confinement that simply
+      disabled the sink would pass a bytes-equal test;
+    * no section in the live vault names this node's trial tree, so the node cannot
+      go green by paging twice and only checking the size of one file.
+    """
+    live_before = _note_bytes(LIVE_VAULT)
+    names_before = sorted(os.listdir(LIVE_VAULT / "memory")) \
+        if (LIVE_VAULT / "memory").is_dir() else []
+
+    state = _tick_tmp_repo_guardian(tmp_path, monkeypatch)
+
+    assert state == "infra_down", (
+        f"the tick returned {state!r}, not the supervisord-unreachable return that "
+        f"sits below the cert check at guardian.py:3373 — if it ran further, other "
+        f"checks acted on this machine and their writes are not attributable")
+    assert _note_bytes(LIVE_VAULT) == live_before, (
+        f"a test tick appended to {LIVE_VAULT / 'memory'} — the daily note moved by "
+        f"{(_note_bytes(LIVE_VAULT) or b'')!r:.0f}"[:400])
+    if names_before:
+        assert sorted(os.listdir(LIVE_VAULT / "memory")) == names_before, (
+            "the tick created a dated note in the live vault")
+
+    sections = _leaf_sections(guardian_sink_vault)
+    assert sections, (
+        f"the confined vault {guardian_sink_vault} has no {LEAF_TITLE!r} section, so "
+        f"the tick never paged and the assertions above prove nothing about confinement")
+    body = sections[-1]
+    assert str(tmp_path) in body, (
+        f"the confined alarm does not name this node's own trial tree — it should be "
+        f"the one this tmp_path produced: {tmp_path}\n{body[:600]}")
+    # The reading a tmp tree must produce is `absent`, and the body renders it as
+    # the pair it could not read plus the causes CERT_LEAF_ABSENT_CAUSES names. The
+    # never-minted cause is asserted because it is the one a fix that "bails when the
+    # cert dir is empty" would take away — a leaf that was never minted also reads
+    # absent (`guardian.py:1902`), which is the false negative #4593 forbids.
+    assert "NEVER MINTED" in body, (
+        f"the confined alarm is not the missing-pair page a tmp tree must produce;"
+        f" expected the never-minted cause in it:\n{body[:600]}")
+    assert not any(str(tmp_path) in s for s in
+                   (_leaf_sections(LIVE_VAULT) if (LIVE_VAULT / "memory").is_dir() else [])), (
+        "the live vault carries a leaf alarm naming this node's trial tree, which is "
+        "the artifact this item exists to stop: the tree is deleted with the trial")
+
+
+def test_the_seam_moves_the_attribute_and_leaves_the_resolution_rule_untouched(
+        tmp_path, monkeypatch, guardian_sink_vault):
+    """Clause 2: one seam, the attribute, and `LIVE_VAULT` still means the live vault.
+
+    The forbidden fix is an environment export, and this node is what makes that
+    forbidden rather than merely inadvisable: `LIVE_VAULT` (:71) resolves from
+    `LLOYD_VAULT_ROOT`, so if the seam moved that variable every leak assertion in
+    this file would be comparing an untouched scratch directory with itself. So the
+    node asserts the two handles are in the relationship the seam is supposed to
+    leave them in — attribute moved, resolver unmoved — and that the guardian's fan-
+    out takes the attribute even when a different vault is named in the environment.
+    """
+    conftest = (ROOT / "tests" / "conftest.py").read_text(encoding="utf-8")
+    seam_start = conftest.index("def _guardian_vault_note_sink_to_scratch")
+    seam = conftest[seam_start:]
+    assert 'monkeypatch.setattr(module, "VAULT_ROOT"' in seam, (
+        "the seam no longer patches the imported attribute, which is the only handle "
+        "that exists after import (policy.py:626)")
+    assert "setenv" not in seam, (
+        "the seam touches the environment: LLOYD_VAULT_ROOT is this file's LIVE_VAULT")
+    # Comments may NAME the variable — the seam's own header explains why it must not
+    # set it. Code may not, because the variable is this file's leak target.
+    conftest_code = "\n".join(ln for ln in conftest.splitlines()
+                              if not ln.lstrip().startswith("#"))
+    assert "LLOYD_VAULT_ROOT" not in conftest_code, (
+        "tests/conftest.py names LLOYD_VAULT_ROOT in code, so some fixture there can "
+        "move the resolution rule every leak assertion in this file depends on")
+
+    assert str(_policy.VAULT_ROOT) == str(guardian_sink_vault), (
+        "the autouse seam is not confining this test, so the nodes above are not "
+        "evidence about the seam")
+    assert Path(_policy.vault_root()) == LIVE_VAULT, (
+        f"`policy.vault_root()` resolves {_policy.vault_root()} while this file's "
+        f"LIVE_VAULT is {LIVE_VAULT} — the leak target and the resolution rule have "
+        f"come apart, which is the two-knob asymmetry this file's header is about")
+    assert Path(_policy.VAULT_ROOT) != LIVE_VAULT, (
+        "the confined vault IS the live vault, so every 'the live vault is untouched' "
+        "below is a scan of the directory under test")
+
+    # The environment names a third vault; the fan-out must ignore it, because it
+    # reads the attribute. Had the seam been written as an export, this is the
+    # assertion that would say so.
+    elsewhere = tmp_path / "env-vault"
+    (elsewhere / "memory").mkdir(parents=True)
+    monkeypatch.setenv("LLOYD_VAULT_ROOT", str(elsewhere))
+    args = _types.SimpleNamespace(
+        repo=str(tmp_path / "repo"), state=str(tmp_path / "state"),
+        guardian_state=str(tmp_path / "gdir"), supervisor_sock="/nonexistent",
+        backend_url="http://127.0.0.1:1/health", mcp_url="http://127.0.0.1:2/health",
+        programs="lloyd-mc:lloyd-backend", interval=5.0,
+    )
+    g = _G.Guardian(args)
+    assert Path(g.notifier.vault_root) == Path(guardian_sink_vault), (
+        f"a Guardian constructed under an exported LLOYD_VAULT_ROOT fanned out to "
+        f"{g.notifier.vault_root} — the sink is being moved by the environment, not "
+        f"by the seam, and this file's leak target is then not the live vault")
+
+
+def test_the_two_producer_files_stay_in_the_not_live_vault_lane():
+    """Clause 3: the page went quiet without deleting either producer from the lane.
+
+    `pytest.ini:14` registers `live_vault` for a test that genuinely reads the house
+    vault, and the gate runs `-m "not live_vault"`. Marking `test_guardian_logtail.py`
+    or `test_guardian_voice_loss_escalation.py` with it would quiet the daily note
+    just as well as the seam does — by taking every guardian log-tail and escalation
+    test out of the self-mod lane, including the two that pin WHERE a check sits in
+    the tick. So the marker's absence is a clause, and the lane run below is the
+    evidence that both producers still execute in it.
+    """
+    producers = [ROOT / "tests" / "test_guardian_logtail.py",
+                 ROOT / "tests" / "test_guardian_voice_loss_escalation.py"]
+    for f in producers:
+        text = f.read_text(encoding="utf-8")
+        assert "live_vault" not in text, (
+            f"{f.name} gained a live_vault marker: that is the declined alternative, "
+            f"which buys page quiet by removing {f.name} from the self-mod lane")
+
+    nodes = ["tests/test_guardian_logtail.py::"
+             "test_errors_from_before_the_window_cannot_condemn_a_promotion",
+             "tests/test_guardian_voice_loss_escalation.py::"
+             "test_the_guardian_tick_runs_the_escalator_before_it_gives_up"]
+    res = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-m", "not live_vault", *nodes],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=600, check=False)
+    assert res.returncode == 0, (
+        "a producer node does not pass in the lane the gate runs "
+        f"(`-m 'not live_vault'`):\n{res.stdout[-2500:]}")
+    assert "2 passed" in res.stdout, (
+        f"the lane run did not run both producers:\n{res.stdout[-1500:]}")

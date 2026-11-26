@@ -1175,3 +1175,123 @@ def _fresh_scratch_dir(factory, prefix: str) -> Path:
     path = root / f"{prefix}-{next(_SCRATCH_SEQ)}"
     path.mkdir(mode=0o700)       # never exist_ok: a reused name is a bug, loudly
     return path
+
+
+# ── the guardian's vault-note sink, confined (#4593) ─────────────────────────
+#
+# `agent-services/guardian/policy.py:626` binds `VAULT_ROOT = vault_root()` AT
+# IMPORT, and `Guardian.__init__` hands that constant to the alert fan-out
+# (`guardian.py:569`) and to `VaultWatch` (`:576`), while the cert watch reads
+# `self.repo`. The two halves can therefore sit in different trees, and any test
+# that builds a real `Guardian` over its own `tmp_path` measures a throwaway
+# directory and publishes the verdict into the vault ITS PROCESS resolved at
+# import — the live one, because inside a round `$HOME/obsidian` is a symlink
+# into the house vault and outside one it is the house vault.
+#
+# The result on 2026-11-25 and 2026-11-26: `memory/<day>.md` filled with
+# "The tailnet TLS leaf is expired, missing or unreadable" naming a leaf under a
+# pytest trial tree. On the 25th one check owned 1,952 of the file's 2,562 bytes
+# (76.2 %) over 175 folded fires; on the 26th its section owned 2,614 of 2,739
+# (95.4 %). The alarm can never clear: the tree it names is deleted with the
+# trial, while the real pair is valid (`agent-services/cert/
+# goliath.taile37041.ts.net.crt`, 4,837 B, `notAfter=Dec 19 01:16:29 2026 GMT`).
+# The writer is any `tick()` on a `Guardian` whose `repo` is a tmp tree — 13 test
+# files construct one and call it — which is why the default moves here, beside
+# `_isolate_automod_backlog`, rather than into a per-file marker: `live_vault`
+# would buy the same page quiet by deleting every guardian log-tail test from the
+# self-mod lane, and the two producers named in #4593 are load-bearing tests of
+# WHERE a check sits in the tick.
+#
+# Patching the ATTRIBUTE is the only thing that can work at this point in the
+# process, and exporting `LLOYD_VAULT_ROOT` is the one thing that must not be
+# done: `vault_root()` honours the variable only while the module is being
+# imported, so an autouse `setenv` after import moves nothing, and
+# `tests/test_guardian_sink_confinement.py:71` derives its leak target —
+# `LIVE_VAULT` — from that same variable, so a suite-wide export would turn the
+# suite that pins which process may write a human-facing surface into a suite
+# asserting an untouched scratch directory. Both halves are pinned by
+# `tests/test_guardian_sink_confinement.py::
+# test_the_seam_moves_the_attribute_and_leaves_the_resolution_rule_untouched`.
+_GUARDIAN_POLICY_FILE = ROOT / "agent-services" / "guardian" / "policy.py"
+
+
+def _guardian_policy_module():
+    """The guardian's `policy` module in this process, or None if it cannot be had.
+
+    Looked up in `sys.modules` first: thirteen test files put `agent-services/
+    guardian` on `sys.path` and `import policy` themselves, so by the time a
+    fixture runs the module is usually already here. Loading it from the tree
+    under test is the other half, and it is not optional —
+    `tests/test_guardian_voice_loss_escalation.py:942` imports `guardian` INSIDE
+    the test body, after every fixture has run, so a seam that only patched an
+    already-imported module would leave that node (one of the two #4593 names)
+    writing to the live vault while every other node looked confined. Registering
+    it under its real top-level name is what makes a later `import guardian` bind
+    the module this fixture patches; `app/harness/policy.py` is `app.harness.policy`
+    and cannot be reached by that name.
+    """
+    module = sys.modules.get("policy")
+    if module is not None:
+        loaded = getattr(module, "__file__", None)
+        if loaded and Path(loaded).resolve() == _GUARDIAN_POLICY_FILE.resolve():
+            return module
+        return None                      # a different `policy`: not ours to move
+    if not _GUARDIAN_POLICY_FILE.is_file():
+        return None
+    import importlib.util
+    try:
+        spec = importlib.util.spec_from_file_location(
+            "policy", str(_GUARDIAN_POLICY_FILE))
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["policy"] = module   # before exec: a sibling's `import policy`
+        spec.loader.exec_module(module)
+        return module
+    except Exception:                    # noqa: BLE001 - an importable tree is not owed
+        sys.modules.pop("policy", None)
+        return None
+
+
+@pytest.fixture(scope="session")
+def guardian_sink_vault(tmp_path_factory) -> Path:
+    """The scratch vault every confined alarm of this session lands in.
+
+    Shaped like a real vault on purpose: `Notifier._daily_note_path`
+    (`notify.py:1570`) answers None for a vault with no `memory/`, so a sink
+    aimed at an empty directory writes nothing anywhere and every "the live vault
+    is untouched" below would be the zero of a scan that could not have found
+    anything. With `memory/` present an alarm that fires has exactly one place to
+    land, and a node can read its own section back out of it.
+
+    One per session rather than one per test because the note IS the incident
+    state — `resolve` and the fold counter are read back off the file, never held
+    in process memory — so a per-test vault would model a guardian that restarts
+    between every tick.
+    """
+    vault = Path(tmp_path_factory.getbasetemp()) / "guardian-sink-vault"
+    (vault / "memory").mkdir(parents=True, exist_ok=True)
+    return vault
+
+
+@pytest.fixture(autouse=True)
+def _guardian_vault_note_sink_to_scratch(guardian_sink_vault, monkeypatch):
+    """No pytest process appends a guardian alarm to the human's daily note (#4593).
+
+    The attribute, not the environment variable, and for the reason in the header
+    above: `policy.VAULT_ROOT` is bound at import, so it is the only handle that
+    still exists when a test runs. A test that wants its own vault still wins —
+    its `monkeypatch.setattr(policy, "VAULT_ROOT", ...)` runs after this one's,
+    which is what `tests/test_guardian_vaultwatch.py:163-164` already does.
+
+    Confined in the SINK and nowhere near a check: `check_cert_expiry` still
+    answers `absent` for a cert directory holding no pair, which is also the
+    reading of a leaf that was never minted at all (`guardian.py:1898-1902`), so
+    silencing it there would be the false negative the watch exists to catch.
+    `tests/test_guardian_cert_expiry.py::
+    test_the_absent_leaf_still_pages_under_the_confined_sink` is that line.
+    """
+    module = _guardian_policy_module()
+    if module is None:
+        return
+    monkeypatch.setattr(module, "VAULT_ROOT", str(guardian_sink_vault))
