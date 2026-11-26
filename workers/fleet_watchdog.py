@@ -1,6 +1,6 @@
 """Fleet surveillance for the autonomy scheduler — the alarms, not the dispatch.
 
-Seven steps live here, and none of them is about enqueuing:
+Eight steps live here, and none of them is about enqueuing:
 
 - the grossly-overdue stall alarm (#24/#48/#75, #1550), `_grossly_overdue`, with the
   operator-pause clause that says when a held pool, not a stuck scheduler, owns a
@@ -27,7 +27,11 @@ Seven steps live here, and none of them is about enqueuing:
   exit 1 for 32 days with the doc attributing the property to a build that no longer
   answered. It is the one seat here that reaches the engine, and only for `/version`, so
   its position in the tick is what keeps a slow answer off the stall alarms' path. A
-  detector, not an alarm: it adds no stall assertion and no throughput class.
+  detector, not an alarm: it adds no stall assertion and no throughput class;
+- the research-artifact watch (#4273), `_check_research_artifacts`, on its own 6 h
+  cadence: the scheduled reader `app.research_store`'s `stats()["missing_artifacts"]`
+  never had, which records the count and paths every run and alerts when the count
+  rises above the last recorded one, naming the paths that went missing since.
 
 This is the fleet-watch seat's roster of record (#3516). The steps are decided in one
 place, `tick()`, and `tests/test_fleet_watchdog.py` derives them from its source and
@@ -2516,6 +2520,10 @@ async def tick(queue: WorkQueue) -> None:
     # one of them calls `_check_engine_build` directly and none of them runs the loop.
     await _check_engine_build(queue)
 
+    # #4273: the research registry's missing-artifact count, read through the store's
+    # own `stats()` on a 6 h cadence. Before the census, which stays last.
+    await _check_research_artifacts(queue)
+
     # The worker pool's failure-throughput census (#2890). Last in the tick, which is
     # the whole of its safety argument and is stated here rather than hidden in a
     # try/except: `tick` guards none of its alarms individually — the seat that calls
@@ -2679,3 +2687,117 @@ async def _check_engine_build(queue: WorkQueue, *, now=None, runner=None,
     _eb_wm_set(queue, _ENGINE_BUILD_ALERT_KEY, now.isoformat())
     await _alert(_engine_build_message(reading))
     return reading
+
+
+# ── #4273: the scheduled reader of the research registry's missing-artifact count ──
+#
+# `ResearchStore.stats()` has reported `missing_artifacts` ({count, paths}) since #3190's
+# read-side half: a `written` row whose note was deleted or moved after `finish` is
+# counted there, and nowhere else. Its only readers were the chat tool `research_stats`
+# and the CLI, so 11 lost notes sat in the payload until an architecture review happened
+# to run `python -m app.research_store stats`; the nightly queue generator (task #65)
+# is handed the payload and named the figure in prose on 4 of 27 runs. This arm is the
+# deterministic reader: no model, no free worker slot needed, on the same seat as the
+# other alarms.
+#
+# The rule is a delta against the previous run, not an absolute floor. The payload names
+# paths but not the status of the row behind each one, so a reader cannot tell a lost
+# `written` note from one of the legacy `archived` corpus rows that also names a note;
+# a rise is the one statement the payload supports on its own. The record is rewritten
+# on EVERY run — a fall or a tie included — so the next run compares against this one
+# and a note restored by hand does not leave a stale high-water mark behind.
+
+#: Six hours, the engine-build arm's cadence: the thing watched moves when a note is
+#: deleted, and the clause bound is a day.
+_RESEARCH_ARTIFACT_SCAN_SECONDS = 6 * 3600
+
+#: Its own watermark source, for the reason `_ENGINE_BUILD_WM_SOURCE` gives.
+_RESEARCH_ARTIFACT_WM_SOURCE = "fleet-watchdog-research-artifacts"
+_RESEARCH_ARTIFACT_SCAN_KEY = "scanned_at"
+_RESEARCH_ARTIFACT_RECORD_KEY = "missing_artifacts"
+
+
+def _research_missing_artifacts() -> dict:
+    """The registry's own `{count, paths}`, through `app.research_store` and nothing else.
+
+    `app.research_store` is the one module that opens `research.db`
+    (`architecture/research-pipeline.md` §2); reading the file here would be a second
+    opener with its own idea of which rows count. A store that cannot be read raises,
+    and the caller records nothing for that run rather than a zero.
+    """
+    from app import research_store
+
+    missing = research_store.store().stats()["missing_artifacts"]
+    return {"count": int(missing["count"]), "paths": list(missing["paths"])}
+
+
+def _research_artifact_message(previous: dict, current: dict, new_paths: list[str]) -> str:
+    shown = "\n".join(f"- {p}" for p in new_paths) or "- (none newly named)"
+    return (
+        f"Research registry: notes missing from disk rose from {previous['count']} to "
+        f"{current['count']} since the last check. Missing now and not at the last "
+        f"check:\n{shown}\n\nEach is a topic row whose `artifact_path` no longer "
+        "exists (`python -m app.research_store stats` lists them all); restore the note "
+        "or re-settle the topic.")
+
+
+async def _check_research_artifacts(queue: WorkQueue, *, now=None,
+                                    reader=None) -> dict | None:
+    """Read the missing-artifact count on its cadence; alert a person when it rises.
+
+    Returns `{"previous", "current", "new_paths", "alerted"}` when the check ran, None
+    when the cadence said not yet or the registry could not be read. The first run has
+    no baseline: it records what it saw and alerts nothing.
+    """
+    import json
+
+    from app import autonomy
+
+    now = now or autonomy._utcnow()
+    try:
+        last = _parse_iso_safe(queue.wm_get(_RESEARCH_ARTIFACT_WM_SOURCE,
+                                            _RESEARCH_ARTIFACT_SCAN_KEY))
+    except Exception:
+        logger.exception("research-artifact watch: scan stamp unreadable")
+        last = None
+    if last is not None and (now - last).total_seconds() < _RESEARCH_ARTIFACT_SCAN_SECONDS:
+        return None
+    try:
+        queue.wm_set(_RESEARCH_ARTIFACT_WM_SOURCE, _RESEARCH_ARTIFACT_SCAN_KEY,
+                     now.isoformat())
+    except Exception:
+        logger.exception("research-artifact watch: scan stamp not persisted")
+
+    loop = asyncio.get_event_loop()
+    try:
+        current = await loop.run_in_executor(None, reader or _research_missing_artifacts)
+    except Exception:
+        logger.exception("research-artifact watch: the registry could not be read")
+        return None
+
+    previous = None
+    try:
+        raw = queue.wm_get(_RESEARCH_ARTIFACT_WM_SOURCE, _RESEARCH_ARTIFACT_RECORD_KEY)
+        previous = json.loads(raw) if raw else None
+    except Exception:
+        logger.exception("research-artifact watch: the previous record is unreadable; "
+                         "treating this run as the first")
+        previous = None
+    # Rewritten every run, before any alert goes out (#2662's ordering): the next run
+    # compares against this one whatever this one finds.
+    try:
+        queue.wm_set(_RESEARCH_ARTIFACT_WM_SOURCE, _RESEARCH_ARTIFACT_RECORD_KEY,
+                     json.dumps({**current, "at": now.isoformat()}))
+    except Exception:
+        logger.exception("research-artifact watch: record not persisted")
+
+    if not isinstance(previous, dict) or "count" not in previous:
+        return {"previous": None, "current": current, "new_paths": [], "alerted": False}
+    before = set(previous.get("paths") or [])
+    new_paths = [p for p in current["paths"] if p not in before]
+    rose = current["count"] > int(previous["count"])
+    if rose:
+        await _alert(_research_artifact_message(previous, current, new_paths))
+    return {"previous": {"count": int(previous["count"]),
+                         "paths": list(previous.get("paths") or [])},
+            "current": current, "new_paths": new_paths, "alerted": rose}

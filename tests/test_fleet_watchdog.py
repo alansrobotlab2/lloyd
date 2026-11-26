@@ -5199,3 +5199,23 @@ async def test_the_starvation_alert_names_the_shared_bound_in_its_own_words(
     assert "claimed inside 180 min" not in msg, (
         "the sentence is quoting 3 x `max_duration_seconds` again — the magnitude a "
         f"reader used to have to derive from config: {msg}")
+
+
+# ── #4273: the research-artifact watch is a step of this seat ─────────────────
+
+def test_the_research_artifact_watch_is_a_named_step_of_the_seat_on_a_daily_bound():
+    """#4273 clause 5: `_check_research_artifacts` runs from `tick()` — the fleet-watch
+    seat `WorkerPool._watch_fleet` drives on the scheduler loop, which needs no free
+    worker slot and makes no model call — on a cadence inside 24 h, and both rosters
+    name it. The derivation is the one `test_the_module_roster_names_every_step_the_tick_runs`
+    uses, so a step that left the tick would fail here rather than read as named."""
+    assert "_check_research_artifacts" in _tick_steps()
+    roster, _items = _roster(fw.__doc__ or "")
+    assert "_check_research_artifacts" in roster and "#4273" in roster
+    assert "_check_research_artifacts" in (WorkerPool._watch_fleet.__doc__ or "")
+    assert 0 < fw._RESEARCH_ARTIFACT_SCAN_SECONDS <= 24 * 3600
+    # The registry is read through its own module, never a model or the engine.
+    src = inspect.getsource(fw._research_missing_artifacts)
+    assert "research_store.store().stats()" in src
+    for banned in ("httpx", "discord_alert", "run_prompt", "_engine"):
+        assert banned not in inspect.getsource(fw._check_research_artifacts), banned

@@ -174,7 +174,13 @@ note were never asked, so a corpus note that went missing stayed unreported.
 Judging by path keeps those 294 quiet, because a row that names nothing claims
 nothing, and it leaves the key always present, so a clean registry is `count: 0`
 and never an absent field, which is #3085's rule applied to a count that could
-otherwise disappear.
+otherwise disappear. Since #4273 the count also has a scheduled, model-free reader:
+`workers/fleet_watchdog.py::_check_research_artifacts`, a step of the fleet-watch
+seat (`WorkerPool._watch_fleet`) on a 6 h cadence, reads it through `stats()`,
+records `{count, paths}` every run under its own queue watermark, and alerts when
+the count rises above the last record, naming the paths missing since. It alarms on
+a rise rather than on `written`-status paths because the payload carries no status
+per path.
 
 The other half of #3190 is on the write side, and it is a rule about *where* a
 card may land rather than what is in it. `workers/sources/deep_research.py::note_path_for`
