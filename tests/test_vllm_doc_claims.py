@@ -5448,24 +5448,10 @@ def _venv_table_lines(path: Path):
     return rows
 
 
-# ── the one exemption in this file, and what keeps it honest ────────────────────
-# agent-services/README.md's venv table IS read by the rule below; its rows are not yet
-# HELD to it. The file is in no tuple of the gate's `ALLOWED_GLOBS`
-# (`scripts/automod/spec.py:76`, deny-by-default), so a round that marks those rows is
-# refused at preflight — quoted from
-# `~/.local/state/lloyd-automod/rounds/SM_20261115_172237/gate.json`, preflight `detail`
-# at head c3b16e22: "paths outside the writable set: ['agent-services/README.md'].
-# Leave it out of the diff, land the rest, and report it under `human_paths`". #4156
-# carries the refused text, that line, and the one-entry widening that unblocks it.
-# So the rows are read and named in an assertion instead of skipped: a fourth row
-# naming a deleted venv fails the node TODAY, and the day a person marks these three the
-# equality fails and says to delete this set. An exemption that cannot survive its own
-# work being done is the only kind worth writing.
-README_ROWS_OPEN_ON_4156 = {
-    "vllm-experimental",   # 0.23.1rc1.dev1218 — deleted; the row says nothing
-    "vllm-laguna",         # 0.25.1 — deleted, and no setup/ script builds it
-    "vllm-qwen3.8",        # nightly — deleted, and the row adds "(live)"
-}
+# agent-services/README.md's venv table is a scope of the rule below like SETUP.md's.
+# It was held to a tracked exemption while the file sat outside the gate's
+# `ALLOWED_GLOBS`; #4156 (`841da495`) made it writable and #4512 marked its rows, so
+# the exemption is gone and its rows are graded under the same rule.
 README_DOC = "agent-services/README.md"
 
 
@@ -5505,13 +5491,13 @@ def test_no_rollback_instruction_names_a_venv_that_is_not_installed():
     read that table, so the class the §1 fix closed stayed open one row away from the
     paragraph that was already fixed.
 
-    `agent-services/README.md` carries the same table with the same three unmarked
-    rows. Its rows ARE read here and held to a tracked exemption rather than skipped —
-    see `README_ROWS_OPEN_ON_4156` for why a round cannot mark them itself."""
+    `agent-services/README.md` carries the same table, and since #4512 it is graded
+    as a scope of its own under the same rule — no exemption set."""
     assert VENV_ROOT.is_dir(), f"{VENV_ROOT} is not a tree to check against"
     scopes = {"architecture/vllm.md §1": _section_lines(1),
               "SETUP.md Revert targets": _revert_targets_paragraph(),
-              "SETUP.md venv table": _venv_table_lines(ROOT / "SETUP.md")}
+              "SETUP.md venv table": _venv_table_lines(ROOT / "SETUP.md"),
+              "agent-services/README.md venv table": _venv_table_lines(ROOT / README_DOC)}
     # A scope that reads empty is not a passing scope. Without this the widening
     # could be undone by narrowing one regex and the node would report green.
     empty = [where for where, lines in scopes.items() if not lines]
@@ -5521,17 +5507,6 @@ def test_no_rollback_instruction_names_a_venv_that_is_not_installed():
     assert bad == [], (
         f"these scopes name an uninstalled venv without saying so: {bad} — the box "
         f"holds {sorted(p.name for p in VENV_ROOT.iterdir())}")
-
-    # clause 5's other table, read under the exemption above: the README's rows are
-    # measured against the box right now, and only the exact known set may fail.
-    readme_bad = _bad_venv_lines(_venv_table_lines(ROOT / README_DOC))
-    assert {name for name, _ in readme_bad} == README_ROWS_OPEN_ON_4156, (
-        f"{README_DOC}'s venv table now fails the rule with "
-        f"{sorted(set(name for name, _ in readme_bad))} but this node holds exactly "
-        f"{sorted(README_ROWS_OPEN_ON_4156)} open on #4156. Either a fourth row names "
-        "a deleted venv — fix it, it is in the writable set as of this commit — or "
-        "someone marked these rows and this exemption must go. Either way this is not "
-        "a state to widen the set past.")
 
 
 def test_the_setup_venv_table_marks_the_three_venvs_that_are_off_the_box():
@@ -5561,9 +5536,9 @@ def test_the_setup_venv_table_marks_the_three_venvs_that_are_off_the_box():
         "venvs exist on this box"
 
 
-def test_the_readme_venv_table_is_read_by_the_rule_with_one_tracked_exception():
+def test_the_readme_venv_table_is_read_by_the_rule():
     """The instrument, not the doc: agent-services/README.md's table is a scope of the
-    check above, and only the three rows #4156 owns are exempt from failing it.
+    check above, and every row naming a venv that is off the box says so on the row.
 
     This node exists because clause 5 asked for both tables to be scanned and the
     review found the first cut of that scope passing with zero rows:
@@ -5572,22 +5547,23 @@ def test_the_readme_venv_table_is_read_by_the_rule_with_one_tracked_exception():
     the file matched nothing and `assert len(out) >= 2` was the only thing that would
     have said so. Here the file's rows are named, counted and checked against the box,
     which is the version of "the scope reads something" that cannot be satisfied by a
-    regex nobody narrowed back."""
+    regex nobody narrowed back. Until #4512 three rows were held open by an exemption
+    set (`vllm-experimental`, `vllm-laguna`, `vllm-qwen3.8` "(live)"); the laguna row
+    is dropped and the other two are marked."""
     rows = _venv_table_rows(ROOT / README_DOC)
     assert len(rows) >= 3, \
         f"{README_DOC}'s venv table yielded {len(rows)} rows, so the rule above is " \
         "not reading it — the prefix the first cell opens with changed"
     deleted = {name for name in rows if not (VENV_ROOT / name).is_dir()}
-    assert deleted == README_ROWS_OPEN_ON_4156, (
-        f"{README_DOC}'s table names {sorted(deleted)} deleted venvs, and #4156's "
-        f"exemption covers {sorted(README_ROWS_OPEN_ON_4156)}. A new one is a new row "
-        "to mark in the file a person can edit; a smaller set means #4156 landed and "
-        "the exemption is dead code — delete README_ROWS_OPEN_ON_4156 and the "
-        "assertion that reads it.")
-    for name in sorted(README_ROWS_OPEN_ON_4156):
-        assert name in rows, f"{README_DOC} lost the {name} row #4156 is owed"
-        assert not ABSENT_MARK.search(rows[name]), \
-            f"the {name} row is now marked, so drop the exemption: {rows[name]}"
+    assert deleted, (
+        f"every venv {README_DOC}'s table names is installed, so the absent-mark half "
+        "of this node grades nothing — re-read the table before trusting a green node")
+    for name in sorted(deleted):
+        assert ABSENT_MARK.search(rows[name]), \
+            f"the {name} row names a venv that is not on this box without saying so: " \
+            f"{rows[name]}"
+    assert "vllm-laguna" not in rows, \
+        f"{README_DOC} lists vllm-laguna again, which no setup/ script builds"
 
 
 def test_the_historical_0910_records_are_left_alone():

@@ -27,12 +27,13 @@ arms should be retired at all) decide whether they ever move. The invariant this
 holds instead: a route that cannot boot says what would make it bootable, and a
 fallback never names an off-box venv as if it were a recovery.
 
-`agent-services/README.md` is out of this file's reach for a different reason: it is
-in no tuple of the gate's `ALLOWED_GLOBS`, so a round editing it is refused at
-preflight as `unlisted` (#4156 carries that, with the `gate.json` line and the exact
-replacement text). Its program table names the wrong serving script on both LLM rows
-and its venv table marks none of the three deleted venvs; until #4156 lands, the
-scope here is the launchers, which a round can actually change.
+`agent-services/README.md` is graded here too. It was out of reach until #4156
+(`841da495`) added it to the gate's `ALLOWED_GLOBS` (`spec.classify` -> allowed);
+#4512 then corrected its program table and venv table and restored the three nodes
+#4145 wrote for them (`c3b16e22`, which never reached `main`): every `agent-llm-*`
+row against its conf's `command=` and `GPU=`, the row set against the `[program:]`
+units in `conf.d/`, the primary-slot paragraph against the conf's occupant and its
+revert target, and the venv table under the same absent-mark rule as SETUP.md's.
 """
 from __future__ import annotations
 
@@ -46,6 +47,8 @@ ROOT = Path(__file__).resolve().parent.parent
 AGENT_SERVICES = ROOT / "agent-services"
 BIN = AGENT_SERVICES / "bin"
 SETUP_DIR = AGENT_SERVICES / "setup"
+CONF_D = AGENT_SERVICES / "supervisor" / "conf.d"
+AGENT_README = AGENT_SERVICES / "README.md"
 
 # The live tree the paths in these files point into. `ROOT` is the checkout, which
 # in a gate worktree has no `.venvs` at all, so it is never the thing to check
@@ -61,7 +64,10 @@ LAGUNA_LAUNCHER = BIN / "start-laguna-s-2.1-nvfp4-dflash.sh"
 
 # One copy of the "that venv is not here" vocabulary, from the file that owns the
 # doc-side scan, so the launcher rule and the doc rule cannot drift apart.
-from tests.test_vllm_doc_claims import _bad_venv_lines  # noqa: E402
+from tests.test_vllm_doc_claims import (  # noqa: E402
+    _bad_venv_lines,
+    _venv_table_lines,
+)
 
 # Every vLLM launcher that reaches a venv guard: the two this item names plus the
 # primary's, which is the file #3136 already fixed — kept in the scan so a future
@@ -88,13 +94,15 @@ SETUP_SCRIPT = re.compile(r"(setup-vllm-[A-Za-z0-9._-]+\.sh)")
 # the decision clause 5 pins, and it is allowed to name a venv the box does not have
 # precisely because clause 1 makes its refusal say so.
 FALLBACK_EXAMPLE = re.compile(r"^\s*(?:#+\s*)?VLLM_VENV=(?!\$\{VLLM_VENV)(\S+)\s+\S+")
-# NOTE: no program-table regex lives here. Reading `| `agent-llm-primary` | port |
-# `bin/<script>` |` out of a markdown table to pin which script a conf runs is a
-# check this file no longer has — the three nodes that needed it were removed when
-# agent-services/README.md proved unadmittable (see README_ROWS_OPEN_ON_4156 in
-# tests/test_vllm_doc_claims.py). The conf-vs-doc occupant check that DOES run is
-# `tests/test_vllm_doc_claims.py`; do not re-add a parser here for a file a round
-# cannot edit.
+# A supervisor program row in the README's program table: `| `agent-llm-<x>` | port |
+# `bin/<script>` | gpu | autostart |`, or `| `lloyd-mc:lloyd-backend` | …` for the
+# grouped three. Columns are positional, which is what lets the GPU column be read
+# back out without a table parser.
+PROGRAM_ROW = re.compile(r"^\|\s*`((?:lloyd-mc:)?(?:agent|lloyd)-[a-z0-9-]+)`\s*\|")
+# The README's own count of the table, in words: "Supervisord manages twelve programs".
+PROGRAM_COUNT = re.compile(r"Supervisord manages (\w+) programs")
+_WORDS = {"ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13, "fourteen": 14,
+          "fifteen": 15, "sixteen": 16}
 
 
 def _text(path: Path) -> str:
@@ -117,12 +125,45 @@ def _venv_guard_block(launcher: Path) -> str:
     return "\n".join(body)
 
 
+def _program_table_rows() -> dict:
+    """agent-services/README.md's supervisor program table, keyed by program name
+    with any `lloyd-mc:` group prefix dropped, so a key is a `[program:]` name."""
+    out: dict[str, str] = {}
+    for ln in _text(AGENT_README).splitlines():
+        m = PROGRAM_ROW.match(ln)
+        if m:
+            name = m.group(1).split(":", 1)[-1]
+            assert name not in out, \
+                f"the program table has two `{name}` rows, so which one a " \
+                "reader trusts is a coin flip"
+            out[name] = ln
+    return out
+
+
+def _conf_programs() -> set[str]:
+    """Every `[program:<name>]` section in `conf.d/*.conf` — what supervisord
+    actually manages. `lloyd-mc.conf` is a `[group:]` with no program of its own."""
+    out: set[str] = set()
+    for conf in CONF_D.glob("*.conf"):
+        out.update(re.findall(r"^\[program:([^\]]+)\]", _text(conf), re.M))
+    return out
+
+
+def _conf_field(pattern: str) -> str:
+    """A field out of the live primary conf — the only statement of who holds the
+    slot, which is why the README is graded against it and not against itself."""
+    conf = _text(CONF_D / "agent-llm-primary.conf")
+    m = re.search(pattern, conf, re.M)
+    assert m, f"agent-llm-primary.conf no longer matches {pattern!r}"
+    return Path(m.group(1)).name
+
+
 def _example_lines() -> list[tuple[str, str]]:
     """Every `VLLM_VENV=<path> <command>` example in the vLLM launchers' own comment
-    blocks — the lines a reader pastes without reading. `agent-services/README.md`
-    has one too and is out of reach until #4156 lands."""
+    blocks and in agent-services/README.md — the lines a reader pastes without
+    reading."""
     out: list[tuple[str, str]] = []
-    for path in VLLM_LAUNCHERS:
+    for path in VLLM_LAUNCHERS + [AGENT_README]:
         for ln in _text(path).splitlines():
             if FALLBACK_EXAMPLE.match(ln):
                 out.append((path.name, ln))
@@ -244,18 +285,115 @@ def test_the_deleted_laguna_venv_is_no_longer_offered_as_a_fallback():
         f"{offenders} name vllm-laguna; only {LAGUNA_LAUNCHER.name}, whose model IS "\
         "Laguna S 2.1, may — it is not on this box and no setup/ script builds it, so "\
         "in any other script the name is a dead route"
+    # agent-services/README.md is the other surface a reader copies from: it carried
+    # `VLLM_VENV=~/lloyd/.venvs/vllm-laguna bash bin/start-qwen3.8-27b-nvfp4.sh` as its
+    # override example and a `vllm-laguna` venv row, both gone since #4512. Not even as
+    # history: a dead path quoted in a doc is still a path somebody `cd`s to.
+    assert "vllm-laguna" not in _text(AGENT_README), \
+        "agent-services/README.md names vllm-laguna again, which is not on this box " \
+        "and which no setup/ script builds"
 
 
-# The three README nodes that stood here are NOT deleted-but-failing: they were
-# written, run red against the base file and then taken out because
-# `agent-services/README.md` is unlisted in the gate's `ALLOWED_GLOBS` and no round
-# can edit it — a green suite cannot pin a file this loop is forbidden to fix, and a
-# red one is not landable. #4156 holds their full text and the `gate.json` line that
-# refused them: a program-table node comparing every `agent-llm-*.conf`'s `command=`
-# and `GPU="…"` against its row, a primary-slot-paragraph node graded against the
-# conf's `command=` and its "Previous occupant (revert target)" line, and the same
-# absent-mark rule `test_vllm_doc_claims.py` applies to SETUP.md pointed at the
-# README's table.
+# ── #4145 clause 3, landed by #4512: the README says what the confs run ─────────
+#
+# These three nodes were written for #4145 (`c3b16e22`), run red against the base
+# README, and withheld while the file was outside the gate's `ALLOWED_GLOBS`. #4156
+# (`841da495`) put it in the writable set; #4512 restored them with the README fix.
+
+def test_every_llm_program_row_names_the_script_its_conf_runs():
+    """The README's program table is what a reader reaches for before touching
+    supervisorctl, and it was wrong on both LLM rows: the primary row said
+    `start-qwen3.8-27b-nvfp4.sh` while `command=` ran `start-qwen38-flash-next.sh`,
+    and the secondary row said `start-gemma-4-e4b-nvfp4.sh` while its conf runs
+    `start-secondary.sh`.
+
+    The GPU column is pinned too where a conf declares one, because that column is
+    how a reader decides whether booting a slot evicts something: the secondary row
+    said `—` while its conf pins `GPU="2"`, which is the card djev runs on.
+
+    And the row SET is pinned against `conf.d/`: the table had eleven rows, one of
+    them `agent-tts` (retired to `supervisor/retired/` on 2026-11-10), while
+    `agent-djev` and `agent-tts-omni` had none — so the sentence above the table
+    counted eleven programs against twelve `[program:]` units. `lloyd-mc.conf` is a
+    `[group:]` with no program of its own and gets no row."""
+    rows = _program_table_rows()
+    programs = _conf_programs()
+    assert set(rows) == programs, (
+        f"agent-services/README.md's program table rows {sorted(rows)} are not the "
+        f"[program:] units in {CONF_D}: missing {sorted(programs - set(rows))}, "
+        f"extra {sorted(set(rows) - programs)}")
+    m = PROGRAM_COUNT.search(_text(AGENT_README))
+    assert m, "the README no longer says how many programs supervisord manages"
+    stated = _WORDS.get(m.group(1).lower(), m.group(1))
+    assert stated == len(programs), (
+        f"the README says supervisord manages {m.group(1)} programs; conf.d/ "
+        f"declares {len(programs)}")
+
+    confs = sorted(CONF_D.glob("agent-llm-*.conf"))
+    assert len(confs) >= 2, f"only {confs} — this node's premise is at least two slots"
+    for conf in confs:
+        program = conf.stem
+        assert program in rows, \
+            f"agent-services/README.md's program table has no `{program}` row, so " \
+            "there is nothing here to compare the conf against"
+        text = _text(conf)
+        m = re.search(r"^command=/bin/bash\s+(\S+)", text, re.M)
+        assert m, f"{conf.name} has no `command=/bin/bash …` line to check against"
+        script = Path(m.group(1)).name
+        assert f"bin/{script}" in rows[program], \
+            f"{conf.name} runs {script}, but the `{program}` row says {rows[program]}"
+        gpu = re.search(r'GPU="(\d+)"', text)
+        if gpu:
+            cols = [c.strip() for c in rows[program].strip().strip("|").split("|")]
+            assert cols[3] == gpu.group(1), \
+                f"the `{program}` row puts the slot on GPU {cols[3]!r} while " \
+                f"{conf.name} pins GPU {gpu.group(1)!r}"
+
+
+def test_the_readme_paragraph_names_the_occupant_and_the_revert_target():
+    """The prose half of the same correction: the Start scripts paragraph asserted
+    the 27B script was the live occupant ("Currently `start-qwen3.8-27b-nvfp4.sh`").
+    It is the conf's named *revert target*, which is a different thing to say and the
+    thing a reader swapping `command=` needs to see labelled."""
+    script = _conf_field(r"^command=/bin/bash\s+(\S+)")
+    assert (BIN / script).is_file(), \
+        f"agent-llm-primary.conf runs {script}, which is not in {BIN}"
+    readme = _text(AGENT_README)
+
+    slots = [p for p in readme.split("\n\n") if "primary slot" in p]
+    assert len(slots) == 1, \
+        f"the 'primary slot' paragraph moved or doubled up: {len(slots)} paragraphs"
+    assert script in slots[0], \
+        f"the primary-slot paragraph does not name {script} as the occupant"
+
+    # The 27B script stays in that paragraph — as the conf's named revert target,
+    # which is what it is now — so the correction is a re-label and not a deletion of
+    # the one name a revert would reach for.
+    target = _conf_field(r"; Previous occupant \(revert target\):\n;+\s*(\S+)")
+    assert target != script, "the conf's revert target is its own command, so this " \
+                             "paragraph has nothing left to disambiguate"
+    assert target in slots[0], \
+        f"the paragraph no longer names {target}, the conf's revert target, so a " \
+        "reader swapping `command=` has lost the pointer to what to swap back to"
+    assert "revert target" in slots[0], \
+        f"the paragraph names {target} without labelling it the revert target, so it " \
+        "still reads as a second occupant"
+    assert f"Currently `{target}`" not in slots[0], \
+        f"the paragraph presents the revert target {target} as the live occupant"
+
+
+def test_the_readme_venv_table_marks_every_venv_that_is_absent():
+    """Same machinery `test_vllm_doc_claims.py` applies to SETUP.md, pointed at the
+    table that used to list three venvs as though all three were on the box (and one
+    of them as `live`)."""
+    rows = _venv_table_lines(AGENT_README)
+    assert rows, "agent-services/README.md has no venv table for this to read"
+    bad = _bad_venv_lines(rows)
+    assert bad == [], (
+        f"these README rows name a venv that is not installed without saying so on "
+        f"the row: {bad} — the box holds "
+        f"{sorted(p.name for p in VENV_ROOT.iterdir())}")
+
 
 # ── clause 5's other half: the defaults themselves stay where they are ──────────
 

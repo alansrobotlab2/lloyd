@@ -10,7 +10,7 @@ is the day-to-day reference.
 > **History:** this tree used to be a standalone `~/Projects/lloyd-services`
 > repo with its own systemd units and a `voice_mcp_server.py` / `voice_bridge.py`
 > / `voice_tui.py` voice pipeline. Both are gone. Voice is now LiveKit-based
-> (`livekit_worker.py` + `agent-tts`), and the systemd layer is a single
+> (`livekit_worker.py` + `agent-tts-omni`), and the systemd layer is a single
 > supervisord unit. Old docs describing those paths are obsolete.
 
 ---
@@ -41,26 +41,29 @@ agent-services/
 
 ## Services
 
-Supervisord manages eleven programs. Three of them — the backend, frontend, and
+Supervisord manages twelve programs, one per `[program:]` unit in
+`supervisor/conf.d/`. Three of them — the backend, frontend, and
 MCP aggregator — are in the **`lloyd-mc` group**, so they must be addressed with
 the group prefix (`lloyd-mc:lloyd-backend`, not `lloyd-backend`).
 
 | Program | Port | Command | GPU | Autostart |
 |---|---|---|---|---|
-| `agent-llm-primary` | 8096 | `bin/start-qwen3.8-27b-nvfp4.sh` | 1 | yes |
-| `agent-llm-secondary` | 8091 | `bin/start-gemma-4-e4b-nvfp4.sh` | — | **no** |
+| `agent-llm-primary` | 8096 | `bin/start-qwen38-flash-next.sh` | 1 | yes |
+| `agent-llm-secondary` | 8091 | `bin/start-secondary.sh` | 2 | **no** |
+| `agent-djev` | 8010, 8011 | `bin/start-djev.sh` | 2 | **no** — `server.py`'s boot reconcile starts it when `djev.enabled` |
 | `lloyd-mc:lloyd-backend` | 8080 | `.venvs/lloyd/bin/python server.py` | — | yes |
 | `lloyd-mc:lloyd-frontend` | 5173 | `npm run dev` (Vite) | — | yes |
 | `lloyd-mc:lloyd-mcp` | 8500 | `.venvs/lloyd/bin/python -m agent_mcp.main` | — | yes |
-| `lloyd-agent-worker` | — | `.venvs/lloyd/bin/python livekit_worker.py` | — | yes |
+| `lloyd-agent-worker` | — | `.venvs/lloyd/bin/python livekit_worker.py` | 0 | yes |
 | `agent-livekit-server` | 7880 | `bin/start-livekit-server.sh` | — | yes |
-| `agent-tts` | 8090 | `bin/start-qwen3-tts.sh` | 0 | yes |
-| `agent-qmd-daemon` | 8181 | `node .../qmd.js mcp --http --port 8181` | 0 | yes |
-| `agent-qmd-watcher` | — | `scripts/qmd-watcher.sh` | 0 | yes |
+| `agent-tts-omni` | 8093 | `bin/start-qwen3-tts-omni.sh` | 3 | yes |
+| `agent-qmd-daemon` | 8181 | `node .../qmd.js mcp --http --port 8181` | 4 | yes |
+| `agent-qmd-watcher` | — | `scripts/qmd-watcher.sh` | 4 | yes |
 | `agent-obsidian-sync` | — | `bin/start-obsidian-sync.sh` | — | yes |
 
 `agent-llm-secondary` is `autostart=false` on purpose — `secondary_enabled: false`
-in `config.yaml`. Start it by hand when you want the Inner Voice observer model.
+in `config.yaml`. The retired `agent-tts` unit (`:8090`) is in `supervisor/retired/`,
+not `conf.d/`, so it has no row. Start it by hand when you want the Inner Voice observer model.
 
 ---
 
@@ -118,8 +121,9 @@ GPU-using services must set `CUDA_DEVICE_ORDER=PCI_BUS_ID` before
 ## Start scripts
 
 `bin/` holds a start script per model. Only one LLM occupies the `:8096`
-"primary slot" at a time; `agent-llm-primary.conf` names which one is live.
-Currently `start-qwen3.8-27b-nvfp4.sh`.
+"primary slot" at a time; `agent-llm-primary.conf`'s `command=` names which one is
+live — currently `start-qwen38-flash-next.sh`. `start-qwen3.8-27b-nvfp4.sh` is that
+conf's named revert target, not the occupant.
 
 Each script carries a long header comment covering that model's quantization,
 speculative-decode setup, sampling defaults, and known traps. Read it before
@@ -127,18 +131,26 @@ changing flags — several encode hard-won failures (the `qwen3_xml` vs
 `qwen3_coder` parser wedge, the missing-MTP-head hang, the gcc-15 requirement
 for FlashInfer JIT).
 
-Venvs are model-specific so one upgrade can't silently re-qualify another model:
+Venvs are model-specific so one upgrade can't silently re-qualify another model.
+This table lists what the slot's own scripts point at; a row whose venv is not on
+this box says so, because a path in a doc is read as a path to `cd`. The full
+inventory — the build serving `:8096` today, its dated revert targets and their
+version pins — is the venv table in `SETUP.md`, which is the file to edit when a
+rebuild changes one.
 
 | Venv | vLLM | Serves |
 |---|---|---|
-| `.venvs/vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6, 35B, 122B |
-| `.venvs/vllm-laguna` | 0.25.1 | Laguna S 2.1 + DFlash |
-| `.venvs/vllm-qwen3.8` | nightly | Qwen3.8-27B-NVFP4 (live) |
+| `.venvs/vllm-flash-next-main-1110` | vLLM main + PDL patch (pinned in `SETUP.md`) | **live primary** since 2026-11-10 via `start-qwen38-flash-next.sh`; the conf pins it in `environment=`, so a dropped variable is the only way a script default is reached |
+| `.venvs/vllm-qwen3.8` | nightly | Qwen3.8-27B-NVFP4 — **not installed** on this box; still `start-qwen3.8-27b-nvfp4.sh`'s default, whose guard prints `setup/setup-vllm-qwen3.8.sh` |
+| `.venvs/vllm-qwen38-flash-next` | 0.28.1rc1.dev188 + patches | Qwen3.8-Flash-Next-NVFP4 — **not installed** on this box; still `start-secondary.sh`'s vLLM-arm default, whose guard prints `setup/setup-vllm-qwen38-flash-next.sh` |
+| `.venvs/vllm-experimental` | 0.23.1rc1.dev1218 | Qwen3.5/3.6, 35B, 122B — **not installed** on this box; nothing on the slot serves them today |
 
-Override without editing a start script:
+Override without editing a start script — the scripts read `VLLM_VENV` before their
+own default, so it takes a venv qualified for *that* model, not merely an installed
+one:
 
 ```bash
-VLLM_VENV=~/lloyd/.venvs/vllm-laguna bash bin/start-qwen3.8-27b-nvfp4.sh
+VLLM_VENV=/path/to/a/venv/qualified/for/that/model bash bin/start-<model>.sh
 ```
 
 ---
