@@ -331,6 +331,28 @@ trajectory running 57 before 56. What "fresh" means depends on the windows:
 
 Either way the upstream's run must be newer than the dependent's own last run.
 
+**An edge is a history predicate, not a cycle order** (#4078). A `depends_on` edge
+is satisfied by the upstream's last recorded success, judged fresh by the rule above
+and newer than the dependent's own `last_run`, and never by the order in which the
+queue's rows were claimed: both deciders, `_dependency_refusal` and
+`_window_dependency_fresh`, read `last_run` stamps and run records, never a queue
+row. So a link whose upstream and dependent are enqueued seconds apart in one sweep
+is the healthy chain, not a race. Witness, re-checkable read-only from the `queue`
+table of `workers.db` (rows with `source='scheduled-task'`): in the
+2026-11-15T03:58:38 sweep #38 and its dependent #42 were enqueued 4 ms apart and
+claimed 0.17 s apart, #42 released by #38's previous success; the #51/#57 pair (both
+on #56) went in 3.7 ms apart at 2026-11-10T11:00:11. The gate is consulted at
+enqueue only (`get_due_tasks` → `_is_task_due` → `_is_dependency_met`) and nothing
+on the worker's execution path asks it again, so a row already claimed is not
+re-held when the upstream later moves. A dependency-aware claim order is ruled out:
+both orders a row passes through are dependency-blind (`_priority_key` sorts the due
+list by priority and overdue-ness, and `WorkQueue.claim_next` takes
+`ORDER BY … priority ASC, enqueued_at ASC`), and teaching either one the graph
+would put a second dependency decider beside the gate. The only intra-cycle
+sequencing a chain gets is ordered `preferred_hours`, the upstream's window opening
+before the dependent's; [[autonomy-jobs]] has the measurement under "The `Depends`
+column is a freshness gate, not a clock order".
+
 A dependency the gate cannot name holds its dependent — **fail closed** (#558).
 Two shapes reach that: no task file answers the id at all, and an upstream that
 exists but could not itself dispatch (parked `paused`/`draft`, disabled without

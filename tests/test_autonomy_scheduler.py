@@ -7766,3 +7766,68 @@ def test_the_never_ran_and_freshness_releases_keep_their_own_two_shapes(
         f"the healthy chain one cycle behind was held: {due}")
     assert 42 not in due, due
     assert aut.hold_reason(board[2], board, now=PIN) is None
+
+
+# ── #4078: a depends_on edge is a history predicate, stated in the gate's doc ──
+#
+# `architecture/autonomy.md` § "Dependencies, and failing forward" said what an
+# edge refuses and how the bound releases it, and nowhere whether an edge is
+# satisfied by history or by this cycle's claim order — so a pair of links claimed
+# milliseconds apart read as a race to every owed-check that looked. The ruling is
+# pinned by its markers; the extraction is shown to find none of them once the
+# ruling paragraph is cut from a copy of the section.
+_DEPS_HEADING = "### Dependencies, and failing forward"
+_HISTORY_RULING_MARKERS = (
+    # clause 1: what satisfies an edge, what never does, and the two deciders
+    "last recorded success",
+    "newer than the dependent's own `last_run`",
+    "never by the order in which the queue's rows were claimed",
+    "both deciders, `_dependency_refusal` and `_window_dependency_fresh`",
+    # clause 2: the healthy chain, a re-checkable witness, enqueue-only gate
+    "enqueued seconds apart in one sweep is the healthy chain",
+    "2026-11-10T11:00:11",
+    "`workers.db`",
+    "consulted at enqueue only",
+    "a row already claimed is not re-held",
+    # clause 3: no dependency-aware claim order; the two blind orders by symbol
+    "dependency-aware claim order is ruled out",
+    "`_priority_key`",
+    "`ORDER BY … priority ASC, enqueued_at ASC`",
+    "only intra-cycle sequencing a chain gets is ordered `preferred_hours`",
+)
+
+
+def _deps_section(text: str) -> str:
+    start = text.index(_DEPS_HEADING)
+    nxt = re.search(r"^#{2,3} ", text[start + len(_DEPS_HEADING):], re.M)
+    end = start + len(_DEPS_HEADING) + (nxt.start() if nxt else len(text))
+    return text[start:end]
+
+
+def _history_ruling_markers(section: str) -> list[str]:
+    flat = " ".join(section.split())
+    return [m for m in _HISTORY_RULING_MARKERS if m in flat]
+
+
+def test_the_dependencies_section_states_an_edge_is_a_history_predicate():
+    doc = (Path(__file__).resolve().parent.parent / "architecture" / "autonomy.md")
+    section = _deps_section(doc.read_text(encoding="utf-8"))
+    found = _history_ruling_markers(section)
+    missing = [m for m in _HISTORY_RULING_MARKERS if m not in found]
+    assert not missing, (
+        f"§ Dependencies, and failing forward no longer states the #4078 ruling; "
+        f"missing: {missing}")
+    # The symbols the ruling cites must still be the code's.
+    for name in ("_dependency_refusal", "_window_dependency_fresh", "_priority_key",
+                 "_is_dependency_met", "get_due_tasks", "_is_task_due"):
+        assert callable(getattr(autonomy, name, None)), f"autonomy.{name} is gone"
+    import workers.queue as wq
+    claim_src = inspect.getsource(wq.WorkQueue.claim_next)
+    assert "priority ASC, " in claim_src and "enqueued_at ASC" in claim_src, (
+        "claim_next's ORDER BY changed; re-read the ruling's claim-order sentence")
+    # Negative control: the same extraction over the section with the ruling
+    # paragraph cut finds none of the markers.
+    cut = re.sub(r"\*\*An edge is a history predicate.*?(?:\n\n|\Z)", "", section,
+                 flags=re.S)
+    assert cut != section, "the ruling paragraph was not found to cut"
+    assert _history_ruling_markers(cut) == [], _history_ruling_markers(cut)
