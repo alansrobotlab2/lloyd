@@ -4,9 +4,10 @@
 `web/node_modules` is absent, and until this item that was indistinguishable from
 a green run: the gate ran the file in a worktree with no `web/node_modules` and
 reported the skips with exit 0 (`pytest -q`'s own line), the suite-wide skip
-ceiling `PYTEST_MAX_SKIPPED = 40` is at 31-32 by ledger so a handful more skips are
-permanently inside budget (`gate.py:77-80`), and the partial-run branch applies no
-floor at all (`gate.py:1518-1529`), so a re-gate whose only changed test file is
+ceiling (`_skip_ceiling`, `max(PYTEST_MAX_SKIPPED, base_skips +
+PYTEST_SKIP_HEADROOM)`) leaves a handful more skips permanently inside budget, and
+the partial-run branch (`_tests_delta_only`) applies no floor at all, so a re-gate
+whose only changed test file is
 that one returns `ok=True` on "0 passed, N skipped".
 
 No pin count appears anywhere in this file, and that is deliberate: this module grew
@@ -128,8 +129,9 @@ def _run_pytest(root: Path, env: dict, *args: str) -> subprocess.CompletedProces
 def _scratch(tmp_path: Path, *, declared: bool) -> tuple[Path, dict]:
     """A throwaway root with the shipped trio copied in and NO `web/` directory, so
     the frontend is missing for the same reason the gate worktree's is missing: a
-    round that did not touch `web/` never had it symlinked (`gate.py:1226-1235`
-    returns `no frontend changed`, and only `rung_frontend` creates the link).
+    round that did not touch `web/` never had it symlinked (`rung_frontend` in
+    `scripts/automod/gate.py` returns `no frontend changed`, and only it creates the
+    link).
 
     The copy is the point. The shipped file already skips correctly; what is under
     test is the accounting around that skip, and the only honest way to ask whether
@@ -383,8 +385,8 @@ class _Item:
     def __init__(self, module_path: Path, name: str, fixtures: tuple[str, ...]):
         self.name = name
         self.fixturenames = fixtures
-        # The ledger matches pins by RESOLVED path (`dashboard_pins.py:100`), so this
-        # has to be the file the ledger was built with. A made-up path here would make
+        # The ledger matches pins by RESOLVED path (`PinLedger.pins`), so this has
+        # to be the file the ledger was built with. A made-up path here would make
         # `pins()` return [] and every count assertion below pass vacuously — a
         # denominator of zero is not a check (#1614).
         self.fspath = Path(module_path)
@@ -778,3 +780,42 @@ def test_a_stop_the_declaration_never_promised_stays_a_skip(tmp_path, monkeypatc
     assert dp.declared_covers(silent.reason) is True
     with pytest.raises(pytest.fail.Exception, match=dp.FINDING):
         silent.report(_session_of(silent, nodes))
+
+
+# ── #4536: the skip-blindness explanation cites gate.py by symbol, never by line ──
+
+#: The four files that carry the #1691 explanation of why the gate cannot see a
+#: suite-wide skip. Every numeric `gate.py:<n>` citation in them had rotted into
+#: unrelated code (the rung-table header, the banner parser, the flaky-reconfirm
+#: branch), so the explanation now names the constructs and this node keeps it so.
+_SKIP_PROSE_FILES = ("tests/dashboard_pins.py", "tests/test_dashboard_pin_accounting.py",
+                     "tests/test_gate_parallel_tests.py",
+                     "tests/test_dashboard_responsive.py")
+
+
+def test_skip_blindness_prose_names_gate_constructs_by_symbol():
+    import ast
+    import re
+
+    doc = ast.get_docstring(ast.parse((TESTS / "dashboard_pins.py").read_text()))
+    assert doc, "tests/dashboard_pins.py lost its module docstring"
+    flat = " ".join(doc.split())
+
+    # Clause 1: the budget is the constant AND the derived rail, not a stale figure.
+    assert "max(PYTEST_MAX_SKIPPED, base_skips + PYTEST_SKIP_HEADROOM)" in flat
+    for stale in ("31-32", "40 ceiling"):
+        assert stale not in flat, f"the docstring still quotes the stale figure {stale!r}"
+    # Clause 2: the three constructs are named by symbol.
+    for symbol in ("PYTEST_MAX_SKIPPED", "rung_frontend", "_tests_delta_only"):
+        assert symbol in flat, f"{symbol} is not named"
+    # Clause 4: all three reasons survive, so clause 3 is not met by deletion.
+    assert "SUITE total" in flat
+    assert re.search(r"_tests_delta_only`?\)? applies no floor", flat), (
+        "the partial-run reason no longer says the branch applies no floor")
+    assert re.search(r"review\.py.{0,60}a round ADDS", flat), (
+        "the review.py reason (only a skip a round ADDS is flagged) is gone")
+
+    # Clause 3: no numeric gate.py citation in any of the four files.
+    for rel in _SKIP_PROSE_FILES:
+        hit = re.search(r"gate[.]py:[0-9]", (REPO / rel).read_text())
+        assert hit is None, f"{rel} carries a numeric gate.py citation again: {hit!r}"

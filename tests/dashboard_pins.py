@@ -6,10 +6,13 @@ A test helper, not a test — the sibling of `board_presence.py`, so the same
 Why it exists. `tests/test_dashboard_responsive.py` skips all six of its geometry
 pins when `web/node_modules` has no vite, and `ssssss / 6 skipped / exit 0` is
 indistinguishable from a green run. The gate cannot see it either: its skip budget
-is a SUITE total (`scripts/automod/gate.py:77-80`, live runs at 31-32 of a 40
-ceiling), the partial-run branch (`gate.py:1518-1529`) applies no floor at all,
-and `scripts/automod/review.py:274` flags only a skip call a round ADDS, so the
-skip sites this file already had can never be blamed on a later round.
+is a SUITE total (`PYTEST_MAX_SKIPPED` in `scripts/automod/gate.py`, and the rail a
+live run is measured against is the derived `_skip_ceiling`,
+`max(PYTEST_MAX_SKIPPED, base_skips + PYTEST_SKIP_HEADROOM)`, so six more skips sit
+inside the headroom), the partial-run branch (`_tests_delta_only`) applies no floor
+at all, and `scripts/automod/review.py`'s `_HONESTY_PATTERNS` flags only a skip
+call a round ADDS, so the skip sites this file already had can never be blamed on
+a later round.
 
 What it does. It keeps a ledger of which pins actually measured something, and
 reports the ones that did not:
@@ -17,7 +20,7 @@ reports the ones that did not:
   * undeclared environment -> a NAMED FINDING on the terminal (`FINDING` below),
     counted from live state, exit code unchanged. A box with no `npm install`
     stays green, as it must: `node_modules` reaches a worktree only through
-    `rung_frontend` (`gate.py:1231-1235`) and is gitignored, so red would fail
+    `rung_frontend` (`scripts/automod/gate.py`) and is gitignored, so red would fail
     every non-frontend round for the reason the file skips in the first place.
   * declared environment   -> a FAILURE naming the pins. The gate sets
     `DECLARED_ENV` exactly where it made `node_modules` reachable, so declared is
@@ -258,7 +261,8 @@ def grade_once_then_twice(measure: Callable[[], object],
     flinches under xdist-8: the gate's own ledger records it among
     "failed only under parallel load and passed serially" (`promotions.jsonl`,
     rung `tests`, 2026-09-27T23:29:44Z), and until now that serial retry
-    (`gate.py:1443-1467`) was the only thing standing between this pin and a red
+    (`_reconfirm_candidate_failures` in `scripts/automod/gate.py`) was the only
+    thing standing between this pin and a red
     gate. Retrying inside the test makes the pin's own flake tolerance explicit
     while keeping the failure real: ONE disagreeing measurement is noise, a SECOND
     one is a layout defect, and the count never exceeds two.

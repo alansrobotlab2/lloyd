@@ -24,8 +24,9 @@ asserts a section-count floor before trusting a zero-overflow number.
 What a skip may NOT be, since #1691: silent. Six pins skipping on an absent vite
 printed `ssssss` and exited 0, which is the same report a green run gives — and
 the gate could not see it, because its skip budget is a suite total
-(`scripts/automod/gate.py:77-80`, live runs at 31-32 of 40) and the partial-run
-branch (`gate.py:1518-1529`) applies no floor at all. So the file now keeps a
+(`PYTEST_MAX_SKIPPED` and the derived `_skip_ceiling` rail in
+`scripts/automod/gate.py`) and the partial-run branch (`_tests_delta_only`)
+applies no floor at all. So the file now keeps a
 ledger (`tests/dashboard_pins.py`) of which pins actually measured something and
 reports the ones that did not: undeclared dependency -> exit 0 plus a named
 `DASHBOARD_PINS_NOT_EXECUTED` finding that the gate prints in its rung detail;
@@ -398,7 +399,7 @@ def desktop_track_verdict(measure) -> dp.ReMeasured:
     This pin is the one node in the suite the gate's ledger records as
     "failed only under parallel load and passed serially" (`promotions.jsonl`,
     rung `tests`, 2026-09-27T23:29:44Z): under xdist-8 it fails, and the gate's
-    serial retry (`gate.py:1443-1467`) turns that back into a pass without the
+    serial retry (`_reconfirm_candidate_failures`) turns that back into a pass without the
     pin ever saying so. Retrying here makes the tolerance explicit where the flake
     lives — ONE disagreeing measurement is load, a SECOND is a layout defect — and
     caps the cost at two page loads.
@@ -626,7 +627,7 @@ def test_a_page_that_will_not_load_is_credited_as_never_having_run(monkeypatch):
 # tests/test_dashboard_cold_render.py::test_one_cold_dashboard_cycle_beats_the_budget,
 # tests/test_dashboard_responsive.py::test_desktop_cards_keep_their_track_widths`
 # (`~/.local/state/lloyd-automod/promotions.jsonl`, rung `tests`, 2026-09-27T23:29:44Z).
-# The gate's serial re-run (`scripts/automod/gate.py:1443-1467`) turned that failure
+# The gate's serial re-run (`gate._reconfirm_candidate_failures`) turned that failure
 # into a pass without the pin ever saying anything, so a real regression could hide
 # behind the same retry. These nodes run with NO browser: they script `measure`, so
 # they pin the rule itself rather than a machine's load.

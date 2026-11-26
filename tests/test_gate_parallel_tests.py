@@ -528,9 +528,9 @@ def test_the_real_thing_end_to_end_when_xdist_is_installed(tmp_path, monkeypatch
 # state totals: `12757 passed, 1 xfailed, 31 skipped (8 workers)` (`~/.local/state/
 # lloyd-automod/promotions.jsonl`, rung `tests`, 2026-09-27T23:29:44Z) says nothing
 # about six geometry pins asserting nothing, because six skips sit inside a
-# `PYTEST_MAX_SKIPPED` ceiling of 40 that live runs already spend 31 of
-# (`gate.py:77-80`, suite totals). And the partial-run branch applies no floor at
-# all, so a re-gate over just the pin file returned `ok=True` on "0 passed, 6
+# suite-total rail (`_skip_ceiling`, `PYTEST_MAX_SKIPPED` or base + headroom).
+# And the partial-run branch (`_tests_delta_only`) applies no floor at all, so a
+# re-gate over just the pin file returned `ok=True` on "0 passed, 6
 # skipped". What is added below is the finding the file itself prints.
 
 #: A scripted instance of what `tests/dashboard_pins.py` prints, for the four nodes
@@ -629,7 +629,7 @@ def test_the_gate_scans_for_the_prefix_the_helper_actually_prints():
 def test_the_gate_declares_the_frontend_only_where_it_made_it_reachable(tmp_path, monkeypatch):
     """The declaration is a promise, so the gate sets it exactly where the gate itself
     put `web/node_modules` there — `rung_frontend` symlinks it for a round that touched
-    a `web/` path (`gate.py:1226-1235`) — and the check is the real `vite` BINARY, not
+    a `web/` path (and returns `no frontend changed` otherwise) — and the check is the real `vite` BINARY, not
     the directory, because a symlink whose target vanished promises nothing.
 
     Both directions are asserted. Loose is the failure #1691's triage ruled out: a
@@ -866,7 +866,7 @@ def test_the_declaration_the_gate_makes_is_the_one_the_pytest_child_acts_on(tmp_
 
     Stops at `_run_suite` rather than going on to `rung_tests`: a non-zero child is
     already the rung's red branch (`if r.returncode != 0: return self._tests_failed(...)`,
-    gate.py:1543), and `_tests_failed` would spend a second real run re-probing a base
+    in `rung_tests`), and `_tests_failed` would spend a second real run re-probing a base
     tree this scratch fixture does not have. The stub `vite` exits immediately, so the
     pins die at readiness — the same declared path, without needing a real frontend.
     """
