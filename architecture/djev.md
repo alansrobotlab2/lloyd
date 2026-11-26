@@ -1708,12 +1708,13 @@ every fourth layer full attention):
 sealed accuracy, against 31.5% for the 35B, so the repo's own tables favour the 35B and the independent board does not. Nothing here assumes either beats
 djev on Lloyd's traffic; the recall eval decides.
 
-- **Nothing of the candidate can run, and one file of it is still in the tree.** Its
+- **Nothing of the candidate can run, and no file of it is left in the tree.** Its
   supervisor unit and engine launcher came out on 2026-11-11 (#4029). Its installer,
-  `agent-services/setup/setup-decider.sh`, survived only because `agent-services/setup/`
-  is outside an automod round's writable set — nothing supervises `:8012` any more, so it
-  is a script with no program to prepare, and a rebuild that runs it would build a venv
-  for a service that does not exist. No checkpoint was ever installed on this box. The
+  `setup-decider.sh` in the setup directory, outlived them by two weeks only because no
+  round had claimed the one setup path #4037 admitted for its deletion; it was deleted on
+  2026-11-25 by the commit "#4457: agent-services/setup/setup-decider.sh is deleted, the
+  last tracked piece of the decider experiment". Nothing supervised `:8012` by then, so it
+  was a script with no program to prepare. No checkpoint was ever installed on this box. The
   bake-off below is the surviving record, alongside
   `eval/measurements/reasoningbank-2026-09-25.md` and
   `eval/measurements/retrieval-card-2026-09-25.md`.

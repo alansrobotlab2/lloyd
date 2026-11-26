@@ -1524,11 +1524,15 @@ def test_the_tts_grant_moves_exactly_one_tracked_agent_services_verdict(monkeypa
     # this round's legality check called with the entry shipped. `pre` still strips only
     # TTS_PATCH, so the before/after diff this node computes stays exactly one path: the
     # idle-worker entry is in both tuples.
+    # #4457 deleted `agent-services/setup/setup-decider.sh`, the file #4037's entry named:
+    # the entry stays in `ALLOWED_GLOBS` (withdrawing it was ruled out on #4457), but it now
+    # admits no TRACKED path, so it leaves this pin — `allowed_after` is a verdict over the
+    # index, and a name kept here for a file the index no longer holds would read as a grant
+    # that stopped binding.
     named_grants = {TTS_PATCH, "agent-services/livekit_worker.py",
                     QMD_TEMPLATE, VOICE_TIMELINE,
                     "agent-services/setup/install-services.sh",
                     "agent-services/scripts/qmd-watcher.sh",
-                    "agent-services/setup/setup-decider.sh",
                     "agent-services/README.md", IDLE_WORKER_GRANT}
     assert allowed_after == named_grants | set(expected_allowed_model_paths()), (
         f"the named grants over tracked agent-services paths are the {len(named_grants)} "
@@ -2174,7 +2178,9 @@ def tracked_setup_siblings() -> list[str]:
     below to mean anything. 33 files at this round's base — 35 tracked in the
     directory, minus #2779's installer and #4037's decider installer, both named in
     `SETUP_GRANTS` rather than absorbed here, and both accounted for by name in the
-    setup-tree assertion at the foot of the node below.
+    setup-tree assertion at the foot of the node below. Still 33 after #4457 deleted
+    the decider installer: 34 tracked, minus #2779's installer, the one grant left in
+    the index.
     """
     return sorted(p for p in tracked_agent_services_paths()
                   if p.startswith("agent-services/setup/") and p not in SETUP_GRANTS)
@@ -2226,15 +2232,27 @@ def test_the_installer_grant_admits_one_exact_path_and_nothing_else():
     assert spec.classify(SETUP_PROBE) == "unlisted", (
         "the seeded setup probe became writable, which is the exact harm a directory "
         "grant does and this grant must not")
-    corpus = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
+    # #4457 deleted #4037's decider installer, so of the two setup paths granted by name
+    # only #2779's installer is still in the index. The decider path is added to the corpus
+    # by name — admitted, no longer tracked — so the equality still asks the tuple about
+    # both grants, and the tracked half is asserted to be #2779's installer alone.
+    tracked = tracked_agent_services_paths()
+    assert SETUP_DECIDER not in tracked, (
+        f"{SETUP_DECIDER} is tracked again; #4457 deleted it, so a re-add is a new file "
+        f"under an old grant and needs its own round")
+    corpus = tracked + list(AGENT_SERVICES_GLOB_PROBES) + [SETUP_DECIDER]
     setup_allowed = sorted(p for p in corpus
                            if p.startswith("agent-services/setup/")
                            and spec.classify(p) == "allowed")
     assert setup_allowed == SETUP_GRANTS, (
-        f"the writable set inside the setup tree is {setup_allowed}, not the two files "
+        f"the writable set inside the setup tree is {setup_allowed}, not the two paths "
         f"#2779 and #4037 each named by path ({SETUP_GRANTS}). A third member is either "
         f"a directory grant or a verbatim one no rail here was told about; a missing one "
         f"is a grant that stopped binding")
+    assert [p for p in setup_allowed if p in tracked] == [INSTALL_SERVICES], (
+        f"the tracked writable set inside the setup tree is "
+        f"{[p for p in setup_allowed if p in tracked]}, not #2779's still-tracked installer "
+        f"alone — #4037's admitted path is no longer tracked since #4457")
     unlisted = [p for p in tracked_agent_services_paths()
                 if spec.classify(p) == "unlisted"]
     assert len(unlisted) >= 70, (
@@ -4459,9 +4477,12 @@ def test_the_decider_installer_grant_admits_one_exact_path_and_nothing_else():
     assert spec.requires_drill([SETUP_DECIDER]) is False, (
         "the installer landed in PROTECTED_GLOBS, so #4029's deletion round would pay a "
         "guardian drill to remove a file no supervisor owns any more")
-    assert SETUP_DECIDER in tracked_agent_services_paths(), (
-        f"{SETUP_DECIDER} is not tracked, so admitting it grants nothing a `git rm` can "
-        f"actually do — the grant would be a permission over a path no diff can carry")
+    # Granted though no longer tracked: #4457 was the follow-on round this grant existed
+    # for, and its `git rm` is why the path left the index. The entry is kept on #4457's
+    # ruling (withdrawing it costs protected `spec.py` for no measured gain).
+    assert SETUP_DECIDER not in tracked_agent_services_paths(), (
+        f"{SETUP_DECIDER} is tracked again; #4457 deleted it, so a re-add is a new file "
+        f"under an old grant and needs its own round")
     reaching = [g for g in spec.ALLOWED_GLOBS if spec._match(SETUP_DECIDER, (g,))]
     assert reaching == [SETUP_DECIDER], (
         f"the installer is admitted by {reaching}: only a verbatim entry is legal under "
@@ -4486,11 +4507,17 @@ def test_the_decider_installer_grant_admits_one_exact_path_and_nothing_else():
     assert spec.classify(SETUP_PROBE) == "unlisted", (
         "the seeded setup probe became writable, which is the harm a directory grant does "
         "and this one must not")
-    corpus = tracked_agent_services_paths() + list(AGENT_SERVICES_GLOB_PROBES)
-    assert sorted(p for p in corpus
-                  if p.startswith("agent-services/setup/")
-                  and spec.classify(p) == "allowed") == SETUP_GRANTS, (
-        "the writable set inside the setup tree is not the two files granted by name")
+    # The setup writable set is #2779's still-tracked installer plus the one admitted path
+    # that #4457 took out of the index, which is added to the corpus by name.
+    tracked = tracked_agent_services_paths()
+    corpus = tracked + list(AGENT_SERVICES_GLOB_PROBES) + [SETUP_DECIDER]
+    setup_allowed = sorted(p for p in corpus
+                           if p.startswith("agent-services/setup/")
+                           and spec.classify(p) == "allowed")
+    assert setup_allowed == SETUP_GRANTS, (
+        "the writable set inside the setup tree is not the two paths granted by name")
+    assert [p for p in setup_allowed if p in tracked] == [INSTALL_SERVICES], (
+        "the tracked writable set inside the setup tree is not #2779's installer alone")
 
 
 def test_the_grant_adds_one_entry_and_edits_no_other():
@@ -4577,7 +4604,11 @@ def test_the_decider_grant_moves_exactly_one_classification(monkeypatch):
     the rail is a floor of 70, not an equality, so what is pinned here is the delta and the
     floor rather than a tree count that moves whenever a launcher is added.
     """
-    corpus = tracked_agent_services_paths()
+    # Since #4457 the granted path is no longer in the index, so it is added by name: the
+    # delta is still asked of it, and the tracked corpus is asked whether anything else moved.
+    tracked = tracked_agent_services_paths()
+    assert SETUP_DECIDER not in tracked
+    corpus = tracked + [SETUP_DECIDER]
     pre = tuple(g for g in ALLOWED_GLOBS_AS_SHIPPED if g != SETUP_DECIDER)
     assert len(pre) == len(ALLOWED_GLOBS_AS_SHIPPED) - 1, (
         "the pre-grant reconstruction is not one entry narrower, so the delta this node "
@@ -4591,14 +4622,16 @@ def test_the_decider_grant_moves_exactly_one_classification(monkeypatch):
         f"{len(moved)} tracked agent-services paths changed verdict with this one entry: "
         f"{moved[:8]}{' …' if len(moved) > 8 else ''}")
     assert (before[SETUP_DECIDER], after[SETUP_DECIDER]) == ("unlisted", "allowed")
-    before_unlisted = sum(1 for v in before.values() if v == "unlisted")
-    after_unlisted = sum(1 for v in after.values() if v == "unlisted")
-    assert after_unlisted == before_unlisted - 1, (
-        f"{before_unlisted} unlisted before this entry and {after_unlisted} after: one "
-        f"named path was supposed to move, and the rest of the tree is supposed to hold")
+    before_unlisted = sum(1 for p in tracked if before[p] == "unlisted")
+    after_unlisted = sum(1 for p in tracked if after[p] == "unlisted")
+    assert after_unlisted == before_unlisted, (
+        f"{before_unlisted} tracked paths unlisted before this entry and {after_unlisted} "
+        f"after: the one path the entry names is no longer tracked (#4457), so no tracked "
+        f"path was supposed to move")
     assert after_unlisted >= 70, (
         f"{after_unlisted} tracked agent-services paths still unlisted, below the 70 the "
-        f"#1376 rail is sized on (79 at this round's base, 78 with this entry)")
+        f"#1376 rail is sized on (79 at #4037's base, 78 with this entry; 76 at #4457, the "
+        f"later #4156 and #4532 grants taking one each and the deletion none)")
 
 
 def test_a_setup_directory_grant_would_admit_every_sibling(monkeypatch):
@@ -4621,10 +4654,10 @@ def test_a_setup_directory_grant_would_admit_every_sibling(monkeypatch):
         {p for p in tracked_agent_services_paths()
          if p.startswith("agent-services/setup/") and p != INSTALL_SERVICES}
         | {SETUP_PROBE})
-    assert len(expected) >= 35, (
-        f"only {len(expected)} paths would be admitted unnamed, against the 35 (34 tracked "
-        f"siblings plus the probe) measured at this round's base — the assertion below is "
-        f"guarding almost nothing")
+    assert len(expected) >= 34, (
+        f"only {len(expected)} paths would be admitted unnamed, against the 34 (33 tracked "
+        f"siblings plus the probe) left after #4457 deleted the decider installer — 35 at "
+        f"#4037's base — so the assertion below is guarding almost nothing")
     violations = agent_services_paths_admitted_without_being_named()
     assert violations == expected, (
         f"the directory spelling admits {len(violations)} unnamed paths; expected "
@@ -4752,17 +4785,17 @@ def test_no_code_left_in_the_tree_points_at_the_installer():
     the architecture note names it in prose until the tense is corrected after the deletion
     (a human clause, already logged on #4029), and the two files that hold this grant name it
     by holding the entry. The installer is absent from the list and that absence is asserted
-    rather than assumed — its own body never spells its filename, which is precisely why the
+    rather than assumed — its own body never spelt its filename, which is precisely why the
     item's own "who references this file" grep came back wrong, and why the caller check has
-    to ask git and not a reading of the script.
+    to ask git and not a reading of the script. #4457 deleted the installer, so the index
+    now holds no decider path at all and the census is the `git grep` alone.
     """
     tracked = subprocess.run(["git", "ls-files"], cwd=REPO_ROOT,
                              capture_output=True, text=True, timeout=120).stdout.split()
     deciders = sorted(p for p in tracked if "decider" in p.lower())
-    assert deciders == [SETUP_DECIDER], (
-        f"{deciders} are tracked under any decider name; the expectation is the installer "
-        f"alone, because #4029's landing took the launcher and the unit and this section "
-        f"grants only the leftover")
+    assert deciders == [], (
+        f"{deciders} are tracked under a decider name; #4029's landing took the launcher "
+        f"and the unit and #4457 deleted the installer, so nothing of the experiment is left")
     out = subprocess.run(["git", "grep", "-l", "setup-decider", "--", "."],
                          cwd=REPO_ROOT, capture_output=True, text=True, timeout=120)
     assert out.returncode in (0, 1), out.stderr  # 1 is git's honest "no matches"
@@ -4770,12 +4803,7 @@ def test_no_code_left_in_the_tree_points_at_the_installer():
     assert named == sorted(NAMING_THE_INSTALLER), (
         f"{named} name the installer; expected the architecture note and the two files "
         f"that carry this grant. A shell script or a supervisor conf in that list is a "
-        f"caller, and a caller makes the deletion a behaviour change rather than a cleanup")
-    body = (REPO_ROOT / SETUP_DECIDER).read_text()
-    assert "setup-decider" not in body, (
-        "the installer now spells its own filename, so the caller check above stopped "
-        "being a full census of who names this path and would silently count this file as "
-        "a caller if it were removed from the exemption list")
+        f"caller, and with the installer deleted (#4457) a caller points at a missing file")
 
 
 # --------------------------------------------------------------------------
@@ -4876,11 +4904,11 @@ def test_the_readme_grant_moves_exactly_one_classification():
     tracked = tracked_agent_services_paths()
     # A floor, not `== 226`: the corpus is the index, and an unrelated commit that adds a
     # launcher would otherwise turn this node red for a fact it is not about. 226 is what
-    # #4156 measured, and it is still the floor.
-    assert len(tracked) >= 226, (
-        f"{len(tracked)} tracked paths under agent-services/, below the 226 measured at "
-        f"#4156's base: the index lost files, so re-measure the corpus before quoting the "
-        f"77/78 that the #1376 rail is sized against")
+    # #4156 measured; 225 since #4457 deleted the decider installer, a known removal.
+    assert len(tracked) >= 225, (
+        f"{len(tracked)} tracked paths under agent-services/, below the 225 left after "
+        f"#4457 (226 at #4156's base): the index lost files, so re-measure the corpus before "
+        f"quoting the 77/78 that the #1376 rail is sized against")
     changed = {p: (before.classify(p), spec.classify(p)) for p in tracked + README_GRANT_SIBLINGS
                if before.classify(p) != spec.classify(p)}
     assert changed == {README_GRANT: ("unlisted", "allowed")}, (
@@ -5271,3 +5299,23 @@ def test_the_idle_worker_grant_adds_one_entry_and_edits_no_existing_one():
     complaints = _grant_tuple_drift(was, now)
     assert not complaints, "; ".join(complaints)
 
+
+def test_the_djev_note_records_the_installer_deletion_in_the_past_tense():
+    """#4457 clause 5: the architecture note's installer bullet is history, not a claim.
+
+    The bullet used to say the installer was "still in the tree" because
+    `agent-services/setup/` "is outside an automod round's writable set" — the second half
+    false since #4037's grant, the first since #4457's deletion. Read by the bullet's own
+    lead so a reworded neighbour cannot satisfy it.
+    """
+    text = (REPO_ROOT / "architecture/djev.md").read_text()
+    lead = "- **Nothing of the candidate can run"
+    assert text.count(lead) == 1, f"{lead!r} appears {text.count(lead)} times in djev.md"
+    start = text.index(lead)
+    end = text.find("\n- **", start + 1)
+    bullet = " ".join(text[start:end if end != -1 else None].split())
+    assert "#4457" in bullet and "was deleted on 2026-11-25" in bullet, (
+        f"the installer bullet does not name the deletion commit in the past tense: {bullet}")
+    for stale in ("still in the tree", "is outside an automod round's writable set",
+                  "nothing supervises", "it is a script"):
+        assert stale not in bullet, f"present-tense claim {stale!r} left in: {bullet}"
