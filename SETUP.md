@@ -797,9 +797,9 @@ whole collections — so check the nightly `config_drift` entry in
 `~/lloyd-data/_pipeline/reflection/qmd-index-maintenance-<date>.json` first, and re-sync the
 other way (below) if it reports a difference.
 
-It defines **15 collections**, every one of which is live: 12 rooted under
+It defines **16 collections**, every one of which is live: 13 rooted under
 `~/obsidian` (`memory`, `knowledge`, `projects`, `lloyd`, `personal`, `work`,
-`skills`, `people`, `subliminal`, `backlog`, `autonomy`, `architecture`), one
+`skills`, `people`, `subliminal`, `backlog`, `autonomy`, `architecture`, `plans`), one
 rooted in this checkout, and two that point into the data root (`~/lloyd-data`,
 [data-home](architecture/data-home.md)) —
 

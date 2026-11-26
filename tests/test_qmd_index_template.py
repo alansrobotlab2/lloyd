@@ -161,7 +161,7 @@ def test_the_patched_setup_md_stops_calling_sessions_empty(tmp_path):
     assert SESSIONS_PATH in _documented_paths(section, colls)
     assert "`facts` and `sessions` — are **empty**" not in section
     # The pre-#1652 "15 collections" counted `facts`; the count now has to be the
-    # template's own (15 again since lloyd-architecture, 2026-11-10).
+    # template's own (15 since lloyd-architecture 2026-11-10, 16 since plans 2026-11-26).
     assert f"**{len(colls)} collections**" in section, len(colls)
 
 
@@ -175,7 +175,7 @@ def test_the_patched_setup_md_keeps_the_command_the_drift_check_prints(tmp_path)
 def test_the_dropped_facts_collection_stays_dropped(tmp_path):
     tmpl, setup = _patched(tmp_path)
     colls = yaml.safe_load(tmpl.read_text())["collections"]
-    assert DROPPED not in colls and len(colls) == 15, sorted(colls)  # +lloyd-architecture 2026-11-10
+    assert DROPPED not in colls and len(colls) == 16, sorted(colls)  # +lloyd-architecture 2026-11-10, +plans 2026-11-26
     assert "/home/alansrobotlab/obsidian/facts" not in tmpl.read_text()
     section = _collections_section(setup.read_text())
     assert "still lists `facts`" not in section and "open in #1298" not in section
@@ -471,6 +471,7 @@ EXPECTED_PATTERNS = {
     # 2026-11-10: the checkout's own architecture docs, top level only (no subdirs
     # hold docs there). eval/measurements/architecture-collection-2026-11-10.md.
     "lloyd-architecture": "*.md",
+    "plans": "**/*.md",  # 2026-11-26, #4276
 }
 
 #: What the `subliminal:` comment block has to carry for the clause to be worth
@@ -608,7 +609,7 @@ def test_the_narrow_is_block_scoped_and_the_documented_resync_would_break_it():
         "of it — #2311's rule, and the first thing the daemon's file does not have")
 
     colls = yaml.safe_load(text)["collections"]
-    assert len(colls) == 15, sorted(colls)  # +lloyd-architecture 2026-11-10
+    assert len(colls) == 16, sorted(colls)  # +lloyd-architecture 2026-11-10, +plans 2026-11-26
 
 
 # --- #3160: every collection the memory route names is one this file declares --
@@ -636,7 +637,7 @@ def test_the_narrow_is_block_scoped_and_the_documented_resync_would_break_it():
 #: pending it is absent from both copies, and the re-sync commit that brings it here
 #: empties this set: `test_a_pending_collection_is_absent_from_this_copy_too` going red
 #: is what says so, the same friction `EXPECTED_PATTERNS` holds for every pattern.
-AWAITING_INDEX = {"plans"}
+AWAITING_INDEX: set = set()  # plans indexed and re-synced 2026-11-26 (#4276)
 
 
 def test_a_pending_collection_is_absent_from_this_copy_too():

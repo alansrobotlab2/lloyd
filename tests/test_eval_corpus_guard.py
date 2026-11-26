@@ -2521,10 +2521,10 @@ def test_a_label_that_resolves_but_no_deployed_collection_covers_it_is_unsearcha
 #: if either label becomes returnable, so a tolerance cannot quietly outlive the hole
 #: it tolerates. Each entry costs its query a permanent 0.00 on the document leg: 2 of
 #: 81 denominators, 0.017 of `doc_hit_rate` on 2026-11-25.
-GOLD_LABELS_AWAITING_A_COLLECTION = frozenset({
-    ("collection-overlap-rung-handoff", "plans/handoff-2180-collection-overlap.md"),
-    ("browser-upload-files-spec", "plans/browser-upload-files.md"),
-})
+#: EMPTIED 2026-11-26: #4276 indexed `plans/` (9 documents, `qmd update && qmd embed`
+#: under regression.lock), both labels are returnable, and the set shrank to nothing
+#: exactly as the rule above requires. A new entry needs a new ruling, not this slot.
+GOLD_LABELS_AWAITING_A_COLLECTION: frozenset = frozenset()
 
 
 def test_the_committed_corpus_reports_three_states_with_no_dead_label(tmp_path):
@@ -3381,7 +3381,7 @@ COLLECTIONS_INDEXED_BUT_NOT_RECALLED = {"autonomy-runs", "sessions", "subliminal
 #: asserts the intersection is empty rather than trusting the comment. When the owed
 #: live step lands `plans`, this set goes empty in the same change that edits
 #: `agent-services/conf/qmd-index.yml`.
-RECALLED_BUT_NOT_YET_INDEXED = {"plans"}
+RECALLED_BUT_NOT_YET_INDEXED: set = set()  # plans indexed 2026-11-26 (#4276)
 
 
 def _vault_segments_literal() -> set:
@@ -3594,8 +3594,8 @@ def test_the_3076_side_index_ab_artifacts_record_what_the_note_claims():
     live = yaml.safe_load(TRIAL_LIVE_YML.read_text())
     # The trial ran before 2026-11-10's deploy; the live set it snapshotted is today's
     # minus the one collection that deploy added.
-    live_at_trial = {k: v for k, v in live["collections"].items()
-                     if k != "lloyd-architecture"}
+    live_at_trial = {k: v for k, v in live["collections"].items()  # +plans 2026-11-26
+                     if k not in ("lloyd-architecture", "plans")}
     ctrl_conf = yaml.safe_load((conf_dir / "control.yml").read_text())
     arm_conf = yaml.safe_load((conf_dir / "arm.yml").read_text())
     assert len(ctrl_conf["collections"]) == len(live_at_trial), (
