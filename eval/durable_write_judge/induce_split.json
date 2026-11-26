@@ -1,0 +1,90 @@
+{
+  "item": "#4093",
+  "rule": "seq parity: odd seq -> train (induction input); even seq -> held_out (judged)",
+  "corpus_sha256": "70f0d16767e0a994b3f658a0236a717a515850e4542a2431930ae16efa16942c",
+  "n": 50,
+  "train_feeds": "the one induction pass",
+  "held_out_feeds": "Judges A, B and C, scored at equal n",
+  "train_ids": [
+    "bad-001",
+    "bad-003",
+    "bad-005",
+    "bad-007",
+    "bad-009",
+    "bad-011",
+    "bad-013",
+    "bad-015",
+    "bad-017",
+    "bad-019",
+    "good-001",
+    "good-003",
+    "good-005",
+    "good-007",
+    "good-009",
+    "good-011",
+    "good-013",
+    "good-015",
+    "good-017",
+    "good-019",
+    "good-021",
+    "good-023",
+    "good-025",
+    "good-027",
+    "good-029"
+  ],
+  "held_out_ids": [
+    "bad-002",
+    "bad-004",
+    "bad-006",
+    "bad-008",
+    "bad-010",
+    "bad-012",
+    "bad-014",
+    "bad-016",
+    "bad-018",
+    "bad-020",
+    "good-002",
+    "good-004",
+    "good-006",
+    "good-008",
+    "good-010",
+    "good-012",
+    "good-014",
+    "good-016",
+    "good-018",
+    "good-020",
+    "good-022",
+    "good-024",
+    "good-026",
+    "good-028",
+    "good-030"
+  ],
+  "train_census": {
+    "bad": 10,
+    "good": 15,
+    "classes": {
+      "false_cutoff_claim": 1,
+      "invented_url": 8,
+      "missing_section": 2,
+      "omitted_numerical_data": 2,
+      "wrong_metadata": 2
+    },
+    "surfaces": [
+      "digest_note"
+    ]
+  },
+  "held_out_census": {
+    "bad": 10,
+    "good": 15,
+    "classes": {
+      "false_cutoff_claim": 1,
+      "invented_url": 5,
+      "missing_section": 2,
+      "omitted_numerical_data": 2,
+      "wrong_metadata": 2
+    },
+    "surfaces": [
+      "digest_note"
+    ]
+  }
+}

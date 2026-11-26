@@ -49,6 +49,8 @@ person's call.
 | `score.py` | Recall-on-bad, false-positive-rate, silent-pass rate, per-class recall, selection quality, moved cases → `report.md`. |
 | `judge_raw_{a,b}.jsonl` | Every call's raw verdict and the example ids shown, so a person can re-derive both metrics from the shipped artifacts. |
 | `report.md` | The result, the caveats, and the stop-rule verdict. |
+| `induce_rubric.py` | #4093: the recorded split (`induce_split.json`) and the one induction pass that writes `induced_rubric.md` from the training half; also the rubric parser/validator and the leakage check. |
+| `induce_split.json` | #4093: every corpus id in a training half (induction input) or a held-out half (the only samples Judges A, B and C are scored on), by `seq` parity. |
 
 ## Why the labels live in the diff, not the commit
 
@@ -124,6 +126,37 @@ proves against the shipped corpus. Every number `report.md` states is re-derived
 too: `test_shipped_artifacts_exist_and_their_counts_are_the_ones_reported`
 asserts that file equals `score.render()` over the shipped corpus and both raw
 files, byte for byte, so no figure in it is hand-written.
+
+## Induced-rubric arm (#4093)
+
+PMR's rubric induction (arXiv:2611.14017) on this harness — not its GRPO credit
+assignment, which needs weights this box does not train. One reflection pass over
+the **training** half writes at most eight criteria, each "When editing <surface>,
+distinguish A from B", each citing a training id; Judge C is Judge A with only that
+rubric span swapped (same ROLE/EXAMPLES_OPEN splice, same seeded five, temperature 0).
+The split is `seq` parity, not `repair_date` (17 of 20 bad rows share one date):
+10 bad + 15 good per half, every class on both sides. All three arms are re-run on the
+held-out 25 on ONE engine — the secondary is off, so that is the primary — because
+the shipped `judge_raw_{a,b}.jsonl` were judged by a different model. The run, in order
+(pause the worker pool first; 76 calls on `:8096`):
+
+```bash
+cd ~/lloyd
+PY=.venvs/lloyd/bin/python
+URL=http://127.0.0.1:8096/v1/chat/completions; M=Qwen3.8-Flash-Next-nvfp4
+D=eval/durable_write_judge
+$PY $D/induce_rubric.py --url $URL --model $M          # 1 call -> induce_raw.json, induced_rubric.md
+$PY $D/judge.py --judge abc --held-out $D/induce_split.json --rubric $D/induced_rubric.md \
+    --url $URL --model $M --out-dir $D/heldout          # 75 calls (25 x A, B, C)
+$PY $D/score.py --raw-a $D/heldout/judge_raw_a.jsonl --raw-b $D/heldout/judge_raw_b.jsonl \
+    --raw-c $D/heldout/judge_raw_c.jsonl                # -> report_induced.md (report.md untouched)
+```
+
+Without `--raw-c`, `score.py` never reads a Judge C file and `report.md` stays byte
+for byte. `report_induced.md` prints served model per arm, exact counts beside every
+percentage, per-class recall with zeros, the per-criterion leakage check, and one
+finding line on whether any criterion falls outside the five classes; one flagged
+criterion withholds the margin. One pass, no re-tuning (the item's step 6).
 
 ## Known limits, stated before the number
 

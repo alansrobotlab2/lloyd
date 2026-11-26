@@ -11,6 +11,11 @@ labels, never from the judge's answer).
 
     python eval/durable_write_judge/score.py --corpus corpus.jsonl \
         --raw-a judge_raw_a.jsonl --raw-b judge_raw_b.jsonl --out report.md
+
+``--raw-c`` (#4093) switches to the THREE-arm report over the held-out half of
+``induce_split.json``, written to ``--out-three`` (default ``report_induced.md``);
+``report.md`` is then not written. Without ``--raw-c`` nothing reads a Judge C file,
+so the default output stays the committed ``report.md`` byte for byte.
 """
 from __future__ import annotations
 
@@ -19,10 +24,10 @@ import json
 from pathlib import Path
 
 try:  # imported as eval.durable_write_judge.score
-    from .build_corpus import class_counts
+    from .build_corpus import DEFECT_CLASSES, class_counts
     from .retrieve import same_class_retrieved, top_k, build_index
 except ImportError:  # run as a script from this directory
-    from build_corpus import class_counts
+    from build_corpus import DEFECT_CLASSES, class_counts
     from retrieve import same_class_retrieved, top_k, build_index
 
 JUDGE_NAMES = {"a": "Judge A (static rubric, 5 random labelled examples)",
@@ -391,6 +396,165 @@ def render(samples: list[dict], raw_paths: dict[str, Path]) -> str:
     return "\n".join(lines)
 
 
+# --- #4093: the three-arm report over the held-out half -----------------------------
+
+THREE_ARM_NAMES = {"a": "Judge A (hand-authored rubric, 5 random labelled examples)",
+                   "b": "Judge B (hand-authored rubric, 5 nearest-retrieved examples, k=5)",
+                   "c": "Judge C (induced rubric, Judge A's 5 random labelled examples)"}
+
+#: The finding line's two forms; one of them is always printed (#4093 clause 5).
+FINDING_NOVEL = "FINDING: {n} induced criterion(s) not expressible as any of the five corpus classes: {which}"
+FINDING_NONE = "FINDING: no induced criterion falls outside the five corpus classes"
+UNINTERPRETABLE = ("UNINTERPRETABLE: {n} criterion(s) failed the leakage check, so no margin "
+                   "is reported")
+
+
+def _count_pct(n: int, d: int) -> str:
+    return f"{round(100.0 * n / d, 1)} ({n}/{d})" if d else "n/a (0/0)"
+
+
+def _served(rows: list[dict]) -> str:
+    names = sorted({str(r.get("served_model") or r.get("model") or "unrecorded")
+                    for r in rows if r.get("verdict") not in ("dry_run",)})
+    return ", ".join(names) or "unrecorded"
+
+
+def render_three_arm(samples: list[dict], raw_paths: dict[str, Path], split: dict,
+                     rubric: dict) -> str:
+    """A, B and C on the IDENTICAL held-out subset, at equal n, with the leakage check.
+
+    Rows a raw file carries for a training id are ignored and counted: the held-out
+    half is the only population any arm is scored on. Missing held-out rows are
+    `unjudged`, never accepts, exactly as in `metrics`.
+    """
+    try:
+        from .induce_rubric import leakage_check
+    except ImportError:
+        from induce_rubric import leakage_check
+
+    held = set(split["held_out_ids"])
+    sub = [s for s in samples if s["id"] in held]
+    raws = {k: load_jsonl(v) for k, v in raw_paths.items()}
+    vs = {k: {r["sample_id"]: r.get("verdict", "missing") for r in rows
+              if r["sample_id"] in held} for k, rows in raws.items()}
+    outside = {k: sum(1 for r in rows if r["sample_id"] not in held)
+               for k, rows in raws.items()}
+    ms = {k: metrics(sub, vs[k]) for k in sorted(vs)}
+    n_bad = sum(1 for s in sub if s["label"] == "bad")
+    n_good = len(sub) - n_bad
+    engines = {k: _served(raws[k]) for k in sorted(raws)}
+    leak = leakage_check(rubric["criteria"], samples, split)
+    flagged = [x for x in leak if x["flagged"]]
+
+    lines = [
+        "# Durable-write judge: the induced-rubric arm — backlog #4093",
+        "",
+        "**Status: offline experiment, one induction pass and one judging pass per arm. "
+        "Nothing in the live write path reads a judge score.** This is PMR's rubric "
+        "induction only (arXiv:2611.14017); its GRPO credit assignment is not reproduced.",
+        "",
+        "## Split and engines",
+        "",
+        f"- split: `induce_split.json` — {split['rule']}",
+        f"- held-out subset every arm is scored on: **{len(sub)}** samples "
+        f"({n_bad} bad / {n_good} good); training half: {len(split['train_ids'])} "
+        "(induction input only)",
+    ]
+    for k in sorted(raws):
+        lines.append(f"- {THREE_ARM_NAMES[k]}: served model `{engines[k]}`; "
+                     f"{len(vs[k])} held-out rows read, {outside[k]} training-half rows ignored")
+    mixed = len(set(engines.values())) > 1
+    if mixed:
+        lines.append("- **MIXED ENGINES: the arms were not judged by one model, so no "
+                     "difference below is attributable to the rubric.**")
+    lines += [
+        "",
+        "## Results (held-out subset, equal n)",
+        "",
+        "Exact counts beside every percentage: with ~10 held-out bad samples one sample "
+        "is ~10 points.",
+        "",
+        "| judge | judged bad/good | recall-on-bad % (tp/judged bad) | "
+        "false-positive-rate % (fp/judged good) | silent-pass % (fn/accepted) |",
+        "|---|---|---|---|---|",
+    ]
+    for k in sorted(ms):
+        m = ms[k]
+        lines.append(
+            f"| {THREE_ARM_NAMES[k]} | {m['judged_bad']}/{m['judged_good']} "
+            f"(unjudged {m['unjudged']}) | **{_count_pct(m['tp'], m['judged_bad'])}** | "
+            f"{_count_pct(m['fp'], m['judged_good'])} | "
+            f"{_count_pct(m['fn'], m['accepted'])} UNRATIFIED-DENOMINATOR |")
+    lines += ["",
+              "silent-pass is printed UNRATIFIED-DENOMINATOR: its denominator holds the "
+              "`good` labels refused as gold, so recall-on-bad is the only quotable "
+              "headline.", ""]
+
+    lines += ["## Per-class recall (held-out; every class, including 0)", "",
+              "| defect class | n bad held out | " + " | ".join(
+                  f"{k.upper()} caught/judged (recall %)" for k in sorted(ms)) + " |",
+              "|---|---|" + "---|" * len(ms)]
+    names = sorted(set(DEFECT_CLASSES) | set(class_counts(samples)))
+    per = {k: {c["class"]: c for c in per_class_recall(sub, vs[k])} for k in sorted(ms)}
+    for name in names:
+        n = sum(1 for s in sub if s["label"] == "bad" and name in (s.get("defect_classes") or []))
+        cells = []
+        for k in sorted(ms):
+            c = per[k].get(name) or {"caught": 0, "n_judged": 0}
+            cells.append(f"{c['caught']}/{c['n_judged']} "
+                         f"({round(100.0 * c['caught'] / c['n_judged'], 1) if c['n_judged'] else 'n/a'})")
+        lines.append(f"| `{name}` | {n} | " + " | ".join(cells) + " |")
+    lines.append("")
+
+    lines += ["## Leakage check (per induced criterion)", "",
+              "`training hits`: a training-half defect word (class label, short evidence "
+              "string) or 8-word sample/evidence run appearing verbatim. `held-out hits`: a "
+              "held-out id, defect word or 8-word run the training half does not contain — "
+              "i.e. the criterion could have been written from the held-out labels. Either "
+              "flags the criterion.", "",
+              "| # | criterion | training hits | held-out hits | flagged |",
+              "|---|---|---|---|---|"]
+    for x in leak:
+        lines.append(f"| {x['n']} | {x['text']} | {'; '.join(x['train_hits']) or '-'} | "
+                     f"{'; '.join(x['held_out_hits']) or '-'} | "
+                     f"{'**yes**' if x['flagged'] else 'no'} |")
+    lines.append("")
+
+    novel = [i for i, c in enumerate(rubric["criteria"], 1)
+             if (c.get("maps_to") or "none") == "none"]
+    lines += ["## Class coverage", "",
+              (FINDING_NOVEL.format(n=len(novel), which=", ".join(f"#{i}" for i in novel))
+               if novel else FINDING_NONE),
+              "",
+              "`maps_to` is the induction pass's own reading of each criterion; read the "
+              "criteria verbatim in `induced_rubric.md` before quoting this line.", ""]
+
+    lines += ["## Success margin and stop rule", ""]
+    if flagged:
+        lines.append(UNINTERPRETABLE.format(n=len(flagged)))
+    elif mixed:
+        lines.append("UNINTERPRETABLE: mixed engines across arms, so no margin is reported")
+    elif "a" in ms and "c" in ms:
+        ra, rc = ms["a"]["recall_on_bad"], ms["c"]["recall_on_bad"]
+        fa, fc = ms["a"]["false_positive_rate"], ms["c"]["false_positive_rate"]
+        margin = None if ra is None or rc is None else round(rc - ra, 1)
+        held_fpr = fa is not None and fc is not None and fc <= fa
+        met = margin is not None and margin >= SUCCESS_RECALL_MARGIN and held_fpr
+        lines.append(
+            f"Judge C vs Judge A on the held-out subset: recall-on-bad "
+            f"{_count_pct(ms['c']['tp'], ms['c']['judged_bad'])} vs "
+            f"{_count_pct(ms['a']['tp'], ms['a']['judged_bad'])} = **{margin} points**, "
+            f"FPR {fc} vs {fa} ({'not worse' if held_fpr else 'WORSE'}). "
+            f"Bar (>= +{SUCCESS_RECALL_MARGIN} points at <= A's FPR): "
+            f"**{'met' if met else 'NOT met'}**.")
+    lines += ["",
+              "Stop rule (#4093 step 6): one induction pass, no re-tuning, no second pass. "
+              "A margin is quoted only after Judge C's reasons are checked against each "
+              "sample's `correction_evidence` — #580 found judges right for the wrong URL.",
+              ""]
+    return "\n".join(lines)
+
+
 def main(argv: list[str] | None = None) -> int:
     here = Path(__file__).parent
     ap = argparse.ArgumentParser(description=__doc__)
@@ -398,9 +562,34 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--raw-a", default=str(here / "judge_raw_a.jsonl"))
     ap.add_argument("--raw-b", default=str(here / "judge_raw_b.jsonl"))
     ap.add_argument("--out", default=str(here / "report.md"))
+    # #4093. No default for --raw-c, on purpose: a `judge_raw_c.jsonl` sitting in this
+    # directory must not join the committed two-arm report the moment it exists.
+    ap.add_argument("--raw-c", default=None,
+                    help="Judge C's raws; switches to the three-arm held-out report")
+    ap.add_argument("--split", default=str(here / "induce_split.json"))
+    ap.add_argument("--rubric", default=str(here / "induced_rubric.md"))
+    ap.add_argument("--out-three", default=str(here / "report_induced.md"))
     args = ap.parse_args(argv)
 
     samples = load_jsonl(Path(args.corpus))
+    if args.raw_c is not None:
+        try:
+            from .induce_rubric import load_rubric, load_split
+        except ImportError:
+            from induce_rubric import load_rubric, load_split
+        split = load_split(Path(args.split))
+        raws3 = {"a": Path(args.raw_a), "b": Path(args.raw_b), "c": Path(args.raw_c)}
+        missing = [str(p) for p in raws3.values() if not p.exists()]
+        if missing:
+            raise SystemExit(f"the three-arm report needs all three raws: missing {missing}")
+        report3 = render_three_arm(samples, raws3, split,
+                                   load_rubric(Path(args.rubric), split))
+        Path(args.out_three).write_text(report3)
+        for ln in report3.splitlines():
+            if ln.startswith(("| Judge", "FINDING", "UNINTERPRETABLE", "Judge C vs")):
+                print(ln)
+        print(f"wrote {args.out_three}")
+        return 0
     raws = {}
     for name, path in (("a", args.raw_a), ("b", args.raw_b)):
         if Path(path).exists():

@@ -808,3 +808,286 @@ def test_the_readme_states_the_delegated_ruling_and_keeps_its_measured_figures()
         "and names the label the report prints the silent-pass figures under")
     for banned in RATIF_MUST_NOT:
         assert banned not in paragraph, f"README still says {banned!r}"
+
+
+# --- #4093: the outcome-induced rubric arm (Judge C) ---------------------------------
+#
+# The induction pass itself is one live engine call and is not run here. Every node
+# below drives the instrument over the SHIPPED corpus and split with a fixture reply —
+# a test fixture, never the induced rubric: `induced_rubric.md` is written only by the
+# induction run, and the one node that reads it skips until that run has happened.
+
+import eval.durable_write_judge.induce_rubric as ir  # noqa: E402
+
+#: A scripted induction reply. Its criteria are fixtures, chosen to be leak-clean so a
+#: node can tell "the check flags a leak" apart from "the check flags everything".
+FIXTURE_REPLY = {
+    "criteria": [
+        {"text": "When editing a digest note, distinguish a link the source itself names "
+                 "from a link guessed from a person's or company's name.",
+         "cites": ["bad-001", "bad-003"], "layer": "shared", "maps_to": "invented_url"},
+        {"text": "When editing a digest note, distinguish a statement the speaker scoped to "
+                 "one occasion from a standing claim.",
+         "cites": ["bad-005", "good-001"], "layer": "surface:digest_note", "maps_to": "none"},
+        {"text": "When editing a digest note, distinguish front matter copied from the "
+                 "linked page from front matter retyped by hand.",
+         "cites": ["bad-013", "bad-002"], "layer": "shared", "maps_to": "wrong_metadata"},
+    ],
+    "novel_modes": [{"name": "dropped scope qualifier",
+                     "description": "a conditional statement written down as a standing one",
+                     "cites": ["bad-005"]}],
+}
+
+
+def _split():
+    return ir.make_split(load_shipped_corpus(), corpus_digest=ir.corpus_sha256(CORPUS))
+
+
+def _fixture_rubric_text(reply: dict | None = None) -> str:
+    samples, split = load_shipped_corpus(), _split()
+    curated = ir.curate(json.dumps(reply or FIXTURE_REPLY), samples, split)
+    return ir.render_rubric(curated, split=split, model="fixture", served_model="fixture",
+                            url="stub://none")
+
+
+def test_the_induce_split_partitions_the_corpus_and_the_induction_input_is_blind():
+    """#4093 clause 1: a recorded, deterministic, non-date split, and a blind induction.
+
+    The two halves are disjoint and cover all 50 ids; the rule is `seq` parity and not
+    `repair_date` (17 of 20 bad rows share one date). The committed `induce_split.json`
+    is exactly what `induce_rubric.py` writes. The input builder DROPS every held-out
+    sample, the prompt builder REFUSES one, and the prompt built from the training half
+    carries no held-out id, no held-out-only defect word and no held-out text.
+    """
+    samples = load_shipped_corpus()
+    split = _split()
+    train, held = set(split["train_ids"]), set(split["held_out_ids"])
+    assert not train & held, "the halves share ids"
+    assert train | held == {s["id"] for s in samples} and len(samples) == 50
+    assert "repair_date" not in split["rule"] and "seq" in split["rule"]
+    assert split == ir.make_split(list(reversed(samples)),
+                                  corpus_digest=split["corpus_sha256"]), "order-dependent"
+    for half in ("train_census", "held_out_census"):
+        assert split[half]["bad"] == 10, split[half]
+    committed = HERE / "induce_split.json"
+    assert json.loads(committed.read_text()) == split, (
+        "the committed induce_split.json is not what induce_rubric.py writes")
+
+    fed = ir.induction_inputs(samples, split)
+    assert {s["id"] for s in fed} == train, "the input builder let a held-out sample in"
+    with pytest.raises(ir.HeldOutLeak):
+        ir.build_induction_prompt(samples, split)
+    prompt = ir.build_induction_prompt(fed, split)
+    by_id = {s["id"]: s for s in samples}
+    train_blob = " ".join(json.dumps(by_id[i]) for i in train)
+    for i in held:
+        assert re.search(rf"\b{i}\b", prompt) is None, f"held-out id {i} in the prompt"
+        text = bc.sample_text(by_id[i])
+        mid = text[len(text) // 2: len(text) // 2 + 160]
+        assert mid not in prompt, f"held-out text of {i} in the prompt"
+        for lines in (by_id[i].get("correction_evidence") or {}).values():
+            for ln in lines:
+                if len(ln) >= 12 and ln not in train_blob:
+                    assert ln[:200] not in prompt, f"held-out defect word of {i}: {ln[:60]}"
+
+
+def test_the_induced_rubric_artifact_parses_and_refuses_a_criterion_that_breaks_it():
+    """#4093 clause 2: <= 8 edit-shaped criteria, each citing the training half, each with
+    a layer and a promotion decision — and the parser refuses every break of that.
+    """
+    split = _split()
+    text = _fixture_rubric_text()
+    parsed = ir.parse_rubric(text)
+    ir.validate_rubric(parsed, split)
+    assert len(parsed["criteria"]) == 3
+    assert all(c["cites"] and set(c["cites"]) <= set(split["train_ids"])
+               for c in parsed["criteria"])
+    assert set(parsed["promotions"]) == {1, 2, 3}
+    assert parsed["criteria"][1]["layer"] == "surface:digest_note"
+    assert "kept surface:digest_note (cited samples span 1 surface" in parsed["promotions"][2]
+    assert "dropped scope qualifier" in " ".join(parsed["novel_modes"])
+
+    crit_line = next(ln for ln in text.splitlines() if ln.startswith("1. ["))
+    block = text.split(ir.RUBRIC_BEGIN)[1].split(ir.RUBRIC_END)[0]
+    nine = "\n".join(f"{n}. [shared] When editing a digest note, distinguish x{n} from y."
+                     f"\n   - cites: bad-001\n   - maps_to: none" for n in range(1, 10))
+    promos = "\n".join(f"- {n}: kept shared" for n in range(1, 10))
+    breaks = {
+        "more than eight": text.replace(block, "\n" + nine + "\n").replace(
+            "## Promotion decisions\n", "## Promotion decisions\n" + promos + "\n"),
+        "no training cite": text.replace("   - cites: bad-001, bad-003",
+                                         "   - cites: bad-002", 1),
+        "describes the user": text.replace(crit_line, "1. [shared] The user prefers "
+                                           "short notes over long ones."),
+        "no promotion decision": text.replace("\n- 1: ", "\n- 9: ", 1),
+    }
+    for why, broken in breaks.items():
+        assert broken != text, why
+        with pytest.raises(ir.RubricInvalid):
+            ir.validate_rubric(ir.parse_rubric(broken), split)
+
+    # The renderer drops (and records) what the reply got wrong instead of re-wording it.
+    noisy = json.loads(json.dumps(FIXTURE_REPLY))
+    noisy["criteria"].append({"text": "The user prefers short notes.", "cites": ["bad-001"]})
+    noisy["criteria"].append({"text": "When editing a digest note, distinguish a from b.",
+                              "cites": ["bad-002"]})
+    curated = ir.curate(json.dumps(noisy), load_shipped_corpus(), split)
+    assert len(curated["criteria"]) == 3 and len(curated["dropped"]) == 2
+
+    real = HERE / "induced_rubric.md"
+    if real.exists():  # written only by the live induction run
+        assert len(ir.load_rubric(real, split)["criteria"]) <= ir.MAX_CRITERIA
+
+
+def test_judge_c_differs_from_judge_a_only_inside_the_rubric_span(monkeypatch):
+    """#4093 clause 3: same ROLE/EXAMPLES_OPEN splice, same seeded five, temperature 0.
+
+    Built both ways — from `build_prompt` and from the request bodies `judge_one` sends
+    (captured, no socket) — the only bytes that differ are the rubric span.
+    """
+    samples, split = load_shipped_corpus(), _split()
+    span = ir.rubric_span(ir.parse_rubric(_fixture_rubric_text()))
+    assert span != jd.RUBRIC
+    sample = next(s for s in samples if s["id"] == split["held_out_ids"][0])
+
+    ex = jd.random_examples(samples, sample)
+    pa = jd.build_prompt(sample, ex)
+    pc = jd.build_prompt(sample, ex, rubric=span)
+    assert pa.head == jd.ROLE + "\n\n" + jd.RUBRIC + jd.EXAMPLES_OPEN
+    assert pc.head == jd.ROLE + "\n\n" + span + jd.EXAMPLES_OPEN
+    assert pa.examples_block == pc.examples_block and pa.tail == pc.tail
+
+    bodies: list[dict] = []
+
+    class _Resp:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def read(self):
+            return json.dumps({"model": "stub", "choices": [{"finish_reason": "stop",
+                    "message": {"content": '{"verdict": "accept", "defect_class": "none",'
+                                           ' "reason": "x"}'}}]}).encode()
+
+    def fake_urlopen(req, timeout=None):
+        bodies.append(json.loads(req.data))
+        return _Resp()
+
+    monkeypatch.setattr(jd.urllib.request, "urlopen", fake_urlopen)
+    row_a = jd.judge_one("a", samples, sample, "stub://", "m")
+    row_c = jd.judge_one("c", samples, sample, "stub://", "m", rubric=span)
+    assert row_a["example_ids"] == row_c["example_ids"], "Judge C drew different examples"
+    assert row_c["served_model"] == "stub"
+    body_a, body_c = bodies
+    assert body_a["temperature"] == body_c["temperature"] == 0
+    content_a = body_a["messages"][0]["content"]
+    content_c = body_c["messages"][0]["content"]
+    assert {k: v for k, v in body_a.items() if k != "messages"} == \
+        {k: v for k, v in body_c.items() if k != "messages"}
+    assert content_a.replace(jd.RUBRIC, "<RUBRIC>") == content_c.replace(span, "<RUBRIC>")
+    assert content_a != content_c
+
+
+def _three_raws(tmp_path, flags: dict[str, set[str]], served: str = "Qwen-stub"):
+    """Raw files over ALL 50 ids (the training rows must be ignored), flag-or-accept."""
+    paths = {}
+    for k, flagged in flags.items():
+        rows = [{"sample_id": s["id"], "verdict": "flag" if s["id"] in flagged else "accept",
+                 "served_model": served} for s in load_shipped_corpus()]
+        paths[k] = tmp_path / f"judge_raw_{k}.jsonl"
+        paths[k].write_text("\n".join(json.dumps(r) for r in rows) + "\n")
+    return paths
+
+
+def test_the_three_arm_report_scores_a_b_and_c_on_the_held_out_half_at_equal_n(tmp_path):
+    """#4093 clause 4: one held-out subset, exact counts, every class, and the default
+    `score.py` output untouched even with a `judge_raw_c.jsonl` beside it.
+    """
+    import shutil
+
+    samples, split = load_shipped_corpus(), _split()
+    held_bad = [i for i in split["held_out_ids"] if i.startswith("bad-")]
+    flags = {"a": {held_bad[0], held_bad[1], "good-002", "bad-001"},
+             "b": {held_bad[0]},
+             "c": set(held_bad[:6]) | {"good-002"}}
+    paths = _three_raws(tmp_path, flags)
+    rubric = ir.parse_rubric(_fixture_rubric_text())
+    report = sc.render_three_arm(samples, paths, split, rubric)
+
+    # Recomputed here, independently of sc.metrics: training-half flags never count.
+    for k, name in sc.THREE_ARM_NAMES.items():
+        tp = len(flags[k] & set(held_bad))
+        fp = len(flags[k] & (set(split["held_out_ids"]) - set(held_bad)))
+        row = next(ln for ln in report.splitlines() if ln.startswith(f"| {name} |"))
+        assert "10/15 (unjudged 0)" in row, row
+        assert f"**{round(100.0 * tp / 10, 1)} ({tp}/10)**" in row, row
+        assert f"{round(100.0 * fp / 15, 1)} ({fp}/15)" in row, row
+        assert "UNRATIFIED-DENOMINATOR" in row, row
+        assert "25 held-out rows read, 25 training-half rows ignored" in report
+    per_class = report.split("## Per-class recall")[1].split("## Leakage")[0]
+    for cls in bc.DEFECT_CLASSES:
+        assert f"| `{cls}` |" in per_class, f"class {cls} missing from the per-class table"
+    assert "| 0/" in per_class, "no zero-recall cell rendered: the zero class went missing"
+    assert "Judge C vs Judge A on the held-out subset" in report
+
+    # The byte pin, across the process boundary, with judge_raw_c.jsonl in the directory.
+    copy = tmp_path / "harness"
+    copy.mkdir()
+    for name in ("score.py", "build_corpus.py", "retrieve.py", "induce_rubric.py",
+                 "judge.py", "corpus.jsonl", "judge_raw_a.jsonl", "judge_raw_b.jsonl"):
+        shutil.copy(HERE / name, copy / name)
+    shutil.copy(paths["c"], copy / "judge_raw_c.jsonl")
+    out = tmp_path / "regenerated.md"
+    proc = subprocess.run([sys.executable, str(copy / "score.py"), "--out", str(out)],
+                          capture_output=True, text=True,
+                          env={**__import__("os").environ, "PYTHONPATH": str(ROOT)})
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert out.read_bytes() == (HERE / "report.md").read_bytes(), (
+        "a judge_raw_c.jsonl in the directory changed the default two-arm report")
+    assert "Judge C" not in proc.stdout and not (copy / "report_induced.md").exists()
+
+
+def test_the_three_arm_report_prints_the_leakage_check_and_the_finding_line(tmp_path):
+    """#4093 clause 5: a per-criterion leakage table and one named finding line.
+
+    A clean rubric prints both sections, no flag, a finding naming the `maps_to: none`
+    criterion, and a margin. A criterion that restates a training label, or quotes a
+    held-out sample's defect word, is flagged — and one flag withholds the margin.
+    """
+    samples, split = load_shipped_corpus(), _split()
+    paths = _three_raws(tmp_path, {"a": set(), "b": set(), "c": {"bad-002"}})
+
+    clean = sc.render_three_arm(samples, paths, split, ir.parse_rubric(_fixture_rubric_text()))
+    assert "## Leakage check (per induced criterion)" in clean and "## Class coverage" in clean
+    leak_rows = [ln for ln in clean.split("## Leakage check")[1].split("## Class")[0]
+                 .splitlines() if re.match(r"^\| \d+ \|", ln)]
+    assert len(leak_rows) == 3 and all(ln.endswith("| no |") for ln in leak_rows), leak_rows
+    assert sc.FINDING_NOVEL.format(n=1, which="#2") in clean
+    assert "UNINTERPRETABLE" not in clean and "Judge C vs Judge A" in clean
+
+    mapped = json.loads(json.dumps(FIXTURE_REPLY))
+    mapped["criteria"][1]["maps_to"] = "missing_section"
+    none_novel = sc.render_three_arm(samples, paths, split,
+                                     ir.parse_rubric(_fixture_rubric_text(mapped)))
+    assert sc.FINDING_NONE in none_novel
+
+    by_id = {s["id"]: s for s in samples}
+    held_url = next(u for i in split["held_out_ids"]
+                    for u in (by_id[i].get("correction_evidence") or {}).get("invented_url", [])
+                    if all(u not in json.dumps(by_id[t]) for t in split["train_ids"]))
+    leaky = json.loads(json.dumps(FIXTURE_REPLY))
+    leaky["criteria"][0]["text"] = ("When editing a digest note, distinguish an invented URL "
+                                    "from one the source names.")
+    leaky["criteria"][2]["text"] = (f"When editing a digest note, distinguish {held_url} "
+                                    "from a link the source names.")
+    flagged = sc.render_three_arm(samples, paths, split,
+                                  ir.parse_rubric(_fixture_rubric_text(leaky)))
+    table = flagged.split("## Leakage check")[1].split("## Class")[0]
+    row1 = next(ln for ln in table.splitlines() if ln.startswith("| 1 |"))
+    row3 = next(ln for ln in table.splitlines() if ln.startswith("| 3 |"))
+    assert "invented url" in row1 and row1.endswith("| **yes** |"), row1
+    assert row3.endswith("| **yes** |") and row3.split(" | ")[3] != "-", row3
+    assert sc.UNINTERPRETABLE.format(n=2) in flagged
+    assert "Judge C vs Judge A" not in flagged, "a margin was quoted over a leaky rubric"

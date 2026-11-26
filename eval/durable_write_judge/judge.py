@@ -111,8 +111,9 @@ def render_example(sample: dict, index: int) -> str:
     )
 
 
-def build_prompt(sample: dict, examples: list[dict]) -> Prompt:
-    head = ROLE + "\n\n" + RUBRIC + EXAMPLES_OPEN
+def build_prompt(sample: dict, examples: list[dict], rubric: str = RUBRIC) -> Prompt:
+    """`rubric` is the one span Judge C (#4093) swaps; A and B always pass `RUBRIC`."""
+    head = ROLE + "\n\n" + rubric + EXAMPLES_OPEN
     block = "".join(render_example(ex, i) for i, ex in enumerate(examples, 1))
     tail = (
         SAMPLE_OPEN
@@ -201,14 +202,19 @@ def call_engine(prompt_text: str, url: str = ENGINE_URL, model: str = ENGINE_MOD
     msg = choice["message"]
     return {"content": msg.get("content") or "",
             "reasoning": msg.get("reasoning_content") or "",
-            "finish_reason": choice.get("finish_reason")}
+            "finish_reason": choice.get("finish_reason"),
+            # The engine's own name for what answered, not the name we asked for:
+            # #4093 runs on the primary because the secondary is off, and the report
+            # prints this per arm so a mixed-engine comparison cannot pass unnoticed.
+            "served_model": data.get("model") or ""}
 
 
 def judge_one(judge_name: str, samples: list[dict], sample: dict,
-              url: str, model: str) -> dict:
-    examples = (random_examples(samples, sample) if judge_name == "a"
-                else retrieved_examples(samples, sample))
-    prompt = build_prompt(sample, examples)
+              url: str, model: str, rubric: str = RUBRIC) -> dict:
+    # Judge C is Judge A with the rubric span swapped (#4093): same seeded random five.
+    examples = (retrieved_examples(samples, sample) if judge_name == "b"
+                else random_examples(samples, sample))
+    prompt = build_prompt(sample, examples, rubric=rubric if judge_name == "c" else RUBRIC)
     try:
         raw = call_engine(prompt.text, url=url, model=model)
     except Exception as exc:  # engine unreachable: an error row, never a silent accept
@@ -221,14 +227,21 @@ def judge_one(judge_name: str, samples: list[dict], sample: dict,
                 "example_ids": [e["id"] for e in examples],
                 "n_examples": prompt.example_count, "model": model,
                 "prompt_chars": len(prompt.text),
-                "finish_reason": raw.get("finish_reason")})
+                "finish_reason": raw.get("finish_reason"),
+                "served_model": raw.get("served_model", "")})
     return row
 
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--corpus", default=str(Path(__file__).parent / "corpus.jsonl"))
-    ap.add_argument("--judge", choices=("a", "b", "both"), default="both")
+    ap.add_argument("--judge", choices=("a", "b", "both", "c", "abc"), default="both",
+                    help="c = Judge A with the induced rubric (#4093); abc = all three")
+    ap.add_argument("--rubric", default=str(Path(__file__).parent / "induced_rubric.md"),
+                    help="Judge C's induced_rubric.md, validated against --held-out's split")
+    ap.add_argument("--held-out", default="",
+                    help="an induce_split.json: judge only its held-out ids (the pool "
+                         "examples are drawn from stays the whole corpus)")
     ap.add_argument("--out-dir", default=str(Path(__file__).parent))
     ap.add_argument("--limit", type=int, default=0, help="score only the first N samples")
     ap.add_argument("--parallel", type=int, default=4)
@@ -243,16 +256,35 @@ def main(argv: list[str] | None = None) -> int:
     # `--limit` narrows what gets judged, never the pool examples are drawn from:
     # a smaller pool would change Judge B's retrieval, not just its workload.
     targets = samples[:args.limit] if args.limit else samples
-    names = ("a", "b") if args.judge == "both" else (args.judge,)
+    names = {"both": ("a", "b"), "abc": ("a", "b", "c")}.get(args.judge, (args.judge,))
+    split = None
+    if args.held_out:
+        try:
+            from .induce_rubric import load_split
+        except ImportError:
+            from induce_rubric import load_split
+        split = load_split(Path(args.held_out))
+        held = set(split["held_out_ids"])
+        targets = [s for s in targets if s["id"] in held]
+    rubric_c = RUBRIC
+    if "c" in names:
+        try:
+            from .induce_rubric import load_rubric, rubric_span
+        except ImportError:
+            from induce_rubric import load_rubric, rubric_span
+        if split is None:
+            raise SystemExit("--judge c needs --held-out <induce_split.json>: Judge C is "
+                             "scored on the held-out half only")
+        rubric_c = rubric_span(load_rubric(Path(args.rubric), split))
 
     for name in names:
         out_path = Path(args.out_dir) / f"judge_raw_{name}.jsonl"
         rows: list[dict] = []
         if args.dry_run:
             for s in targets:
-                examples = (random_examples(samples, s) if name == "a"
-                            else retrieved_examples(samples, s))
-                p = build_prompt(s, examples)
+                examples = (retrieved_examples(samples, s) if name == "b"
+                            else random_examples(samples, s))
+                p = build_prompt(s, examples, rubric=rubric_c if name == "c" else RUBRIC)
                 assert p.example_count == EXAMPLE_K, (s["id"], p.example_count)
                 rows.append({"sample_id": s["id"], "label": s["label"], "judge": name,
                              "verdict": "dry_run", "defect_class": None, "reason": "",
@@ -264,7 +296,8 @@ def main(argv: list[str] | None = None) -> int:
                   f"examples per prompt {EXAMPLE_K}")
         else:
             with cf.ThreadPoolExecutor(max_workers=args.parallel) as pool:
-                futures = [pool.submit(judge_one, name, samples, s, args.url, args.model)
+                futures = [pool.submit(judge_one, name, samples, s, args.url, args.model,
+                                       rubric_c if name == "c" else RUBRIC)
                            for s in targets]
                 for fut in cf.as_completed(futures):
                     rows.append(fut.result())
