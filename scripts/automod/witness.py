@@ -444,6 +444,149 @@ def _blob_figure(vault_root, sha: str, artifact: str) -> "tuple[str, str]":
     return (f"{bits[0]} {bits[1]}", figures)
 
 
+#: Stores that declare a durable MIRROR of themselves inside the vault: a second path,
+#: synced by the store's own nightly job, holding the same rows. The over-bound route can
+#: only ask git about a store whose vault home has a NAME, and this is the only name it may
+#: have without guessing — a basename probe is what #4502's triage ruled out, because `git
+#: -C ~/obsidian ls-files | grep 'verdicts.jsonl$'` answers FIVE paths on this box: the
+#: mirror at `memory/skill-verdicts/verdicts.jsonl` plus four `backlog/data/` extracts, so
+#: resolving "is this store already committed?" by basename lands on an extract, which is
+#: the directory the sibling ladder already covers and not the store's own history. Each
+#: entry is (module, store attribute, mirror attribute), read at CALL time and imported
+#: lazily: `scripts.automod` must not become a static consumer of the pipelines it audits,
+#: and rebinding the attributes has to keep working for the tests that lay a vault in a
+#: temp directory.
+_MIRROR_DECLARATIONS = (
+    ("scripts.skill_verdicts", "DEFAULT_STORE", "DEFAULT_MIRROR"),
+    ("scripts.iv_metrics_mirror", "DEFAULT_SOURCE", "DEFAULT_MIRROR"),
+)
+
+
+def _declared_mirror_rel(target: Path, vault) -> "str | None":
+    """The vault-relative path `target`'s OWN module declares as its mirror, else None.
+
+    Three refusals, each its own reason. No module claims the store: there is nothing to
+    ask git about, and this is the common case — two stores declare a mirror on this box
+    today. The declared mirror is not inside this vault: a path with no vault-relative
+    spelling cannot be named in the `git show` the note prints, which is why the
+    comparison is `relative_to(vault)` and not a substring. It is not a hypothetical arm
+    either: a mirror destination is a `--mirror` argument as much as a module default
+    (`iv_metrics_mirror.py:158`), and the vault itself is `vault_root()`, a function, not a
+    constant the author of a declaration can see. And the mirror resolves INSIDE the
+    witness directory:
+    those bytes are one item's extract of the store, already covered by the sibling ladder,
+    and dressing an extract up as the store's history is how a demand ends up quoting a cut
+    as if it were the ledger.
+    """
+    import importlib
+    from pathlib import PurePosixPath
+    for mod_name, store_attr, mirror_attr in _MIRROR_DECLARATIONS:
+        try:
+            mod = importlib.import_module(mod_name)
+            store = B._witness_target(getattr(mod, store_attr))
+            mirror = B._witness_target(getattr(mod, mirror_attr))
+        except Exception:
+            continue
+        if store != target:
+            continue
+        try:
+            rel = mirror.resolve().relative_to(vault.resolve()).as_posix()
+        except Exception:
+            return None
+        head = PurePosixPath(B.WITNESS_ARTIFACT_DIR).parts
+        if PurePosixPath(rel).parts[:len(head)] == head:
+            return None
+        return rel or None
+    return None
+
+
+def _committed_mirror_blob(target, artifact_dir: str = B.WITNESS_ARTIFACT_DIR):
+    """(`vault-relative mirror`, `wc -l -c` of its HEAD blob) — or None.
+
+    The route this feeds (#4502) exists because the over-bound demand asked for a NEW
+    `backlog/data/` extract of the verdicts ledger while the vault was already committing
+    that same ledger at `memory/skill-verdicts/verdicts.jsonl`: 854 lines / 1,602,119 B on
+    disk, the same 854 / 1,602,119 tracked and clean at HEAD, and the cohort #4501 was
+    filed to preserve in git since `f70d6f15a` (2026-11-12). Four things have to be true
+    before a demand may point at a blob, and this is the only place they are all asked:
+    the store is over the ceiling (else the under-bound branch answers it), the mirror is
+    DECLARED (above), it is TRACKED (`git ls-files --error-unmatch` — a mirror between two
+    nightly syncs is a working file, not history), and its blob MEASURES what the store
+    measures.
+
+    The last test is on the figure and not on md5, which is what the real fixture requires:
+    live and mirror agree as a multiset of lines and disagree in their ORDER, so bytes
+    differ while the quoted number reproduces. Both sides are measured by the same `wc
+    -l -c` on stdin — the blob through `_blob_figure`, the store through the identical
+    invocation — so the comparison is between two readings of one instrument.
+    """
+    import subprocess
+    tgt = target if isinstance(target, Path) else Path(B._witness_target(target))
+    live = B._witness_size(tgt)
+    if live is None or live <= B.WITNESS_MAX_BYTES:
+        return None
+    try:
+        from app import paths
+        vault = Path(paths.VAULT_ROOT)
+        rel = _declared_mirror_rel(tgt, vault)
+        if rel is None:
+            return None
+        tracked = subprocess.run(
+            ["git", "-C", str(vault), "ls-files", "--error-unmatch", "--", rel],
+            capture_output=True, timeout=60)
+        if tracked.returncode != 0:
+            return None
+        wc, _ = B._blob_figure(vault, "HEAD", rel)
+        if not wc:
+            return None
+        with open(tgt, "rb") as fh:
+            out = subprocess.run(["wc", "-l", "-c"], stdin=fh, capture_output=True,
+                                 timeout=60)
+        bits = (out.stdout or b"").decode(errors="replace").split()
+        if out.returncode != 0 or len(bits) != 2:
+            return None
+        want = wc.split()
+        if len(want) != 2 or [int(bits[0]), int(bits[1])] != [int(want[0]),
+                                                             int(want[1])]:
+            return None
+    except Exception:
+        # A probe that cannot read git, the vault or the store owes no claim about
+        # committed bytes; the ladder below is the answer that stays true either way.
+        return None
+    return (rel, " ".join(wc.split()))
+
+
+def _mirror_blob_demand(path, rel: str, wc: str) -> str:
+    """The owed note for an over-bound store whose bytes the vault already commits.
+
+    Nothing is owed but a read: `git show HEAD:<rel> | wc -l -c` is runnable exactly as
+    printed by anyone holding the vault, and the figure beside it is `_blob_figure`'s, so
+    it is the blob's and not the working file's (#2954's failure, inherited along with the
+    helper). The closing sentence is the same fallback the ladder carries, because a mirror
+    that stops reproducing the figure must still send the reader to an extract rather than
+    to the store.
+
+    Two wordings again, by budget, for the #2382/#3894 reason: `clean_clauses` truncates
+    FROM THE END, and what falls off a long path would be that fallback. Empty string means
+    neither form fits, and the caller then keeps the destination it had — the same rung
+    #3942's swap stands on, which is what makes the probe's answer advice rather than a
+    demand that silently eats the item's own prose.
+    """
+    cmd = f"git show HEAD:{rel} | wc -l -c"
+    roomy = (f"`{path}` is over the WITNESS_MAX_BYTES = {B.WITNESS_MAX_BYTES:,} byte "
+             f"ceiling and needs no extract: the vault already commits it at `{rel}`, "
+             f"where the figure quoted going forward is the blob's — `{cmd}` -> `{wc}`. "
+             f"Prefer an extract under it; if the figure cannot be reproduced under it, "
+             f"say so rather than ordering the store.")
+    if len(roomy) <= B.CLAUSE_MAX_CHARS:
+        return roomy
+    compact = (f"`{path}` over WITNESS_MAX_BYTES = {B.WITNESS_MAX_BYTES:,}: do not order "
+               f"it whole. The vault already commits it at `{rel}`, so the figure is the "
+               f"blob's — `{cmd}` -> `{wc}` — no new extract is owed; if the figure "
+               f"cannot be reproduced there, say so rather than ordering the store.")
+    return compact if len(compact) <= B.CLAUSE_MAX_CHARS else ""
+
+
 def commit_anchor_witness(source, artifact: str, *,
                           max_files: "int | None" = None,
                           max_total_bytes: "int | None" = None,
@@ -862,6 +1005,19 @@ def _over_bound_extract_demand(path, artifact_dir: str = B.WITNESS_ARTIFACT_DIR,
     # count the reader is told to check and the name the demand orders cannot come from two
     # answers. Names only: the bytes are never touched.
     sib_names = B._committed_witness_sibling_names(path, artifact_dir)
+    # #4502: the cheapest committed home for these bytes may be the store's OWN mirror,
+    # which its nightly job has been syncing into the vault for weeks — ask that before
+    # ordering a copy of content git already holds. The listing just above is siblings of
+    # the DESTINATION (`backlog/data/`) and nothing else, which is why #4501's demand fired
+    # on a ledger the vault has committed since `f70d6f15a`. Placed here, above the ladder,
+    # so the swap below stays the only code that decides what a destination costs: when
+    # naming the blob will not fit the note, the demand comes back empty and everything
+    # below runs untouched, byte for byte as the four #3942 nodes pin it.
+    mirror = B._committed_mirror_blob(target, artifact_dir)
+    if mirror is not None:
+        demanded = B._mirror_blob_demand(path, mirror[0], mirror[1])
+        if demanded:
+            return demanded
     # #2513: the same name rule as the under-bound clause, because the over-bound
     # note orders a vault write to exactly the same directory and would clobber a
     # pinned witness just as deadeningly. A 30.7 MB store is the shape that reaches
@@ -1371,6 +1527,12 @@ WITNESS_NAMES = (
     "_is_anchor_witness",
     "_anchor_witness_family",
     "_blob_figure",
+    # #4502: the builder calls these three through `B.` — the same reason `_blob_figure`
+    # is on this list — so a test may rebind the probe the way it rebinds `now_stamp`.
+    "_MIRROR_DECLARATIONS",
+    "_declared_mirror_rel",
+    "_committed_mirror_blob",
+    "_mirror_blob_demand",
     "commit_anchor_witness",
     "_over_bound_extract_demand",
     "_tree_basenames",

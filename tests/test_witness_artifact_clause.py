@@ -4774,3 +4774,474 @@ def test_the_re_aimed_sibling_demand_names_sha256sum_for_a_hash_quoted_witness(t
     assert len(_demands(plain)) == 1, plain
     assert f"wc -l -c < {art}" in _demands(plain)[0], _demands(plain)[0]
     assert "sha256sum" not in _demands(plain)[0], _demands(plain)[0]
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# #4502: an over-bound store may already have a COMMITTED home elsewhere in  #
+# the vault, and the demand never asked it.                                   #
+# ══════════════════════════════════════════════════════════════════════════
+#
+# `_over_bound_extract_demand` looked for prior extracts among SIBLINGS OF THE
+# DESTINATION — the dated files under `backlog/data/` — and never asked whether the store
+# it is citing is itself committed somewhere else in the vault. The verdicts ledger is the
+# exhibited case, measured at triage on 2026-11-22: the live store read 854 lines /
+# 1,602,119 B, over `WITNESS_MAX_BYTES = 1,048_576`, while `scripts/skill_verdicts.py:161`
+# `DEFAULT_MIRROR` keeps a durable copy at `memory/skill-verdicts/verdicts.jsonl` that was
+# tracked, clean at HEAD, 854 / 1,602,119 as well, and 0 live-only / 0 mirror-only lines.
+# The demand fired anyway — 475 characters ending at `wc -l -c <
+# backlog/data/2026-10-26.3362-reviews-verdicts.jsonl` and "publish a new file only if
+# none reproduces the figure" — so the round it books would commit a second copy of bytes
+# git already holds, and #4500 has carried that demand on an open item ever since.
+#
+# Two rails this section pins that a naive fix would miss, both named in triage:
+#   * the candidate comes from the store's DECLARED mirror path, never from a basename
+#     probe — the live vault answers `git ls-files | grep 'verdicts.jsonl$'` with FIVE
+#     paths, four of them under `backlog/data/`, which is the directory the sibling ladder
+#     already covers; and
+#   * the equality is the measured FIGURE, not md5 — live and mirror differ in line ORDER
+#     only, so `lb == mb` is False on the real fixture and a byte-identity clause would
+#     refuse the one case the item was filed for.
+
+#: The vault slot `scripts/skill_verdicts.py` declares for the verdicts ledger
+#: (`DEFAULT_MIRROR`, :161), spelled as the item spells it: a rename in the declaring
+#: module moves this constant and every node that reads it, rather than switching the
+#: probe off silently.
+_MIRROR_REL = "memory/skill-verdicts/verdicts.jsonl"
+#: … and the slot `scripts/iv_metrics_mirror.py:83` declares for the IV metrics series,
+#: which is the second half of the registry and the reason it is a registry.
+_IV_MIRROR_REL = "knowledge/inner-voice/iv-metrics.jsonl"
+
+#: 100,000 rows of one 11-byte line: 1,100,000 bytes, over the 1,048,576 ceiling by
+#: 51,424, and small enough that committing the mirror in a temp repo costs milliseconds.
+#: The figure is derived from the body rather than typed, so the fixture and the assertion
+#: cannot drift apart.
+_MIRROR_BODY = '{"row": 1}\n' * 100_000
+_MIRROR_FIGURE = f"{_MIRROR_BODY.count(chr(10))} {len(_MIRROR_BODY)}"
+
+
+def _mirror_fixture(tmp_path, monkeypatch, *, module: str = "scripts.skill_verdicts",
+                    store_attr: str = "DEFAULT_STORE",
+                    mirror_attr: str = "DEFAULT_MIRROR",
+                    store_name: str = "verdicts.jsonl",
+                    mirror_rel: str = _MIRROR_REL,
+                    mirror_body: str = _MIRROR_BODY, commit_mirror: bool = True,
+                    dirty: bytes = b"", siblings: tuple[str, ...] = ()):
+    """An over-ceiling store, the mirror its own module declares, and a git vault holding it.
+
+    Three real things, not three assertions about them: the store is laid where the ledger
+    lives (`_pipeline/skills/reviews/`), the vault at `tmp_path/vault` is a git tree with
+    one seed commit so "HEAD moved" stays distinguishable from "HEAD exists", and the
+    mirror is committed by `_git_commit` so `git ls-files --error-unmatch` answers about
+    history rather than about a string. The two module attributes are what the builder is
+    asked to read, so rebinding them here is the same seam `_vault_witness_dir` reads
+    `app.paths.VAULT_ROOT` through: a node that hardcoded a path would pass with the
+    registry deleted.
+
+    `mirror_body` differing from the store's bytes is how a mirror that has LAGGED is
+    reproduced; `dirty` adds bytes to the working copy only, which is how a mirror that is
+    uncommitted at HEAD is reproduced; `siblings` are committed extracts of the same store
+    under `backlog/data/`, i.e. the answer a basename probe would have given.
+    """
+    import importlib
+    vault = _anchor_vault(tmp_path, monkeypatch)
+    d = tmp_path / "lloyd-data" / "_pipeline" / "skills" / "reviews"
+    d.mkdir(parents=True, exist_ok=True)
+    store = d / store_name
+    store.write_text(_MIRROR_BODY, encoding="utf-8")
+    assert store.stat().st_size > B.WITNESS_MAX_BYTES, "the fixture is not over the bound"
+    assert not B.in_git_tree(store), "only the temp vault may hold history here"
+    mod = importlib.import_module(module)
+    monkeypatch.setattr(mod, store_attr, store)
+    mirror = vault / mirror_rel
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(mod, mirror_attr, mirror)
+    if commit_mirror:
+        mirror.write_text(mirror_body, encoding="utf-8")
+        _git_commit(vault, mirror_rel)
+    for name in siblings:
+        _vault_witness(tmp_path, name, body="x")
+        _git_commit(vault, f"backlog/data/{name}")
+    if dirty:
+        mirror.write_bytes(mirror.read_bytes() + dirty)
+    return store, vault, mirror_rel
+
+
+def _ladder_note(store, monkeypatch, item_id: int = 4502) -> str:
+    """What the builder emits for `store` when the mirror probe finds nothing.
+
+    That IS today's code path: #4502's branch is purely additive, so the note with the
+    probe answering "no mirror" is byte-for-byte the note the builder emits on `main` —
+    and the four #3942 nodes above (`…names_the_extract_the_vault_already_commits`,
+    `…_newest_one_and_the_note_is_byte_stable`, `…_names_a_fresh_day`,
+    `…_costs_the_note_no_characters`) pin that path's literal bytes, its sibling ladder
+    and its closing fallback, and none of them is edited by this diff.
+    """
+    with monkeypatch.context() as mp:
+        mp.setattr(B, "_committed_mirror_blob", lambda *a, **k: None)
+        return B._over_bound_extract_demand(store, item_id=item_id)
+
+
+def test_an_over_bound_store_with_a_tracked_declared_mirror_is_demanded_as_a_blob(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clauses 1 and 3: the note names the committed blob, quotes the figure taken
+    out of THAT BLOB, and orders no `backlog/data/` artifact at all.
+
+    The command has to be runnable exactly as printed by a reader who has the vault and
+    nothing else, which is why it is `git show HEAD:<vault-relative mirror> | wc -l -c`
+    and not a path to a temp file: the mirror on disk can be ahead of, behind, or dirty
+    against HEAD, and the bytes that carry the guarantee are the ones in history.
+    """
+    store, vault, rel = _mirror_fixture(tmp_path, monkeypatch)
+    blob_figure = _wc_of(_anchor_blob(vault, "HEAD", rel))
+    assert blob_figure == _MIRROR_FIGURE, blob_figure
+
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert f"`git show HEAD:{rel} | wc -l -c`" in note, note
+    assert f"-> `{blob_figure}`" in note, f"no blob figure in the note: {note}"
+    assert "backlog/data" not in note, f"a backlog/data path survived: {note}"
+    assert _demanded_paths(note) == [], note
+    assert note.endswith("say so rather than ordering the store."), note
+    assert note.count("rather than ordering the store") == 1, note
+    assert len(note) <= B.CLAUSE_MAX_CHARS, f"{len(note)} of 600: {note}"
+    assert B.clean_clauses([note]) == [note], f"truncated: {len(note)} chars"
+
+
+def test_the_figure_a_mirror_demand_quotes_is_the_head_blob_s_not_the_working_copy(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 3's real content: with the working mirror DIRTY, the note still quotes
+    HEAD's figure.
+
+    `_blob_figure` exists because of #2954 — a round quoted the figure of whatever bytes
+    were on disk when it looked, and history said something else — and this route inherits
+    that machinery, so the same failure has to be impossible here. The fixture commits
+    100,000 rows and then appends one more to the working copy only: the two figures
+    genuinely differ, so a probe that measured the mirror file instead of the blob passes
+    the equality test and prints the wrong number.
+    """
+    store, vault, rel = _mirror_fixture(tmp_path, monkeypatch, dirty=b'{"row": 1}\n')
+    blob_figure = _wc_of(_anchor_blob(vault, "HEAD", rel))
+    disk_figure = _wc_from_disk(vault / rel)
+    assert blob_figure == _MIRROR_FIGURE, blob_figure
+    assert disk_figure != blob_figure, (disk_figure, blob_figure)
+
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert f"-> `{blob_figure}`" in note, note
+    assert f"-> `{disk_figure}`" not in note, (
+        f"the note quoted the working copy {disk_figure}, not HEAD: {note}")
+
+
+def test_the_mirror_registry_follows_the_declaring_module_not_one_hardcoded_store(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 2: the candidate is resolved from the store's declared mirror path.
+
+    Two modules declare a mirror on this box today — `scripts/skill_verdicts.py:161`
+    (`memory/skill-verdicts/verdicts.jsonl`) and `scripts/iv_metrics_mirror.py:83`
+    (`knowledge/inner-voice/iv-metrics.jsonl`) — and this node drives the SECOND one: a
+    different store basename under a different declared vault path, so a builder that
+    hardcoded the verdicts pair cannot pass. Rebinding the module attributes is also what
+    makes the node fail on a registry read once at import: the lookup has to happen at call
+    time, the way `_vault_witness_dir` reads `app.paths.VAULT_ROOT`.
+    """
+    store, vault, rel = _mirror_fixture(
+        tmp_path, monkeypatch, module="scripts.iv_metrics_mirror",
+        store_attr="DEFAULT_SOURCE", mirror_attr="DEFAULT_MIRROR",
+        store_name="iv-metrics.jsonl", mirror_rel=_IV_MIRROR_REL)
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert f"`git show HEAD:{rel} | wc -l -c`" in note, note
+    assert f"-> `{_MIRROR_FIGURE}`" in note, note
+    assert "backlog/data" not in note, note
+
+
+def _git_repo_tracked(vault: Path, rel: str) -> bool:
+    """Is `rel` under history in `vault`? `git ls-files --error-unmatch`, the probe the
+    route itself uses, so the fixture asserts with the same instrument."""
+    return subprocess.run(["git", "-C", str(vault), "ls-files", "--error-unmatch", "--",
+                           rel], capture_output=True).returncode == 0
+
+
+def test_a_declared_mirror_inside_the_witness_directory_is_refused_as_a_mirror(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 2, direction (a): a module that declared its mirror INSIDE the
+    artifact directory is refused outright, and today's ladder stands.
+
+    Those bytes are what the sibling ladder already covers — a `backlog/data/` extract is
+    one item's cut of a store, not the store's own history — so calling one a mirror would
+    have the demand quote an extract as if it were the ledger and retire the very ladder
+    that points at it. The refusal is on the resolved vault-relative path, not on a
+    basename, so a store that happens to be named like an extract still gets the probe.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, vault, rel = _mirror_fixture(tmp_path, monkeypatch,
+                                        mirror_rel="backlog/data/verdicts.jsonl")
+    assert _git_repo_tracked(vault, rel), "the fixture did not track the extract"
+    assert B._committed_mirror_blob(B._witness_target(store),
+                                    B.WITNESS_ARTIFACT_DIR) is None, (
+        "a backlog/data extract was accepted as a mirror")
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert "git show" not in note, f"an extract was demanded as a mirror blob: {note}"
+    assert note == _ladder_note(store, monkeypatch), note
+
+
+def test_a_committed_extract_matching_the_store_s_basename_never_wins_over_the_mirror(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 2, direction (b): the live box's shape. `git ls-files | grep
+    'verdicts.jsonl$'` answers FIVE paths on `~/obsidian` — the mirror plus four
+    `backlog/data/` extracts — so a probe that resolved "is this store committed?" by
+    basename would land on an extract, which is what the ladder already covers and what
+    #2444 keeps the free-name slot absent for.
+
+    With the declared mirror tracked under `memory/skill-verdicts/` AND two committed
+    extracts of the same store under `backlog/data/`, the note names the mirror's blob,
+    no `backlog/data/` path, and no `Measure the … committed extracts` pointer.
+    """
+    store, vault, rel = _mirror_fixture(
+        tmp_path, monkeypatch,
+        siblings=("2026-10-26.3362-reviews-verdicts.jsonl",
+                  "2026-11-08.3940-reviews-verdicts.jsonl"))
+    assert B._committed_witness_sibling_names(store) == [
+        "2026-10-26.3362-reviews-verdicts.jsonl",
+        "2026-11-08.3940-reviews-verdicts.jsonl"], "the trap's extracts are missing"
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert f"`git show HEAD:{rel} | wc -l -c`" in note, note
+    assert "backlog/data" not in note, note
+    assert "Measure the" not in note, note
+
+
+def test_an_untracked_declared_mirror_emits_todays_note_byte_for_byte(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 4: declared is not committed. A mirror the module names but HEAD does
+    not hold has no blob to demand, and the fallback ladder must arrive unchanged — the
+    sibling ladder and "say so rather than ordering the store" verbatim.
+
+    This is the state of a mirror between two nightly skills-mgmt syncs, which is most of
+    the time: `git ls-files --error-unmatch` exits 1 and the builder owes no claim about
+    bytes it cannot name.
+
+    Two oracles, because one of them is not independent. `_ladder_note` re-enters this
+    builder with the probe answering "no mirror", which proves the branch ADDS nothing but
+    would keep passing if a later edit changed the ladder and the probe together; so the
+    note is also compared against the ladder's own prose RECORDED HERE — both of the leads
+    `demand()` may choose (roomy and compact, decided by the length of a `tmp_path` this
+    assertion cannot control) carrying the same #3894 cap, the same destination, the same
+    pointer and the same closing words.
+    """
+    store, vault, rel = _mirror_fixture(
+        tmp_path, monkeypatch, commit_mirror=False,
+        siblings=("2026-10-26.3362-reviews-verdicts.jsonl",))
+    assert not _git_repo_tracked(vault, rel), "the fixture committed the mirror"
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    art = "backlog/data/2026-10-26.3362-reviews-verdicts.jsonl"
+    roomy = (f"`{store}` is over the WITNESS_MAX_BYTES = 1,048,576 byte ceiling: do not "
+             f"order it whole. What is owed is an extract of it — the subset that "
+             f"reproduces the figure the item quotes, as at the reading — committed to "
+             f"`{art}` and re-derived from it with `wc -l -c < {art}`. ")
+    compact = (f"`{store}` over the WITNESS_MAX_BYTES = 1,048,576 byte ceiling: do not "
+               f"order it whole. Owed: an extract reproducing the quoted figure as at the "
+               f"reading, proved by `wc -l -c < {art}`. ")
+    tail = ("Measure the 1 committed extract under `backlog/data/*-reviews-verdicts.jsonl` "
+            "first; publish a new file only if none reproduces the figure, else say so "
+            "rather than ordering the store.")
+    assert note in (roomy + tail, compact + tail), f"{note!r}"
+    assert note == _ladder_note(store, monkeypatch), note
+    assert "git show" not in note, note
+    assert note.endswith("rather than ordering the store."), note
+
+
+def test_a_mirror_whose_blob_does_not_reproduce_the_store_emits_todays_note(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 4's other edge: the mirror is tracked, but its HEAD blob measures
+    differently, so it is not the store's bytes and the demand stays where it is.
+
+    The lag is the live case — the vault mirror is synced nightly, the store moves all day
+    — and the equality is on the measured line/byte figure rather than md5, which is what
+    the real fixture requires (live and mirror agree on the multiset of lines and disagree
+    on their ORDER, so `lb == mb` is False there while the figure reproduces).
+    """
+    store, vault, rel = _mirror_fixture(
+        tmp_path, monkeypatch, mirror_body='{"row": 1}\n' * 90_000,
+        siblings=("2026-10-26.3362-reviews-verdicts.jsonl",))
+    lagged = _wc_of(_anchor_blob(vault, "HEAD", rel))
+    assert lagged != _MIRROR_FIGURE, lagged
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    expected = _ladder_note(store, monkeypatch)
+    assert note == expected, f"{note!r}\n!=\n{expected!r}"
+    assert "git show" not in note, note
+    assert "Measure the 1 committed extract under" in note, note
+    assert note.endswith("else say so rather than ordering the store."), note
+
+
+def test_a_store_that_declares_no_mirror_keeps_the_sibling_ladder_untouched(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 4 at the common case: a store with no declared mirror at all — the
+    #3942 family fixture, whose basename `workers.db` no module claims — gets exactly the
+    note that section pins: newest committed extract, its re-derive command, the closing
+    fallback, and nothing about a blob.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, family = _family_store(tmp_path)
+    note = B._over_bound_extract_demand(store, item_id=3942)
+    assert note == _ladder_note(store, monkeypatch, item_id=3942), note
+    assert set(_demanded_paths(note)) == {f"{B.WITNESS_ARTIFACT_DIR}/{family[-1]}"}, note
+    assert note.endswith("say so rather than ordering the store."), note
+    assert "git show" not in note, note
+
+
+def test_naming_the_blob_is_paid_for_out_of_the_note_budget_and_never_off_the_fallback(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 5: the mirror branch is budget-gated the way #3942's destination swap
+    is, at the longest store name this file uses and past it.
+
+    First the name `a-quite-long-live-store-name-that-keeps-going.sqlite` that
+    `_rederive_command`'s 233-character budget and `backlog.py`'s 611-of-600 note are both
+    stated against (`.jsonl` here, because the mirror stores are JSONL): that spelling has
+    to fit, or the route would never fire for a long-named store. Then a store name long
+    enough that even the compact mirror wording cannot carry the blob — where the probe
+    DOES find a reproducing mirror and the note still keeps the fresh/sibling destination,
+    because `clean_clauses` truncates FROM THE END and the thing that disappears would be
+    the sentence that stops a round ordering the store anyway.
+    """
+    monkeypatch.setattr(B, "now_stamp", lambda: _STAMP_3942)
+    store, vault, rel = _mirror_fixture(
+        tmp_path, monkeypatch,
+        store_name="a-quite-long-live-store-name-that-keeps-going.jsonl")
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert "git show" in note, f"the longest name lost the blob route: {note}"
+    assert len(note) <= B.CLAUSE_MAX_CHARS, f"{len(note)} of 600: {note}"
+    assert B.clean_clauses([note]) == [note], note
+    assert note.endswith("say so rather than ordering the store."), note
+
+    # A second store in the same vault, same bytes, absurdly long name: the mirror still
+    # reproduces it, so the ONLY reason to refuse the blob is the budget.
+    far = vault.parent / ("l" * 90) / "_pipeline" / "skills" / "reviews"
+    far.mkdir(parents=True, exist_ok=True)
+    unaffordable = far / ("q" + "u" * 150 + ".jsonl")
+    unaffordable.write_text(_MIRROR_BODY, encoding="utf-8")
+    monkeypatch.setattr("scripts.skill_verdicts.DEFAULT_STORE", unaffordable)
+    assert B._committed_mirror_blob(B._witness_target(unaffordable),
+                                    B.WITNESS_ARTIFACT_DIR) == (
+        _MIRROR_REL, _MIRROR_FIGURE), "the probe stopped finding the reproducing blob"
+    note2 = B._over_bound_extract_demand(unaffordable, item_id=4502)
+    assert "git show" not in note2, (
+        f"an unaffordable blob was named anyway: {len(note2)} chars")
+    assert note2 == _ladder_note(unaffordable, monkeypatch), note2
+
+
+def test_a_long_store_path_takes_the_mirror_demand_s_compact_wording_and_keeps_the_blob(
+        tmp_path, isolated, monkeypatch):
+    """#4502 clause 5's middle rung: a store path long enough to price the roomy wording
+    out but short enough for the compact one still gets the BLOB, not the ladder.
+
+    The first gate's review measured the band and found no fixture inside it — 179
+    characters of store path cost 581, and at 355 both wordings fail — so the compact
+    branch stood pinned by code only. The target here is computed from the emitted roomy
+    note rather than typed (one measurement of that form's own cost, plus one character),
+    and the store is laid at exactly that path length by padding a directory name, because
+    `tmp_path` is not this test's to size. What the rung has to prove is a trade and not a
+    preference: the blob survives the squeeze, only the phrasing goes.
+    """
+    store, vault, rel = _mirror_fixture(tmp_path, monkeypatch)
+    wc = _wc_of(_anchor_blob(vault, "HEAD", rel))
+    roomy = B._mirror_blob_demand(store, rel, wc)
+    assert "needs no extract" in roomy, roomy
+    assert len(roomy) <= B.CLAUSE_MAX_CHARS, f"{len(roomy)} of 600: {roomy}"
+    one_p = tmp_path / "p" / "_pipeline" / "skills" / "reviews" / "verdicts.jsonl"
+    target = B.CLAUSE_MAX_CHARS - (len(roomy) - len(str(store))) + 1
+    pad = target - len(str(one_p)) + 1
+    assert pad > 1, f"no room to price the roomy form out: {target} vs {len(str(one_p))}"
+    long_store = (tmp_path / ("p" * pad) / "_pipeline" / "skills" / "reviews"
+                  / "verdicts.jsonl")
+    long_store.parent.mkdir(parents=True, exist_ok=True)
+    long_store.write_text(_MIRROR_BODY, encoding="utf-8")
+    assert len(str(long_store)) == target, (len(str(long_store)), target)
+    monkeypatch.setattr("scripts.skill_verdicts.DEFAULT_STORE", long_store)
+
+    note = B._over_bound_extract_demand(long_store, item_id=4502)
+    assert "needs no extract" not in note, (
+        f"the roomy form still fit at {target} store-path chars: {note}")
+    assert f"`git show HEAD:{rel} | wc -l -c`" in note, (
+        f"the blob was given up instead of compacted: {note}")
+    assert f"-> `{wc}`" in note, note
+    assert "backlog/data" not in note, note
+    assert len(note) <= B.CLAUSE_MAX_CHARS, f"{len(note)} of 600: {note}"
+    assert B.clean_clauses([note]) == [note], note
+    assert note.endswith("say so rather than ordering the store."), note
+
+
+def test_a_declared_mirror_in_a_vault_that_is_not_a_git_tree_owes_no_blob(
+        tmp_path, isolated, monkeypatch):
+    """#4502's floor, pinned rather than assumed: `git ls-files` answers about a
+    repository, so in a vault that is only a directory the probe owes no blob and the note
+    is the ladder's.
+
+    The first gate's review named this seam because every missing-ground path collapses
+    into one `None`, and `None` is correct behaviour only if it never costs the demand. The
+    vault here is `isolated`'s — the directories the rest of this file writes witnesses
+    into, with no `git init` anywhere above them — so the refusal is measured against the
+    real `git` binary rather than a stubbed subprocess.
+    """
+    vault = tmp_path / "vault"
+    d = tmp_path / "lloyd-data" / "_pipeline" / "skills" / "reviews"
+    d.mkdir(parents=True, exist_ok=True)
+    store = d / "verdicts.jsonl"
+    store.write_text(_MIRROR_BODY, encoding="utf-8")
+    mirror = vault / _MIRROR_REL
+    mirror.parent.mkdir(parents=True, exist_ok=True)
+    mirror.write_text(_MIRROR_BODY, encoding="utf-8")
+    monkeypatch.setattr("scripts.skill_verdicts.DEFAULT_STORE", store)
+    monkeypatch.setattr("scripts.skill_verdicts.DEFAULT_MIRROR", mirror)
+    assert not (vault / ".git").exists(), "isolated's vault must not be a repo"
+    assert store.stat().st_size > B.WITNESS_MAX_BYTES
+    assert B._committed_mirror_blob(B._witness_target(store),
+                                    B.WITNESS_ARTIFACT_DIR) is None
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert "git show" not in note, note
+    assert note.endswith("rather than ordering the store."), note
+
+
+def test_a_declaration_that_cannot_be_imported_is_skipped_and_its_neighbour_still_resolves(
+        tmp_path, isolated, monkeypatch):
+    """#4502: a registry entry whose module will not import must cost that entry alone.
+
+    The loop `continue`s rather than returning for exactly this reason, and the failure is
+    the ordinary one — a module attribute renamed, a module moved — so the shape is
+    reproduced with a module that does not exist. Ahead of a good entry it must not poison
+    the probe; alone, it must send the demand back to the ladder rather than raise, because
+    this runs inside triage, on every item with an over-bound citation, and an exception
+    here would take the owed-check pass down instead of one clause.
+    """
+    from scripts.automod import witness as W
+    store, vault, rel = _mirror_fixture(tmp_path, monkeypatch)
+    broken = ("scripts.no_such_store_module_at_all", "DEFAULT_STORE", "DEFAULT_MIRROR")
+    monkeypatch.setattr(W, "_MIRROR_DECLARATIONS",
+                        (broken, ("scripts.skill_verdicts", "DEFAULT_STORE",
+                                  "DEFAULT_MIRROR")))
+    assert B._committed_mirror_blob(B._witness_target(store),
+                                    B.WITNESS_ARTIFACT_DIR) == (rel, _MIRROR_FIGURE), (
+        "one unloadable entry cost the whole registry")
+    monkeypatch.setattr(W, "_MIRROR_DECLARATIONS", (broken,))
+    assert B._committed_mirror_blob(B._witness_target(store),
+                                    B.WITNESS_ARTIFACT_DIR) is None
+    note = B._over_bound_extract_demand(store, item_id=4502)
+    assert "git show" not in note, note
+    assert note.endswith("rather than ordering the store."), note
+
+
+def test_the_owed_list_a_triage_publishes_carries_the_mirror_demand_not_a_copy_order(
+        tmp_path, isolated, monkeypatch):
+    """#4502's seam: the string that matters is the one `add_witness_artifact_clause`
+    appends to `owed` for an item body that cites the store, because that is what reaches
+    `record_verdict`, what the next round reads, and what #4500 carries today.
+
+    The builder is one function; the boundary is the owed list. Nothing else may come back
+    with it — no graded clause (the over-bound route never enters the contract, #2289), and
+    no second demand for the same store.
+    """
+    store, vault, rel = _mirror_fixture(tmp_path, monkeypatch)
+    clauses, owed = B.add_witness_artifact_clause(
+        [], f"Re-running the ledger over `{store}` gave 23 lifts.",
+        route_to_owed=True, item_id=4502)
+    assert clauses == [], f"an over-bound store entered the graded contract: {clauses}"
+    assert len(owed) == 1, owed
+    assert f"`git show HEAD:{rel} | wc -l -c`" in owed[0], owed[0]
+    assert "backlog/data" not in owed[0], owed[0]
+    assert len(owed[0]) <= B.CLAUSE_MAX_CHARS, owed[0]
