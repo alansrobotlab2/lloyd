@@ -234,7 +234,7 @@ function HealthPill({ health, label }: { health: string; label: string }) {
 function ErrorPanel({ what, error }: { what: string; error: string }) {
   return (
     <Panel className="border-amber-400/30">
-      <div className="flex items-start gap-2">
+      <div className="flex items-start gap-2" data-section-unavailable={what}>
         <AlertTriangle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0 text-amber-400" />
         <div className="min-w-0">
           <div className="text-[11px] text-foreground">{what} unavailable</div>

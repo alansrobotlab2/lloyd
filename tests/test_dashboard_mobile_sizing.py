@@ -199,3 +199,21 @@ def test_owed_hand_off_prose_breaks_inside_the_health_card():
         "reunites the line into one unbreakable run, and `break-words` is then "
         "left with no line box to break inside"
     )
+
+
+def test_the_settle_attribute_is_the_one_the_error_panel_carries():
+    """#3068: the 1280 px pin waits for no section to show an ErrorPanel, by the
+    attribute ErrorPanel carries. A rename on either side makes that wait vacuous —
+    it would settle at once on a degraded page — so the spelling is pinned at both
+    ends: the component here, and the probe's `UNAVAILABLE_ATTR`, `SETTLED_POLL`
+    and in-page `JS` that read it."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "dmm_probe_attr", ROOT / "scripts" / "maintenance" / "dashboard_mobile_probe.py")
+    probe = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(probe)
+    body = re.search(r"function ErrorPanel\([\s\S]*?\n\}", SOURCE)
+    assert body, "ErrorPanel is gone from DashboardPage.tsx"
+    assert f"{probe.UNAVAILABLE_ATTR}={{what}}" in body.group(0), body.group(0)
+    assert probe.UNAVAILABLE_ATTR in probe.SETTLED_POLL
+    assert f"'{probe.UNAVAILABLE_ATTR}'" in probe.JS

@@ -4077,7 +4077,7 @@ class Gate:
                    if TP.is_test_path(p, self.worktree) and not (self.worktree / p).exists()]
         if removed:
             return False, f"test files removed: {removed}", {**counts, **extra}
-        flinched = counts.get("parallel_only_failures") or []
+        flinched, history, history_runs = _flinch_record(counts, self.round_id)
         # On the pass too, not only on the failure branches: the one reading that
         # says whether the suite ran redirected is worth nothing if it is absent
         # from every report where nothing went wrong.
@@ -4117,7 +4117,7 @@ class Gate:
                       # the pins is what keeps them whole under `DETAIL_MAX_CHARS`.
                       + f"; {collected_floor_note}; {passed_floor_note}"
                       + (f"; {len(flinched)} failed only under parallel load and passed "
-                         f"serially: {_name_ids(flinched)}" if flinched else "")
+                         f"serially: {_name_flinched(flinched, history, history_runs)}" if flinched else "")
                       # #1691: the counts say how many tests ran; they cannot say that
                       # a file's own pinned assertions ran NONE of them. Six skips inside
                       # a 40-skip budget is invisible in a total, so the finding the file
@@ -5633,3 +5633,91 @@ _affected_tests.attach(Gate)
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+# --------------------------------------------------------------------------- #
+# #3068: a parallel-only node carries its own recent record. Appended here, at
+# the end of the module, so no line a doc or test cites above moves.
+# --------------------------------------------------------------------------- #
+
+#: How many of the newest full `tests` rungs a node named "failed only under
+#: parallel load" has its history read over — off the rounds store the floors
+#: already walk (one `gate.json` per round, newest first by name), within
+#: `PYTEST_SKIP_BASE_SCAN_CAP` directories.
+PARALLEL_ONLY_HISTORY_RUNS = 20
+
+
+def _full_tests_rung(report) -> tuple[bool, dict] | None:
+    """`(ok, data)` of one parsed `gate.json`'s FULL `tests` rung, green or red, or
+    None. `_green_full_tests_data`'s filter (no `REUSED`, no `partial`) minus the
+    verdict: a red run that listed a flinch listed it all the same."""
+    if not isinstance(report, dict):
+        return None
+    for rung in report.get("rungs") or []:
+        if not isinstance(rung, dict) or rung.get("name") != "tests":
+            continue
+        if str(rung.get("detail") or "").startswith("REUSED"):
+            return None
+        data = rung.get("data")
+        if not isinstance(data, dict) or "partial" in data:
+            return None
+        return bool(rung.get("ok")), data
+    return None
+
+
+def _parallel_only_history(node_ids: list[str],
+                           exclude_round: str | None = None) -> tuple[dict[str, int], int]:
+    """`({node: k}, n)`: of the newest `n` (at most `PARALLEL_ONLY_HISTORY_RUNS`)
+    full `tests` rungs other than this round's, how many listed each node under
+    `parallel_only_failures`.
+
+    Accountability, never a verdict: a serial re-run that passes still passes, and
+    this only says whether the flinch is a first or the 34th. Fail-open — an
+    unreadable store is `({node: 0, ...}, 0)`, and the detail prints exactly that.
+    """
+    counts = {n: 0 for n in node_ids}
+    try:
+        rounds_dir = S.ROUNDS_DIR
+        dirs = (sorted((d for d in rounds_dir.iterdir() if d.is_dir()),
+                       key=lambda d: d.name, reverse=True)
+                if rounds_dir.is_dir() else [])
+    except OSError:
+        return counts, 0
+    runs = 0
+    for d in dirs[:max(0, int(PYTEST_SKIP_BASE_SCAN_CAP))]:
+        if runs >= PARALLEL_ONLY_HISTORY_RUNS:
+            break
+        if exclude_round and d.name == exclude_round:
+            continue
+        try:
+            row = _full_tests_rung(json.loads((d / "gate.json").read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+        if row is None:
+            continue
+        runs += 1
+        listed = row[1].get("parallel_only_failures") or []
+        if isinstance(listed, list):
+            for n in counts:
+                if n in listed:
+                    counts[n] += 1
+    return counts, runs
+
+
+def _flinch_record(counts: dict, round_id: str | None) -> tuple[list[str], dict[str, int], int]:
+    """The rung's parallel-only nodes, and — when there are any — their history,
+    written into `counts` as `parallel_only_history` / `parallel_only_history_runs`
+    so the row a reader queries carries the same numbers the detail prints."""
+    flinched = counts.get("parallel_only_failures") or []
+    if not flinched:
+        return flinched, {}, 0
+    history, runs = _parallel_only_history(flinched, round_id)
+    counts["parallel_only_history"] = history
+    counts["parallel_only_history_runs"] = runs
+    return flinched, history, runs
+
+
+def _name_flinched(ids: list[str], history: dict[str, int], runs: int) -> str:
+    """`_name_ids` over the flinched nodes, each with its own count beside it."""
+    return _name_ids([f"{n} ({history.get(n, 0)} of the last {runs} full runs)"
+                      for n in ids])

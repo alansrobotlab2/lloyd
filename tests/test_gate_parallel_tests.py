@@ -1478,3 +1478,67 @@ def test_a_collection_error_for_a_file_that_exists_is_still_retried(tmp_path, mo
     gone.unlink()
     assert G._split_node_ids(block, g.worktree) == ([], [broken]), (
         "a token naming no file in the worktree was kept as a node id")
+
+
+# ── #3068: a parallel-only node carries its own recent record ──────────────────────
+#
+# 34 of 734 full gate runs listed the desktop 1280 px pin under "failed only under
+# parallel load and passed serially", and every one of those rows printed the node's
+# name and nothing else — a first flinch and a 34th read the same. The rung now says
+# how many of the newest `PARALLEL_ONLY_HISTORY_RUNS` full runs listed the same node,
+# read off the rounds store the floors walk, and the verdict does not move.
+
+def _seed_history(tmp_path, monkeypatch, listed_in: set[int], n: int = 25,
+                  extra: dict[str, dict] | None = None) -> None:
+    """`n` full `tests` rungs, newest first by name; row i lists LOAD_FLAKE iff
+    i in `listed_in` (0 = newest)."""
+    rounds_dir = tmp_path / "rounds"
+    rows: dict[str, dict] = {}
+    for i in range(n):
+        data = {"passed": 100, "failed": 0, "tests_skipped": 1}
+        if i in listed_in:
+            data["parallel_only_failures"] = [LOAD_FLAKE, "tests/test_other.py::t"]
+        rows[f"SM_20261101_{999999 - i:06d}"] = {"name": "tests", "ok": True,
+                                                  "detail": "100 passed", "data": data}
+    rows.update(extra or {})
+    for rid, rung in rows.items():
+        (rounds_dir / rid).mkdir(parents=True)
+        (rounds_dir / rid / "gate.json").write_text(
+            json.dumps({"round_id": rid, "rungs": [rung]}), encoding="utf-8")
+    monkeypatch.setattr(G.S, "ROUNDS_DIR", rounds_dir)
+
+
+def test_a_parallel_only_node_carries_its_count_over_the_last_20_full_runs(tmp_path, monkeypatch):
+    # Listed in 3 of the newest 20 (rows 0, 5, 18) and once more past the window
+    # (row 22), which must not be counted. A newer partial run and a REUSED one
+    # that list it are not full runs, and the round being gated is not its own
+    # history — none of the three may move the count.
+    listing = {"passed": 1, "failed": 0, "parallel_only_failures": [LOAD_FLAKE]}
+    _seed_history(tmp_path, monkeypatch, {0, 5, 18, 22}, extra={
+        "SM_20261102_000001": {"name": "tests", "ok": True, "detail": "1 passed",
+                               "data": {**listing, "partial": True}},
+        "SM_20261102_000002": {"name": "tests", "ok": True,
+                               "detail": "REUSED from SM_x", "data": listing},
+        "SM_T": {"name": "tests", "ok": True, "detail": "1 passed", "data": listing},
+    })
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    script.append((1, f"FAILED {LOAD_FLAKE} - AssertionError\n"
+                      "1 failed, 5895 passed, 13 skipped in 76s\n"))
+    script.append((0, "53 passed in 1.39s\n"))
+    ok, detail, data = g.rung_tests()
+    assert ok is True, f"the history moved the verdict: {detail}"
+    assert data["parallel_only_failures"] == [LOAD_FLAKE]
+    assert data["parallel_only_history"] == {LOAD_FLAKE: 3}, data.get("parallel_only_history")
+    assert data["parallel_only_history_runs"] == G.PARALLEL_ONLY_HISTORY_RUNS == 20
+    assert f"{LOAD_FLAKE} (3 of the last 20 full runs)" in detail, detail
+
+
+def test_a_first_flinch_with_no_store_still_passes_and_says_zero(tmp_path, monkeypatch):
+    monkeypatch.setattr(G.S, "ROUNDS_DIR", tmp_path / "no-such-rounds")
+    g, _calls, script = _gate(tmp_path, monkeypatch)
+    script.append((1, f"FAILED {LOAD_FLAKE} - AssertionError\n"
+                      "1 failed, 5895 passed, 13 skipped in 76s\n"))
+    script.append((0, "53 passed in 1.39s\n"))
+    ok, detail, data = g.rung_tests()
+    assert ok is True, detail
+    assert f"{LOAD_FLAKE} (0 of the last 0 full runs)" in detail, detail

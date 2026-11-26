@@ -67,6 +67,7 @@ SEEDED_LABEL_PATHS = [
 
 JS = r"""
 (seeded) => {
+  const UNAVAILABLE_ATTR = 'data-section-unavailable';
   const sel = el => {
     let s = el.tagName.toLowerCase();
     if (typeof el.className === 'string' && el.className.trim())
@@ -136,6 +137,11 @@ JS = r"""
       panels: kids,
       pills,
       kidsTotal: kids.length + pills.length,
+      // A section whose slice of `/api/dashboard` came back as `{error}` renders
+      // one full-width ErrorPanel instead of its grid (#3068): read in THIS
+      // evaluate, beside the widths, so the verdict knows which render it graded.
+      unavailable: Array.from(sec.querySelectorAll(`[${UNAVAILABLE_ATTR}]`))
+        .map(e => e.getAttribute(UNAVAILABLE_ATTR)),
     });
   }
   // The clipped inventory, now with a verdict on each entry. Before #2202 this
@@ -211,6 +217,42 @@ JS = r"""
 
 
 SECTION_POLL = """() => document.querySelectorAll('section').length > 0"""
+
+#: The attribute `ErrorPanel` (web/src/components/pages/DashboardPage.tsx) carries:
+#: the one mark a section leaves when its slice of `/api/dashboard` failed. Spelled
+#: again inside `JS` and `SETTLED_POLL`, and pinned equal to the component by
+#: `tests/test_dashboard_responsive.py::test_the_settle_attribute_is_the_one_the_error_panel_carries`.
+UNAVAILABLE_ATTR = "data-section-unavailable"
+
+#: The settled render (#3068): sections painted AND none of them showing an
+#: ErrorPanel. A live backend under the gate's 8-way load times the aggregator's
+#: `/state` read out (`_MCP_TIMEOUT_S`, app/routers/dashboard.py), so the
+#: Subagents section paints one 728 px "Agent registry unavailable" card in place
+#: of its two 358 px panels — a data state, not a layout, and the page's own 2 s
+#: poll replaces it once a read succeeds.
+SETTLED_POLL = ("() => document.querySelectorAll('section').length > 0 && "
+                "document.querySelectorAll('[data-section-unavailable]').length === 0")
+
+
+def stand_in_errored(payload, stand_in):
+    """`(payload, substituted)`: the live `/api/dashboard` payload with every
+    section named in `stand_in` that came back `{"error": …}` replaced by its
+    stand-in value, and the sorted names of the sections that were (#3068).
+
+    For a section whose failure is a property of the live backend rather than of
+    the tree being measured — the aggregator's `/state` read, which times out for
+    minutes at a stretch under an 8-way gate (`_MCP_TIMEOUT_S`) — so its LAYOUT
+    is still measured, over a known payload, instead of an ErrorPanel. A section
+    that answered is never touched, and anything not a dict passes through."""
+    if not isinstance(payload, dict) or not stand_in:
+        return payload, []
+    out, hit = dict(payload), []
+    for name, value in stand_in.items():
+        sec = out.get(name)
+        if isinstance(sec, dict) and "error" in sec:
+            out[name] = value
+            hit.append(name)
+    return out, sorted(hit)
 
 
 def load_seed(path):
@@ -333,7 +375,8 @@ def open_dashboard(page, timeout_ms=15000):
 
 
 def measure_page(browser, url, width, seed=None, mutate=None,
-                 mutate_note="measure_page(mutate=…)"):
+                 mutate_note="measure_page(mutate=…)", settle_ms=None,
+                 stand_in=None):
     """One viewport's dashboard geometry: open the tab, settle, measure.
 
     Split out of `run` so `tests/test_dashboard_responsive.py` asserts on THIS
@@ -359,6 +402,17 @@ def measure_page(browser, url, width, seed=None, mutate=None,
     iPhone (UA, DPR 3, touch); unseeded it stays the context #1685's four
     geometry pins were calibrated in, which is why those two paths do not share
     a line.
+
+    `settle_ms` (#3068) waits, after the fixed settle, up to that long for
+    `SETTLED_POLL` — no section showing an ErrorPanel — before measuring. A wait
+    that runs out is not an error here: the measurement is taken anyway and its
+    per-section `unavailable` list says what it saw, so the caller's verdict can
+    refuse to grade a degraded render instead of calling it a layout defect.
+
+    `stand_in` (#3068, unseeded runs only) is `{section: value}` for
+    `stand_in_errored`: the live reply passes through the route, and a named
+    section that came back `{error}` is replaced before the page sees it. The
+    names actually replaced are returned as `res["stand_in"]`.
     """
     kwargs = dict(viewport={"width": width, "height": 844},
                   ignore_https_errors=True,
@@ -376,10 +430,27 @@ def measure_page(browser, url, width, seed=None, mutate=None,
             ctx.route(DASHBOARD_URL_RE,
                       lambda route: route.fulfill(
                           status=200, content_type="application/json", body=body))
+        stood_in: set = set()
+        if stand_in and seed is None:
+            def _live_with_stand_ins(route):
+                try:
+                    resp = route.fetch()
+                    payload, hit = stand_in_errored(resp.json(), stand_in)
+                except Exception:
+                    route.continue_()
+                    return
+                stood_in.update(hit)
+                route.fulfill(response=resp, body=json.dumps(payload))
+            ctx.route(DASHBOARD_URL_RE, _live_with_stand_ins)
         page.goto(url, wait_until="load", timeout=45000)
         page.wait_for_timeout(2500)
         open_dashboard(page)
         page.wait_for_timeout(3000)
+        if settle_ms:
+            try:
+                page.wait_for_function(SETTLED_POLL, timeout=settle_ms)
+            except Exception:
+                pass  # the `unavailable` lists below carry what never settled
         labels = seeded_labels(seed) if seed else []
         if mutate:
             # The mutation is itself measured and printed, so a caller cannot claim a
@@ -393,6 +464,8 @@ def measure_page(browser, url, width, seed=None, mutate=None,
                   "style, not of the shipped page", file=sys.stderr)
         res = page.evaluate(JS, labels)
         res["console_errors"] = errs[:3]
+        if stand_in and seed is None:
+            res["stand_in"] = sorted(stood_in)
         return res
     finally:
         ctx.close()

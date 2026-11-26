@@ -48,6 +48,7 @@ snapshot that has none, the gap its verdict on #1685's clause 1 had to work arou
 from __future__ import annotations
 
 import importlib.util
+import os
 import socket
 import ssl
 import subprocess
@@ -106,6 +107,27 @@ DESKTOP_TRACKS: dict[str, list[int]] = {
     "Tokens": [728],
 }
 TOLERANCE_PX = 1
+
+# #3068: how long the 1280 px pin waits for the SETTLED render — every section
+# painted from data, none showing an ErrorPanel — before it measures anyway. The
+# page polls every 2 s and the aggregator read that degrades under load times out
+# at 2 s (`_MCP_TIMEOUT_S`, app/routers/dashboard.py), so this is several polls'
+# worth of chances for one read to land; a page still degraded after it is graded
+# as "no verdict", never as a track width.
+DESKTOP_SETTLE_MS = 20000
+
+# #3068: the one slice whose failure is the live AGGREGATOR's, not this tree's.
+# Measured under an 8-way gate load (2026-11-25), `/state` timed out on every
+# poll for longer than DESKTOP_SETTLE_MS twice in a row, so waiting alone still
+# failed the pin on a degraded backend. When that slice comes back `{error}` the
+# page is handed an empty registry instead — the shape the Subagents section
+# renders on a quiet box (two panels, "No subagents running") — so its layout is
+# still measured, and the pin says it stood in (`res["stand_in"]`).
+DESKTOP_STAND_IN = {"agents": {
+    "subagents": {"active": [], "active_count": 0, "recent": []},
+    "background_tasks": {"active": [], "active_count": 0, "recent": []},
+    "tools": 0,
+}}
 
 
 def _port_is_tls(port: int) -> bool:
@@ -273,8 +295,11 @@ def dashboard_url(request):
     yield from dashboard_serving(request.session)
 
 
-def _measure(url, width):
+def _measure(url, width, settle_ms=None, stand_in=None):
     """One real browser measurement of one real page.
+
+    `settle_ms` (#3068) is passed to `measure_page`, which then waits for the
+    settled render before measuring; only the 1280 px pin asks for it.
 
     Two outcomes used to be indistinguishable from a pass (#1691):
 
@@ -305,7 +330,9 @@ def _measure(url, width):
             pytest.skip(why)
         try:
             try:
-                res = probe.measure_page(browser, url, width)
+                res = (probe.measure_page(browser, url, width, settle_ms=settle_ms,
+                                          stand_in=stand_in)
+                       if settle_ms else probe.measure_page(browser, url, width))
             except Exception as exc:
                 pytest.fail(f"dashboard did not load: {str(exc)[:160]}")
             PINS.measured()
@@ -354,6 +381,15 @@ def _desktop_complaints(res) -> list[str]:
         # The section floor tripped: no verdict exists, which is not a pass and
         # is exactly the transient a second measurement is meant to settle.
         return [str(exc)]
+    # #3068: a section that rendered its ErrorPanel was graded on DATA, not on
+    # layout — the live backend's aggregator read timed out under load and the
+    # Subagents section painted one 728 px "unavailable" card where its two 358 px
+    # panels go. That is no verdict on the tracks, and it says so by name.
+    degraded = [f"'{s['head']}' ({', '.join(s['unavailable'])} unavailable)"
+                for s in res["sections"] if s.get("unavailable")]
+    if degraded:
+        return [f"{DESKTOP_WIDTH}px: no verdict — the render never settled, these "
+                f"sections show an ErrorPanel instead of their data: {degraded}"]
     if res["pageOverflow"] > 0:
         complaints.append(f"the page scrolls sideways by {res['pageOverflow']}px")
 
@@ -407,12 +443,31 @@ def desktop_track_verdict(measure) -> dp.ReMeasured:
     return dp.grade_once_then_twice(measure, _desktop_complaints)
 
 
+def _load_context(elapsed_s: float) -> str:
+    """Elapsed seconds and the xdist worker this ran on (#3068 clause 3), so a
+    failure under the gate's 8-way load reads differently from a serial one.
+    xdist exports both variables into every worker; a serial run has neither."""
+    worker = os.environ.get("PYTEST_XDIST_WORKER") or "serial"
+    count = os.environ.get("PYTEST_XDIST_WORKER_COUNT") or "1"
+    return f"{elapsed_s:.1f}s elapsed, worker {worker} of {count}"
+
+
 def test_desktop_cards_keep_their_track_widths(dashboard_url):
-    result = desktop_track_verdict(lambda: _measure(dashboard_url, DESKTOP_WIDTH))
+    started = time.monotonic()
+    result = desktop_track_verdict(
+        lambda: _measure(dashboard_url, DESKTOP_WIDTH, settle_ms=DESKTOP_SETTLE_MS,
+                         stand_in=DESKTOP_STAND_IN))
+    stood = sorted({n for r in result.values for n in (r.get("stand_in") or [])})
+    if stood:
+        # Said, never silent: the layout was measured over a stand-in for these.
+        warnings.warn(f"1280 px pin: live {stood} came back as an error; its "
+                      "layout was measured over DESKTOP_STAND_IN", stacklevel=1)
     assert result.clean, (
         f"the 1280 px desktop pin disagrees with its pinned tracks: "
         f"{result.complaints} ({result.detail()}; first measurement said "
-        f"{list(result.first)})"
+        f"{list(result.first)}; second said "
+        f"{list(result.second) if result.retried else 'not taken'}; "
+        f"{_load_context(time.monotonic() - started)})"
     )
 
 
@@ -754,7 +809,7 @@ def _pin_with_readings(monkeypatch, readings):
     """
     calls: list[int] = []
 
-    def fake_measure(url, width):
+    def fake_measure(url, width, settle_ms=None, stand_in=None):
         calls.append(width)
         return readings[min(len(calls) - 1, len(readings) - 1)]
 
@@ -1435,3 +1490,120 @@ def test_a_vite_child_dies_with_the_process_that_started_it(tmp_path):
         time.sleep(0.05)
     os.kill(child, signal.SIGKILL)
     pytest.fail("the child outlived the process that started it")
+
+
+# ── #3068: the 1280 px pin grades only the SETTLED render ─────────────────────────
+#
+# The flake the gate kept downgrading was not a track width. Reproduced on
+# 2026-11-25 in a full `-n 8` suite, both readings agreed on
+# `'Subagents & background tasks' card is 728px, allowed [358]`: the pin measures
+# the live backend's data, the aggregator's `/state` read times out at 2 s under
+# that load (837 `dashboard section 'agents' failed` lines across server.err's
+# rotations), and the section paints ONE full-width ErrorPanel where its two 358 px
+# panels go. Re-measuring the same degraded backend a few seconds later agrees with
+# itself, so the fix is a wait on the settled render, not a third reading.
+
+def _two_stage_page(settle_after_ms: int) -> str:
+    """A static page shaped like the 1280 px dashboard, whose Subagents section is
+    an ErrorPanel until `settle_after_ms` after load and its two panels after.
+    Served as a `data:` URL, so it needs chromium but no vite and no backend."""
+    def cards(widths, cls="rounded-lg"):
+        return "".join(f'<div class="{cls}" style="width:{w}px;flex:none;height:20px">'
+                       "</div>" for w in widths)
+    rows = {
+        "vLLM engines": cards([358, 358]),
+        "Lloyd agent": cards([358, 358]),
+        "Subagents & background tasks": (
+            '<div class="rounded-lg" style="width:728px;flex:none;height:20px">'
+            '<div data-section-unavailable="Agent registry">Agent registry '
+            "unavailable</div></div>"),
+        "System": cards([173, 173, 235]),
+        "Services": cards([176, 176], cls="rounded-md"),
+        "Automation &amp; work": cards([235, 728]),
+        "Tokens": cards([728]),
+    }
+    body = "".join(
+        f'<section><h2>{head}</h2><div id="s{i}" style="display:flex;'
+        f'flex-wrap:wrap;gap:4px">{inner}</div></section>'
+        for i, (head, inner) in enumerate(rows.items()))
+    script = ("<script>setTimeout(() => { const s = document.getElementById('s2');"
+              " s.replaceChildren(...[358, 358].map(w => { const d ="
+              " document.createElement('div'); d.className = 'rounded-lg';"
+              " d.style.cssText = `width:${w}px;flex:none;height:20px`; return d; }));"
+              " }, SETTLE_AFTER);</script>").replace("SETTLE_AFTER", str(settle_after_ms))
+    html = (f"<!doctype html><html><body style='margin:0;width:1000px'>{body}"
+            f"{script}</body></html>")
+    from urllib.parse import quote
+    return "data:text/html," + quote(html)
+
+
+def test_the_desktop_verdict_only_sees_the_settled_render(monkeypatch):
+    """Clause 2: `_measure` driven against a page whose first stage is the degraded
+    render the gate's flake was. The stage outlives every fixed sleep in
+    `measure_page` (2.5 s + 3 s), so without the settle wait both readings grade
+    the 728 px ErrorPanel and the pin fails exactly as it did under xdist-8; with
+    it, the one reading the verdict takes is the settled page, and it agrees."""
+    monkeypatch.setattr(PINS, "note", lambda reason: None)
+    url = _two_stage_page(settle_after_ms=7000)
+    seen: list[dict] = []
+
+    def measure():
+        res = _measure(url, DESKTOP_WIDTH, settle_ms=DESKTOP_SETTLE_MS)
+        seen.append(res)
+        return res
+
+    result = desktop_track_verdict(measure)
+    assert [s.get("unavailable") for r in seen for s in r["sections"]
+            if s.get("unavailable")] == [], (
+        f"the verdict graded a render that still showed an ErrorPanel: {seen}")
+    assert result.clean and not result.retried, (
+        f"the settled page should pass on one reading: {result.complaints} "
+        f"({result.detail()})")
+
+
+def test_a_degraded_section_is_no_verdict_not_a_track_width():
+    """A reading taken while a section shows its ErrorPanel says so by name — the
+    complaint a reviewer reads is "never settled", never "card is 728px"."""
+    res = _good_desktop()
+    res["sections"][2]["panels"] = [{"w": 728, "sw": 700}]
+    res["sections"][2]["unavailable"] = ["Agent registry"]
+    complaints = _desktop_complaints(res)
+    assert len(complaints) == 1 and "no verdict" in complaints[0], complaints
+    assert "Agent registry unavailable" in complaints[0], complaints
+    assert "728px" not in complaints[0], complaints
+
+
+def test_the_pin_failure_carries_both_readings_and_its_load(monkeypatch):
+    """Clause 3: a failing pin prints the first AND second reading's complaints,
+    elapsed seconds and the xdist worker it ran on, so load contention and a real
+    layout defect are two different messages."""
+    monkeypatch.setenv("PYTEST_XDIST_WORKER", "gw3")
+    monkeypatch.setenv("PYTEST_XDIST_WORKER_COUNT", "8")
+    _pin_with_readings(monkeypatch, [_cards({"Services": 999}),
+                                     _cards({"Services": 997})])
+    with pytest.raises(AssertionError) as exc:
+        test_desktop_cards_keep_their_track_widths("https://127.0.0.1:5173/")
+    msg = str(exc.value)
+    assert "999px" in msg and "997px" in msg, msg
+    assert "s elapsed" in msg and "worker gw3 of 8" in msg, msg
+
+
+def test_a_failed_aggregator_slice_is_stood_in_and_nothing_else_is():
+    """The stand-in replaces exactly the named section, and only when the live
+    reply carried `{error}` for it: a section that answered is measured as served,
+    and an errored section nobody named still reaches the page as an ErrorPanel
+    (and the settle rule's "no verdict")."""
+    probe = _load_probe()
+    live = {"agents": {"error": "ReadTimeout: "}, "host": {"error": "boom"},
+            "vllm": [{"name": "primary"}]}
+    out, hit = probe.stand_in_errored(live, DESKTOP_STAND_IN)
+    assert hit == ["agents"]
+    assert out["agents"] == DESKTOP_STAND_IN["agents"]
+    assert out["host"] == {"error": "boom"} and out["vllm"] == live["vllm"]
+    assert live["agents"] == {"error": "ReadTimeout: "}, "the live payload was mutated"
+    ok = {"agents": {"subagents": {"active": [{"run_id": "r"}]}}}
+    assert probe.stand_in_errored(ok, DESKTOP_STAND_IN) == (ok, [])
+    # The stand-in is the shape the Subagents section renders, not an error.
+    agents = DESKTOP_STAND_IN["agents"]
+    assert "error" not in agents and set(agents) == {"subagents", "background_tasks",
+                                                     "tools"}
