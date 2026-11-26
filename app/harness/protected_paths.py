@@ -22,9 +22,9 @@ So this module *parses* instead of pattern-matching the whole string: it
 splits the command into simple commands, follows `cd`, expands `~`/`$HOME`,
 lets `shlex` strip the quoting, resolves relative paths, and then asks one
 question of every delete-shaped operation — does its target take out a
-protected tree? A protected tree is the vault, the lloyd tree, or the home
-directory, and "take out" means the root itself, anything above it, a
-top-level folder of it, or a glob directly over those.
+protected tree? A protected tree is a root of `protected_roots()` — the vault,
+the lloyd tree, the lloyd data roots, the home directory — and "take out" means
+the root itself, anything above it, a top-level folder of it, or a glob directly over those.
 
 What it deliberately does not refuse: a specific file or a nested path
 (`rm -rf ~/obsidian/skills/old-skill`, `rm eval/baselines/item472-*.json`).
@@ -104,9 +104,9 @@ def protected_roots() -> list[Root]:
 # file was two tool calls — Read, then Write — while the longer one had a
 # checker.
 #
-# This deny-set is deliberately NOT `protected_roots()`. That one exists to
-# catch a wholesale *delete*, so its roots are the vault, the lloyd tree and
-# $HOME; refusing writes under those would refuse every ordinary vault note and
+# This deny-set is deliberately NOT `protected_roots()`. That one exists to catch a
+# wholesale *delete*, so its roots are the vault, the lloyd tree, the lloyd data roots
+# and the home directory; refusing writes under those would refuse every vault note and
 # every file a self-modification round writes into its own worktree — a larger
 # outage than the hole. A write predicate needs the surfaces whose *contents*
 # are load-bearing on their own: the credentials beside the agent's home, the

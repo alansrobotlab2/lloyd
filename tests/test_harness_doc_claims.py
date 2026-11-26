@@ -2756,3 +2756,102 @@ def test_the_policy_pin_holds_no_literal_count():
                         r"\s*\)\s*[=!]=\s*\d+")
     assert not banned.search(here)
     assert banned.search("len(_POLICY_ANSWERS)" " == 4")
+
+
+# ---------------------------------------------------------------------------
+# Every prose site that enumerates protected_roots() names every kind of root (#4440)
+# ---------------------------------------------------------------------------
+#
+# Lane 2's docstring, the module header, the write-deny comment and tools.md step 3
+# all said "the vault, the lloyd tree and $HOME" while `protected_roots()` had also
+# carried the lloyd data roots since the 2026-09-22 move. The expected set is read off
+# the function, never typed here: the count of roots moves with the checkout (a
+# worktree import adds its own "lloyd tree", a gate's `LLOYD_DATA` adds a data root),
+# so what each site must name is every distinct root *label* the function returns.
+
+#: Spellings a site may use for a root label besides the label itself.
+_ROOT_LABEL_ALIASES = {"home directory": ("home directory", "$HOME")}
+
+#: `(file, start anchor, end anchor)` for each site that enumerates the roots. The
+#: text between the anchors is whitespace-collapsed (comment `#` markers dropped), so a
+#: rewrap is not a failure.
+_ROOT_PROSE_SITES = (
+    ("app/harness/safety.py", "2. `check_protected_delete` —", "3. `check_sync_registration`"),
+    ("app/harness/protected_paths.py", "A protected tree is", '"take out" means'),
+    ("app/harness/protected_paths.py",
+     "This deny-set is deliberately NOT `protected_roots()`.", "refusing writes under those"),
+    ("architecture/tools.md", "It is not `protected_roots()`:", "refusing writes under them"),
+    ("architecture/vault-protection.md",
+     "| `protected_roots()` / `check_protected_delete` |", "| the Bash lane"),
+    ("architecture/vault-protection.md",
+     "It is deliberately *not* `protected_roots()`:", "refusing writes under them"),
+)
+
+
+def _collapse(text: str) -> str:
+    return re.sub(r"\s*\n[ \t]*(?:#(?!#)[ \t]*)?", " ", text)
+
+
+def _root_site(text: str, start: str, end: str) -> str:
+    flat = _collapse(text)
+    i = flat.find(start)
+    assert i >= 0, f"site anchor {start!r} is gone"
+    j = flat.find(end, i + len(start))
+    assert j > i, f"site end anchor {end!r} is gone after {start!r}"
+    return flat[i:j]
+
+
+def _root_labels() -> "list[str]":
+    from app.harness.protected_paths import protected_roots
+    labels = sorted({r.label for r in protected_roots()})
+    assert labels, "protected_roots() returned nothing: there is no set to grade against"
+    return labels
+
+
+def _roots_unnamed_by_sites(labels: "list[str]") -> "list[str]":
+    problems = []
+    for rel, start, end in _ROOT_PROSE_SITES:
+        site = _root_site((ROOT / rel).read_text(encoding="utf-8"), start, end)
+        problems += [f"{rel} ({start[:40]}…) does not name the {label!r} roots"
+                     for label in labels
+                     if not any(a in site for a in _ROOT_LABEL_ALIASES.get(label, (label,)))]
+    return problems
+
+
+def test_every_site_that_enumerates_protected_roots_names_every_root_it_returns():
+    """#4440 clauses 1-3: derived from `protected_roots()`, no stored count."""
+    assert _roots_unnamed_by_sites(_root_labels()) == []
+
+
+def test_the_root_prose_node_fails_when_protected_roots_gains_a_root(monkeypatch):
+    """#4440 clause 4: seeding one extra root makes the node fail, at every site."""
+    from app.harness import protected_paths as pp
+    real = pp.protected_roots
+    monkeypatch.setattr(pp, "protected_roots",
+                        lambda: [*real(), pp.Root("/planted/root", "planted root", True)])
+    problems = _roots_unnamed_by_sites(_root_labels())
+    assert len(problems) == len(_ROOT_PROSE_SITES), problems
+    assert all("'planted root'" in p for p in problems)
+
+
+def test_the_root_prose_node_passes_at_the_live_and_the_worktree_count(monkeypatch, tmp_path):
+    """#4440 clause 4: a live checkout and a worktree import differ by one root (the
+    worktree's own "lloyd tree"), and the node passes at both."""
+    import os
+    import app.paths as paths
+    from app.harness.protected_paths import protected_roots
+    monkeypatch.setattr(paths, "LLOYD_HOME", Path(os.path.expanduser("~")) / "lloyd")
+    live = len(protected_roots())
+    assert _roots_unnamed_by_sites(_root_labels()) == []
+    monkeypatch.setattr(paths, "LLOYD_HOME", tmp_path / "wt")
+    assert len(protected_roots()) == live + 1
+    assert _roots_unnamed_by_sites(_root_labels()) == []
+
+
+def test_the_root_prose_node_reads_the_retired_triple_as_short():
+    """The premise, manufactured: the sentence #4440 was filed against fails the check."""
+    stale = _collapse("refuses a delete, move\n         or `git clean` that takes out the "
+                      "vault, the lloyd tree or $HOME\n         wholesale")
+    short = [l for l in _root_labels()
+             if not any(a in stale for a in _ROOT_LABEL_ALIASES.get(l, (l,)))]
+    assert short == ["lloyd data"], short

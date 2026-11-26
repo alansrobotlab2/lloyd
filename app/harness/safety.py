@@ -435,9 +435,9 @@ def check_bash_command(command: str, cwd: str | None = None, *,
       1. `_HARD_DENY_PATTERNS` — the regex table: the catastrophic-anywhere
          shapes.
       2. `check_protected_delete` — parses the command and refuses a delete, move
-         or `git clean` that takes out the vault, the lloyd tree or $HOME
-         wholesale, which are the spellings the regex table let through on
-         2026-09-10 and 2026-09-12.
+         or `git clean` that takes out a root of `protected_roots()` wholesale (the
+         vault, the lloyd tree, the lloyd data roots, the home directory): the
+         spellings the regex table let through on 2026-09-10 and 2026-09-12.
       3. `check_sync_registration` — refuses anything that changes the Obsidian
          Sync registration, which Lloyd deleted twice on 2026-09-14.
       4. `check_service_control` — needs the session: a background session

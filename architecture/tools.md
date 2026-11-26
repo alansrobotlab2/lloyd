@@ -299,8 +299,8 @@ advertising has three consequences in `app/harness/tool_schema.py::build_tool_li
    `git` subprocess, so it never reaches this predicate — which is why deleting
    the lift lands nothing. Cited by file, not by line: a pointer to a line rots
    on the next edit above it, and the doc that copied it rotted with it. It is not
-   `protected_roots()`: those are `$HOME`, the vault and the code tree, and
-   refusing writes under them would refuse every note and every round.
+   `protected_roots()`: those are the vault, the lloyd tree, the lloyd data roots and the
+   home directory, and refusing writes under them would refuse every note and every round.
 4. **Invoke.** `MCPPool._invoke` opens one short-lived HTTP session per call
    and stamps `_meta` (below). The call bound is `CALL_TIMEOUT_SECONDS` 660 s,
    and the HTTP read timeout sits 30 s above it — but that is a **ceiling**, not

@@ -232,7 +232,7 @@ lloyd tree (and an automod worktree), the lloyd data roots — `~/lloyd-data`,
 whichever `DATA_ROOT`/`PRODUCTION_DATA_ROOT` this process resolves, and
 `~/.lloyd-data-snapshots`, because a `mv` of the directory holding them hides
 every one — and `$HOME`; refusing writes under them refuses every ordinary note.
-#4440 covers the same three-root under-statement in `safety.py`'s own lane-2
+#4440 corrected the same three-root under-statement in `safety.py`'s lane-2
 prose. **The asymmetry is shut**: `write_deny_reason` is now asked by every lane
 that can land a write — fs (#1049), Bash since #1620 (`check_bash_write_denied`,
 fifth in `check_bash_command`), `vault_write` since #1757 — and on the Bash lane

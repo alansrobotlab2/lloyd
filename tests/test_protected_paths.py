@@ -1298,3 +1298,16 @@ def test_the_two_lanes_disagree_about_the_vault_by_design(vault_home):
     reason = protected_paths.check_bash_write_denied(command, str(vault_home))
     assert reason is not None, "the Bash lane let a redirect into the memory file through"
     assert target in reason, reason
+
+
+def test_lane_2_refuses_the_data_roots_its_prose_now_names(tree):
+    """#4440 clause 5: the lane-2 prose now names the lloyd data roots, and
+    `check_protected_delete` itself (not the composite chain, whose regex lane
+    refuses some of these shapes too) still refuses them — and still lets a nested
+    path under a tree it does not protect through."""
+    (tree / ".lloyd-data-snapshots").mkdir()
+    for cmd in ("rm -rf ~/lloyd-data", "mv ~/.lloyd-data-snapshots /tmp/x"):
+        reason = PP.check_protected_delete(cmd)
+        assert reason is not None and "lloyd data" in reason, (cmd, reason)
+    for cmd in ("rm -rf /tmp/build/sub", "rm -rf ~/.cache/x"):
+        assert PP.check_protected_delete(cmd) is None, (cmd, PP.check_protected_delete(cmd))
