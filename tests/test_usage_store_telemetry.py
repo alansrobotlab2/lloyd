@@ -455,3 +455,33 @@ def test_the_two_writers_no_longer_pass_none_for_the_column():
     # One definition, in the shared fold.
     assert re.search(r'^\s*"duration_api_ms":', Path(TU.__file__).read_text(),
                      re.M), "turn_usage.TurnTelemetry.row() must emit the column"
+
+
+def test_the_batch_column_is_added_null_and_leaves_tool_ms_alone(tmp_path, monkeypatch):
+    """#4386: `tool_batch_ms_total` rides the existing `ALTER TABLE usage ADD
+    COLUMN` loop as an INTEGER; a row written before it reads NULL, and its
+    `tool_ms_total` is neither rewritten nor backfilled."""
+    assert ("tool_batch_ms_total", "INTEGER") in usage_store._TELEMETRY_COLUMNS
+    db = tmp_path / "usage.db"
+    _old_schema_db(db)
+    conn = sqlite3.connect(db)
+    # A store from AFTER P11 but before #4386: every telemetry column but this one.
+    for col, kind in usage_store._TELEMETRY_COLUMNS:
+        if col != "tool_batch_ms_total":
+            conn.execute(f"ALTER TABLE usage ADD COLUMN {col} {kind}")
+    conn.execute("UPDATE usage SET tool_ms_total = 1070, tool_calls = 3")
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(usage_store, "DB_PATH", db)
+    live = usage_store._conn()
+    kinds = {r["name"]: r["type"] for r in live.execute("PRAGMA table_info(usage)")}
+    assert kinds["tool_batch_ms_total"] == "INTEGER"
+    old = dict(live.execute("SELECT * FROM usage WHERE session_id = 'old'").fetchone())
+    assert old["tool_batch_ms_total"] is None
+    assert old["tool_ms_total"] == 1070 and old["tool_calls"] == 3
+    usage_store.record_usage(session_id="new", model="primary", tool_ms_total=1190,
+                             tool_batch_ms_total=612)
+    new = dict(live.execute("SELECT * FROM usage WHERE session_id = 'new'").fetchone())
+    assert (new["tool_ms_total"], new["tool_batch_ms_total"]) == (1190, 612)
+    old = dict(live.execute("SELECT * FROM usage WHERE session_id = 'old'").fetchone())
+    assert (old["tool_ms_total"], old["tool_batch_ms_total"]) == (1070, None)

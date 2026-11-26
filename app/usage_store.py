@@ -192,6 +192,7 @@ _TELEMETRY_COLUMNS: tuple[tuple[str, str], ...] = (
     ("overflow_recoveries", "INTEGER"),
     ("hook_raised", "INTEGER"),
     ("wrapped_up", "INTEGER"),
+    ("tool_batch_ms_total", "INTEGER"),  # #4386: one span per tool batch
 )
 
 

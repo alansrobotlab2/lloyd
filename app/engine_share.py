@@ -277,7 +277,7 @@ def read_usage_totals(db_path: Path) -> "dict[str, dict[str, Any]]":
     try:
         have = {r[1] for r in conn.execute("PRAGMA table_info(usage)")}
         want = ["duration_ms", "tool_ms_total", "tool_calls", "ttft_ms_first",
-                "duration_api_ms"]
+                "duration_api_ms", "tool_batch_ms_total"]
         sel = ", ".join(c if c in have else "NULL" for c in want)
         # The denominator of the completeness figure: `num_turns` is what the
         # harness counted as iterations, so `iterations / SUM(num_turns)` says
@@ -338,7 +338,11 @@ def _new_class(cls: str) -> "dict[str, Any]":
     return {"class": cls, "sessions": 0, "measured": 0, "engine_ms": 0,
             "turn_ms": 0, "tool_ms": 0, "tool_calls": 0, "ttft_turns": 0,
             "turns": 0, "iterations": 0, "iterations_expected": 0,
-            "shares": [], "mismatched": []}
+            "shares": [], "mismatched": [],
+            # #4386: the sessions whose usage row carries `tool_batch_ms_total`
+            # (NULL on every row written before it), and their own sums.
+            "batch_sessions": 0, "batch_ms": 0, "batch_engine_ms": 0,
+            "batch_turn_ms": 0}
 
 
 def collect(*, sessions_dir: "Path | str", db_path: "Path | str",
@@ -402,6 +406,15 @@ def collect(*, sessions_dir: "Path | str", db_path: "Path | str",
         cls["turn_ms"] += turn_ms
         cls["engine_ms"] += engine_ms
         cls["tool_ms"] += int(row["tool_ms_total"] or 0)
+        batch = row.get("tool_batch_ms_total")
+        if isinstance(batch, int) and not isinstance(batch, bool):
+            # Same row as `duration_ms` and `tool_ms_total`, so the batch figure
+            # is over its own turn; one span per batch, batches never overlap,
+            # so engine + tool_batch stays a fraction of that turn.
+            cls["batch_sessions"] += 1
+            cls["batch_ms"] += max(0, batch)
+            cls["batch_engine_ms"] += engine_ms
+            cls["batch_turn_ms"] += turn_ms
         cls["tool_calls"] += int(row["tool_calls"] or 0)
         cls["ttft_turns"] += int(row.get("ttft_turns") or 0)
         if turn_ms > 0:
@@ -427,6 +440,13 @@ def collect(*, sessions_dir: "Path | str", db_path: "Path | str",
         # the number the floor exists to stop anyone reading.
         cls["pooled"] = ((cls["engine_ms"] / cls["turn_ms"])
                          if (cls["publishable"] and cls["turn_ms"]) else None)
+        # #4386: over the batch-measured sessions only — a NULL row joins neither
+        # side, so pre-landing traffic cannot pull the figure toward zero.
+        cls["batch_share"] = ((cls["batch_ms"] / cls["batch_turn_ms"])
+                              if (cls["publishable"] and cls["batch_turn_ms"])
+                              else None)
+        cls["batch_pooled"] = ((cls["batch_engine_ms"] / cls["batch_turn_ms"])
+                               if cls["batch_share"] is not None else None)
 
     publishable = [c for c in classes.values()
                    if c["publishable"] and c["sessions"] >= min_class_n]
@@ -594,6 +614,8 @@ def format_report(report: Mapping[str, Any]) -> str:
                           "tool_ms_total gives each of several calls issued "
                           "together its own span, so on a class that "
                           "parallelises the two overlap)" if both > 1.0 else ""))
+        if cls["publishable"]:
+            out.append(_batch_line(cls))
         out.append(f"    engine iterations on disk: {cls['iterations']}"
                    + (f"/{cls['iterations_expected']} counted by the harness"
                       f" = {_frac(cls['iterations'], cls['iterations_expected'])}"
@@ -648,6 +670,25 @@ def format_report(report: Mapping[str, Any]) -> str:
                "Re-opening #2275's per-tool field needs a class at engine share "
                f">= {_f(DECODE_DECISIVE_SHARE)} with n >= {MIN_CLASS_N}.")
     return "\n".join(out)
+
+
+def _batch_line(cls: Mapping[str, Any]) -> str:
+    """#4386: `tool_batch_ms_total` beside the engine and `tool_ms_total` lines.
+
+    One wall-clock span per batch of calls issued together, so unlike
+    `tool_ms_total` it cannot count an overlap twice and `engine + tool_batch`
+    over `turn_ms` is a fraction of the turn. Computed over the sessions whose
+    row carries the column; a class with none says so on its own line and every
+    other line it prints is unchanged.
+    """
+    if cls.get("batch_share") is None:
+        return ("    engine + tool_batch over turn_ms: —  (tool_batch_ms_total is "
+                "NULL on every row of this class: written before #4386)")
+    both = (cls["batch_pooled"] or 0.0) + cls["batch_share"]
+    return (f"    engine + tool_batch over turn_ms: {_f(cls['batch_pooled'])} + "
+            f"{_f(cls['batch_share'])} = {_f(both)}  (tool_batch_ms_total "
+            f"{_k(cls['batch_ms'])} ms over the {cls['batch_sessions']}/"
+            f"{cls['measured']} measured sessions whose row carries it)")
 
 
 def _share(value: "float | None") -> str:

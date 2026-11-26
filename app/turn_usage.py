@@ -135,6 +135,8 @@ class TurnTelemetry:
         # same `(turn_id, iteration)` rule, which is what makes this column and
         # that report's numerator the same quantity rather than two clocks.
         self._engine_ms: dict[Any, int] = {}
+        # #4386: the turn's batch spans, off its `result` event.
+        self._tool_batch_ms: list[int] = []
         # Running token totals from the per-iteration events, for a turn
         # that never reaches `result` (D12): peak prompt, summed output.
         self._peak_input = 0
@@ -193,6 +195,10 @@ class TurnTelemetry:
         rt = (evt.get("usage") or {}).get("reasoning_tokens")
         if isinstance(rt, int) and not isinstance(rt, bool):
             self.result_reasoning_tokens = max(0, rt)
+        spans = evt.get("tool_batch_ms")
+        if isinstance(spans, list):
+            self._tool_batch_ms = [max(0, s) for s in spans
+                                   if isinstance(s, int) and not isinstance(s, bool)]
 
     def engine_ms_total(self) -> int | None:
         """The de-duplicated engine time of this turn, or None if unmeasured.
@@ -208,6 +214,17 @@ class TurnTelemetry:
             return None
         return sum(self._engine_ms.values())
 
+    def tool_batch_ms_total(self) -> int | None:
+        """The turn's tool-batch wall clock (#4386), or None if unmeasured.
+
+        One span per batch issued together, so calls that overlapped count once
+        — the figure `tool_ms_total` cannot be. NULL, never 0, when no batch
+        span reached this writer, by the rule `engine_ms_total` follows.
+        """
+        if not self._tool_batch_ms:
+            return None
+        return sum(self._tool_batch_ms)
+
     def row(self) -> dict[str, Any]:
         """The P11 columns, as `usage_store.record_usage` keyword arguments."""
         reasoning = (self.result_reasoning_tokens
@@ -222,6 +239,7 @@ class TurnTelemetry:
             "tool_errors": self.tool_errors,
             "tool_errors_by_class": dict(self.tool_errors_by_class),
             "tool_ms_total": self.tool_ms_total,
+            "tool_batch_ms_total": self.tool_batch_ms_total(),
             # #4240: the column that has been declared, inserted and summed
             # since it was added (`app/usage_store.py:78`/`:362`/`:446`) while
             # both writers passed `None`. It is emitted here so the two writers

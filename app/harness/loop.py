@@ -345,7 +345,7 @@ async def run_query(
                     continue
                 break
 
-            async with aclosing(_dispatch_batch(st, it)) as phase:
+            async with aclosing(_timed_batch(st, it)) as phase:
                 async for evt in phase:
                     yield evt
             _after_batch(st, it)
@@ -1338,7 +1338,7 @@ async def _close_turn(st: TurnState):
         tool_calls_captioned=st.caption_present,
         structured=structured,
         structured_error=structured_error,
-        wrapped_up=st.wrapup_state == "done",
+        wrapped_up=st.wrapup_state == "done", tool_batch_ms=list(st.tool_batch_ms),
     )
     yield result_done_evt
     if options.hooks is not None:
@@ -3543,3 +3543,28 @@ def _truncate_largest_tool_results(
         if freed >= target_chars:
             break
     return truncated, freed
+
+
+async def _timed_batch(st: TurnState, it: Iteration):
+    """`_dispatch_batch`, plus ONE wall-clock span for the whole batch (#4386).
+
+    `tool_ms_total` sums per-call spans, so calls issued together each book their
+    own and a class that overlaps them reads `engine + tool > 1.0`. This is the
+    batch's own span, in the same `time.perf_counter()` frame as the per-call
+    spans (`_ms_since`): opened before the first call is dispatched, closed once
+    the last result is committed to history. Batches never overlap one another
+    inside a turn — the engine span stops before dispatch and the next request
+    starts after `_after_batch` — so their sum stays inside `turn_ms`.
+
+    Appended to `st.tool_batch_ms`, which the turn's `result` event carries; a
+    batch closed mid-way (Stop, disconnect) books nothing. Accounting only: it
+    never raises into the turn.
+    """
+    started_at = time.perf_counter()
+    async with aclosing(_dispatch_batch(st, it)) as phase:
+        async for evt in phase:
+            yield evt
+    try:
+        st.tool_batch_ms.append(_ms_since(started_at))
+    except Exception:  # noqa: BLE001 - telemetry must not end a turn
+        logger.debug("loop: tool batch span not recorded", exc_info=True)

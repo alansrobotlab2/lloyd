@@ -86,6 +86,8 @@ class TurnState:
     # already run; an overflow/multimodal retry re-enters the head with the
     # SAME iteration number and must not append a second anchor (D9).
     prelude_done_for: int = 0
+    # #4386: one wall-clock span per tool batch, in ms (`loop._timed_batch`).
+    tool_batch_ms: list[int] = field(default_factory=list)
 
 
 @dataclass(eq=False)

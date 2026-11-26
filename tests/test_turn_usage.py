@@ -124,6 +124,8 @@ def test_turn_telemetry_row_is_the_same_from_both_writers(tmp_path, monkeypatch)
         "tool_errors": 1,
         "tool_errors_by_class": json.dumps({"denied": 1}),
         "tool_ms_total": 30,
+        # #4386: this scripted stream's `result` carries no batch spans.
+        "tool_batch_ms_total": None,
         "stream_retries": 1,
         "overflow_recoveries": 0,
         "hook_raised": 1,
@@ -164,3 +166,26 @@ def test_a_new_turn_counts_from_zero():
     telemetry.log_harness_event("", "harness.overflow_recovered", {})
     assert first.row()["overflow_recoveries"] == 1
     assert second.row()["overflow_recoveries"] == 1
+
+
+def test_the_batch_spans_fold_into_one_column_both_writers_splat():
+    """#4386: `TurnTelemetry` sums the `result` event's batch spans into
+    `tool_batch_ms_total`, in the same `row()` dict both writers pass to
+    `record_usage` — and books NULL, never 0, for a turn with no timed batch,
+    the rule `duration_api_ms` follows for an iteration nobody stamped."""
+    tel = TurnTelemetry()
+    tel.note(E.tool_result(call_id="a", name="Read", content="x", duration_ms=600))
+    tel.note(E.tool_result(call_id="b", name="Read", content="y", duration_ms=590))
+    tel.note(E.result(stop_reason="stop", tool_batch_ms=[612, 40]))
+    row = tel.row()
+    assert row["tool_batch_ms_total"] == 652
+    assert row["tool_ms_total"] == 1190          # the per-call sum, unchanged
+    assert set(row) <= {c for c, _ in usage_store._TELEMETRY_COLUMNS} | {"duration_api_ms"}
+
+    untimed = TurnTelemetry()
+    untimed.note(E.result(stop_reason="stop"))  # no batch ran
+    assert untimed.row()["tool_batch_ms_total"] is None
+    never = TurnTelemetry()                      # died before `result`
+    never.note(E.tool_result(call_id="c", name="Bash", content="z", duration_ms=5))
+    assert never.row()["tool_batch_ms_total"] is None
+    assert untimed.row()["duration_api_ms"] is None, "the engine half's rule, for comparison"

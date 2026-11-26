@@ -57,7 +57,8 @@ def _write_session(root, *, sid: str, day: str, source: str,
                    platform: str = "worker", iterations: list,
                    turn_ms: int, num_turns: int, tool_ms: int, tool_calls: int,
                    duplicate_stats: bool = True,
-                   measured_turn_row: bool = True):
+                   measured_turn_row: bool = True,
+                   tool_batch_ms: "int | None" = None):
     """One transcript plus its usage row, shaped the way the writers shape them.
 
     `iterations` is the list of `(iteration, engine_ms)` blocks that reached a
@@ -98,7 +99,8 @@ def _write_session(root, *, sid: str, day: str, source: str,
     usage_store.record_usage(session_id=sid, model="primary",
                              input_tokens=400, output_tokens=12,
                              duration_ms=turn_ms, num_turns=num_turns,
-                             tool_ms_total=tool_ms, tool_calls=tool_calls)
+                             tool_ms_total=tool_ms, tool_calls=tool_calls,
+                             tool_batch_ms_total=tool_batch_ms)
 
 
 def _corpus(root, *, cls: str, n: int, **kw):
@@ -597,3 +599,54 @@ def test_percentile_is_the_same_nearest_rank_the_gate_ladder_uses():
     assert engine_share.percentile([1, 2, 3, 4], 0.5) == 3
     assert engine_share.percentile(list(range(1, 11)), 0.9) == 9
     assert engine_share.percentile([0.5], 0.9) == 0.5
+
+
+# ── #4386: the tool_batch figure beside engine and tool_ms_total ─────────────────
+
+_BATCH_LINE = "    engine + tool_batch over turn_ms:"
+
+
+def test_the_batch_figure_prints_for_every_publishable_class(corpus):
+    """A class whose rows carry `tool_batch_ms_total` gets `engine + tool_batch /
+    turn_ms` beside its `engine + tool` line; the overlap that pushes the
+    per-call sum over 1.0 cannot push this one there."""
+    # autocode's shape with overlapping calls: engine 1,500, per-call sum 9,500 —
+    # over the turn — and one 6,000 ms batch window for them.
+    _corpus(corpus["sessions"], cls="overlapper", n=31, iterations=[(1, 1500)],
+            turn_ms=10_000, num_turns=2, tool_ms=9_500, tool_calls=4,
+            tool_batch_ms=6_000)
+    report = _collect(corpus)
+    text = engine_share.format_report(report)
+    cls = _class(report, "overlapper")
+    assert cls["batch_sessions"] == 31 and cls["batch_ms"] == 31 * 6_000
+    assert cls["batch_share"] == pytest.approx(0.6)
+    assert "engine + tool over turn_ms: 0.150 + 0.950 = 1.100" in text
+    assert (f"{_BATCH_LINE} 0.150 + 0.600 = 0.750  (tool_batch_ms_total 186,000 ms "
+            "over the 31/31 measured sessions whose row carries it)") in text
+    publishable = [c["class"] for c in report["classes"] if c["publishable"]]
+    lines = text.splitlines()
+    for name in publishable:
+        at = next(i for i, ln in enumerate(lines) if ln.startswith(name + " "))
+        block = lines[at + 1:at + 6]
+        assert any(ln.startswith(_BATCH_LINE) for ln in block), (name, block)
+    assert max(c["batch_share"] + c["batch_pooled"] for c in report["classes"]
+               if c.get("batch_share") is not None) <= 1.0
+
+
+def test_a_tool_ms_only_class_renders_every_existing_line_unchanged(corpus):
+    """No row in the fixture's five classes carries the column: every line the
+    report printed before #4386 is printed exactly as before — the same text as
+    a report whose class dicts never had the batch keys — and the one added line
+    says the figure is unmeasured instead of printing a zero."""
+    report = _collect(corpus)
+    text = engine_share.format_report(report)
+    stripped = {**report, "classes": [
+        {k: v for k, v in c.items() if not k.startswith("batch_")}
+        for c in report["classes"]]}
+    before = engine_share.format_report(stripped)
+    assert ([ln for ln in text.splitlines() if not ln.startswith(_BATCH_LINE)]
+            == [ln for ln in before.splitlines() if not ln.startswith(_BATCH_LINE)])
+    added = [ln for ln in text.splitlines() if ln.startswith(_BATCH_LINE)]
+    assert added and all("NULL on every row" in ln for ln in added), added
+    for name in ("#2144", "#3771", "#4128", "#2019"):
+        assert name in text

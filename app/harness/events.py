@@ -108,6 +108,8 @@ class NormalizedEvent(TypedDict, total=False):
     structured: dict[str, Any] | None
     structured_error: str
     wrapped_up: bool
+    # #4386: one wall-clock span per tool batch this turn ran, in ms.
+    tool_batch_ms: list[int]
 
     # stream_raw
     raw: str
@@ -309,6 +311,7 @@ def result(
     structured: dict | None = None,
     structured_error: str = "",
     wrapped_up: bool = False,
+    tool_batch_ms: list[int] | None = None,
 ) -> NormalizedEvent:
     """`tool_calls_*` count only tools whose schema carried the injected
     `summary` parameter — the caption rate for this turn. It is reported
@@ -338,6 +341,9 @@ def result(
         # where the work stands; `response_text` ends with that answer.
         # `stop_reason` still says `max_turns`.
         "wrapped_up": bool(wrapped_up),
+        # #4386: the turn's tool batches, one wall-clock span each (first
+        # dispatch to last result committed). `[]` = no batch was timed.
+        "tool_batch_ms": list(tool_batch_ms or []),
     }
 
 
