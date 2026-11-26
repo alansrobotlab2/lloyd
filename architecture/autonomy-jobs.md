@@ -1019,7 +1019,7 @@ applied 12 of them (`entity-merges-applied-2026-11-19-20261119T010911Z.json`:
 record, and 11 wait on 2026-11-26 against 45 gate-REFUSED of the 56 sharing the
 tier. The human route is fenced as well as documented now: `--apply` refuses
 without an explicit `--tiers` (#4197), and a `SUFFIX_SAFE` apply refuses a
-`--gate-cache` resolving outside `_pipeline/memory-graph/` — that 2026-11-19
+`--gate-cache` resolving outside `~/lloyd-data/_pipeline/memory-graph/` — that 2026-11-19
 apply had judged 12 irreversible merges against a session scratchpad on tmpfs
 (#4369, exit 4). The waiting itself was the unwatched
 half until #3407: #60 now prints both queues — the approved suffix clusters and
