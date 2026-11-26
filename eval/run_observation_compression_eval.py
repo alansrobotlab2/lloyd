@@ -10,6 +10,11 @@
         --corpus eval/measurements/observation-compression-corpus.yaml \
         --compressor rung4_truncate --budget 0.25
 
+    # publish the note from that run record (#4508: the frontier verdict, the row
+    # roster, the span tally and the harvest skips, as tracked repo content)
+    .venvs/lloyd/bin/python eval/run_observation_compression_eval.py report \
+        --run <run.jsonl> --corpus <corpus.yaml> --skips <skips.json> --floor <floor>
+
 `--out` names a path under `eval/measurements/`, not the `eval/baselines/` the first
 drafts used: root `.gitignore:141` ignores `eval/baselines/*` with only two named
 negations beside it, so a corpus written there can never be committed — and an
@@ -135,6 +140,7 @@ import math
 import re
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
@@ -1625,6 +1631,26 @@ def _cell(value: Any, spec: str) -> str:
     return "n/a" if value is None else spec.format(value)
 
 
+def span_route_line(agg: dict) -> str:
+    """The `span routes over valid rows: exact=N, estimated=M` line, over the whole run.
+
+    One function holds the sentence because two publishers read it: `render_report` prints
+    it to the terminal at score time, and `render_note` puts the identical string in the
+    published file. The route decided which window was scored, so a reader quoting a ΔCE
+    from the note needs to know how many of those rows were measured on the estimated
+    window — and note and stdout must not be able to drift into two accounts of one run.
+    Returns "" when the run has no valid rows, which is no tally to publish.
+    """
+    routes: dict[str, int] = {}
+    for a in agg.values():
+        for route, n in (a.get("span_alignments") or {}).items():
+            routes[route] = routes.get(route, 0) + n
+    if not routes:
+        return ""
+    return ("span routes over valid rows: "
+            + ", ".join(f"{r}={n}" for r, n in sorted(routes.items())))
+
+
 def render_report(agg: dict, *, floor: float) -> str:
     """The budget x compressor table, with the invalid population in it."""
     fr = frontier(agg, floor=floor)
@@ -1646,13 +1672,9 @@ def render_report(agg: dict, *, floor: float) -> str:
         )
     # The route and the unit, above the verdicts a reader will quote. Both are in every
     # row; neither belongs only in the JSONL, which is where a footnote would go unread.
-    routes: dict[str, int] = {}
-    for a in agg.values():
-        for route, n in (a.get("span_alignments") or {}).items():
-            routes[route] = routes.get(route, 0) + n
-    if routes:
-        lines.append("span routes over valid rows: "
-                     + ", ".join(f"{r}={n}" for r, n in sorted(routes.items())))
+    route_line = span_route_line(agg)
+    if route_line:
+        lines.append(route_line)
     lines.append("unit of the `tokens` column: characters (row field `retained_unit`);"
                  " the budget axis is characters too — no tokenizer produced either number.")
     lines.append("")
@@ -1697,6 +1719,297 @@ def _http_summariser(url: str) -> Callable[[str, int], str]:
     return _summarise
 
 
+# ---------------------------------------------------------------------------
+# Publishing the note (#4508): a run record in, tracked repo content out
+# ---------------------------------------------------------------------------
+#
+# The six fields the owed entry has asked for since #3967 all existed already, but only
+# inside `score`'s stdout and its `--out` JSONL. A terminal scroll is not a publication:
+# the smallest-preserving-budget question has been carried for five items because nothing
+# turned a run into a file anyone could cite. This section is that turn, and it is a
+# renderer rather than a transcription so the note cannot be hand-adjusted into saying
+# something the run did not measure.
+
+#: The note's home. Derived from THIS file so `report` cannot publish into a checkout
+#: other than the one it runs from, and because `eval/measurements/` is the tracked
+#: measurements directory the corpus already landed in — root `.gitignore` ignores
+#: `eval/baselines/*` but not this path, which is what the harvest usage above is about.
+NOTE_DIR = Path(__file__).resolve().parent / "measurements"
+
+#: The name the owed entry has asked for, dated at publish time.
+NOTE_STEM = "observation-compression"
+
+#: The readout SHAPE behind every published figure, spelled on each delta line. The shape
+#: is what licenses the number: `prompt_logprobs: 0` asks for ONE entry per scored
+#: position and that entry is the prompt's own token, so the KL column is null by
+#: construction (`score_row` records `kl_first_position = None` for exactly that reason)
+#: and the direction of the effect lives in ΔCE alone.
+READOUT_SHAPE = "prompt_logprobs: 0, top_k=0, kl_first_position null"
+
+#: ...and what that shape does NOT license. vLLM returns the entry for the token it
+#: actually served, whose `rank` is the CANDIDATE's rank and not the served token's, so a
+#: numeric read off one request is a property of that request. Publishing one as a stable
+#: per-request quantity is the mistake #4395's clause 4 exists to keep out of a note.
+NO_STABLE_LOGPROB_LINE = (
+    "no per-request numeric logprob is stable on this route: `prompt_logprobs: 0` "
+    "returns the served token's own entry, whose `rank` is the candidate's, so "
+    "`kl_first_position` is null on every row and only the ΔCE averages and the action "
+    "agreement rates are published as figures")
+
+#: The explicit negative the item demands when nothing clears the floor, in the words the
+#: item asked for. An empty frontier table reads as "not measured"; this reads as a
+#: finding, which is what it is.
+NO_PRESERVING_BUDGET_LINE = "no budget beats production's rung-4 at a matched budget"
+
+#: A bucket the run never reported. Never rendered as `0`: a 0 claims the harvest skipped
+#: nothing, which is the fiction these four buckets exist to prevent — and a 0-byte
+#: `harvest-2026-11-16.log` is this repo's own example of a tally that does not exist.
+#: The label's exact text is what the tests count, so keep it out of prose.
+SKIP_GAP_LABEL = "GAP (no count reported by the harvest run)"
+
+#: A K=0 cell's KL, printed as the null it is rather than as `0.0000`, which would read
+#: as a perfect match between the arms' distributions.
+NO_KL_CELL = "n/a"
+
+#: Text for a quantity this run did not record at all, distinct from the skip gap above.
+NOT_RECORDED = "not recorded"
+
+
+class ReportRefused(ValueError):
+    """A figure the note would publish cannot be measured, so no note is written.
+
+    The CLI turns this into a printed refusal and exit 2. A note is a durable artefact
+    that later items will cite, and this module's own defect family is an absent
+    measurement arriving as a clean number — invalid rows excluded from every aggregate,
+    a null KL printed as null, a skip bucket never printed as 0. A refusal that still left
+    a file on disk would be that defect with a date in its name.
+    """
+
+
+def _fig(value, spec: str = "{}") -> str:
+    """One aggregate value, or the null marker — never a bare `None` in prose."""
+    return NO_KL_CELL if value is None else spec.format(value)
+
+
+def load_run_records(path) -> list[dict]:
+    """The records `score --out` wrote: one scored arm per JSON line."""
+    src = Path(path)
+    if not src.is_file():
+        raise ReportRefused(f"no run record at {src}; the note publishes a scored run")
+    out = [json.loads(line) for line in
+           src.read_text(encoding="utf-8").splitlines() if line.strip()]
+    if not out:
+        raise ReportRefused(f"{src} holds no records, so there is no run to publish")
+    return out
+
+
+def load_skips(spec) -> dict:
+    """`HarvestSkips.as_dict()` read back from a file; {} when no file was passed.
+
+    `harvest` prints its four buckets and writes none of them anywhere, so the only route
+    for a tally into a note is a JSON object the operator saved. Omitting it is legal and
+    prints four named gaps; NAMING a file that is not there is a typo, and a typo that
+    quietly published gaps would hide the tally the note is asking for.
+    """
+    if not spec:
+        return {}
+    src = Path(spec)
+    if not src.is_file():
+        raise ReportRefused(
+            f"no harvest tally at {src}: pass --skips with a HarvestSkips.as_dict() "
+            "object, or omit the flag and let the note print the gap")
+    got = json.loads(src.read_text(encoding="utf-8"))
+    if not isinstance(got, dict):
+        raise ReportRefused(f"{src} is not a JSON object of bucket -> count")
+    return got
+
+
+def no_op_counts(records: Sequence[dict]) -> dict:
+    """Per (compressor, budget): rows whose compressed arm kept every single byte.
+
+    `tokens_retained_pct >= 100.0` is the whole test, and it matters because a no-op row's
+    ΔCE and agreement are the FULL observation scored twice: a cell with many of them is a
+    budget nobody could tell apart from production. #4395 found exactly one such row among
+    the 48, and its `budget < min_chars` reading is why the count is per budget — rung 4
+    with production's `min_chars=4096` truncates at 0.10 where 0.50 need not.
+    """
+    out: dict[tuple[str, float], dict] = {}
+    for rec in records:
+        key = (str(rec.get("compressor")), float(rec.get("budget") or 0.0))
+        cell = out.setdefault(key, {"rows": 0, "no_op": 0, "unknown": 0})
+        cell["rows"] += 1
+        pct = rec.get("tokens_retained_pct")
+        if pct is None:
+            cell["unknown"] += 1
+        elif float(pct) >= 100.0:
+            cell["no_op"] += 1
+    return out
+
+
+def render_note(records: Sequence[dict], *, corpus, skips: dict | None = None,
+                floor: float, date: str, run_path=None) -> str:
+    """The note's full text, from the records a run produced and nothing else.
+
+    `floor` is the full-arm self-consistency spread from the frontier run's same-arm
+    repeats — the reason `preserves the action` is a comparison and not an adjective — and
+    it is printed wherever it decides a line. Nothing here measures: the numbers come from
+    `aggregate()` and `frontier()`, the two functions `score`'s stdout already uses, so
+    the published note and the terminal output cannot become two accounts of one run.
+    """
+    src = Path(corpus)
+    if not src.is_file():
+        raise ReportRefused(
+            f"no corpus at {src}: a published row id has to name the file it came from, "
+            "and two corpora sit in the eval output directory")
+    size = src.stat().st_size
+    agg = aggregate(records)
+    front = frontier(agg, floor=floor).get("compressors", {})
+    noop = no_op_counts(records)
+
+    # Clause 5's refusal, checked before a single line is built: the rung-4 mean is the
+    # baseline every other arm is ranked against, so a cell that cannot say how many of
+    # its rows were untouched is a baseline over an unknown population — and the
+    # ambiguity cannot be resolved downstream, because downstream is this note.
+    for (compressor, budget), cell in sorted(noop.items()):
+        if compressor == RUNG4 and cell["unknown"]:
+            raise ReportRefused(
+                f"{RUNG4} at budget {budget:.2f} has {cell['unknown']} row(s) with no "
+                "`tokens_retained_pct`, so its no-op count is unknown and its mean cannot "
+                "be published")
+
+    row_ids = sorted({str(r["row_id"]) for r in records if r.get("row_id")})
+    routes = sorted({str(r["engine_route"]) for r in records if r.get("engine_route")})
+    counts = skips or {}
+
+    lines: list[str] = [
+        f"# Observation compression: the budget frontier — {date}",
+        "",
+        f"Published from `{run_path or 'a run record given in memory'}`: {len(records)} "
+        f"scored records over {len(row_ids)} pinned row(s), "
+        f"{len(COMPRESSORS)} compressor(s) x {len(BUDGETS)} budget(s), at an agreement "
+        f"floor of {floor}. Every figure below is `aggregate()`'s reading of those "
+        "records — the same call `score` prints from — so re-running `report` on the same "
+        "JSONL reproduces this file byte for byte.",
+        "",
+        f"- Corpus: `{src}` — {size:,} bytes",
+        f"- Engine route(s): {', '.join(f'`{r}`' for r in routes) or NOT_RECORDED}",
+        f"- Readout shape: {READOUT_SHAPE}",
+        f"- {NO_STABLE_LOGPROB_LINE}",
+        "",
+        f"## Pinned rows ({len(row_ids)})",
+        "",
+        "Each id the run scored, against the corpus file it was cut from and that file's",
+        "byte size. An id with no file named beside it is not re-checkable, and both",
+        "numbers together are what disambiguate the corpora that share a directory.",
+        "",
+        "| row id | corpus | corpus bytes |",
+        "| --- | --- | --- |",
+    ]
+    for rid in row_ids:
+        lines.append(f"| `{rid}` | `{src}` | {size:,} |")
+
+    lines += ["", "## Harvest skips", "",
+              "The four buckets `HarvestSkips.as_dict()` prints, re-derived by running",
+              "`harvest` against the sessions directory on the publish date. A bucket with",
+              "no tally prints as a named gap and never as 0, because 0 is the claim that",
+              "the harvest skipped nothing.", ""]
+    for reason in HARVEST_SKIP_REASONS:
+        value = counts.get(reason)
+        lines.append(f"- {reason} {_fig(value, '{}') if value is not None else SKIP_GAP_LABEL}")
+
+    route_line = span_route_line(agg)
+    lines += ["", "## Span alignment routes", "",
+              route_line or f"span routes over valid rows: {NOT_RECORDED} (no valid rows)",
+              "",
+              "The route decided which window was scored; a cell scored by the estimated",
+              "route is the weaker measurement, which is why the tally is published above",
+              "the verdicts and not in a footnote."]
+
+    lines += ["", "## Frontier", "",
+              "`preserves the action` means that cell's next-action agreement against the",
+              f"full arm reached the floor {floor}. Budgets are matched per arm by chars, so",
+              f"`beats {RUNG4}` is the matched-budget question: no worse agreement at every",
+              "shared budget, and on a tie a better ΔCE and no more of the observation kept.",
+              ""]
+    for compressor in COMPRESSORS:
+        entry = front.get(compressor)
+        if entry is None:
+            lines.append(f"- {compressor}: {NOT_RECORDED} (no records in this run)")
+            continue
+        clear = entry.get("clearing_budget")
+        lines.append(f"- {compressor}: smallest preserving budget: {clear:.2f}"
+                     if clear is not None
+                     else f"- {compressor}: no budget reached the floor {floor}")
+    beaten = False
+    for compressor in COMPRESSORS:
+        entry = front.get(compressor)
+        if entry is None or compressor == RUNG4:
+            continue
+        beats = bool(entry.get("beats_baseline"))
+        beaten = beaten or beats
+        lines.append(f"- {compressor}: beats {RUNG4} at matched budget: {beats}")
+    if not beaten:
+        lines.append(f"- {NO_PRESERVING_BUDGET_LINE}")
+
+    lines += ["", "## Per-budget cells", "",
+              "`ΔCE mean` is the candidate arm's action-span cross-entropy minus the full",
+              "arm's, nats per span token; positive means the compressed observation made",
+              "the recorded action harder. `no-op rows` counts the rows whose compressed",
+              "arm kept every byte — there the arm measured the observation it was handed,",
+              "not a compression — and `declines` and `undecidable` are the rows with no",
+              "comparable decision, which are excluded from the agreement rate.", ""]
+    for compressor in COMPRESSORS:
+        for budget in BUDGETS:
+            cell = agg.get((compressor, budget))
+            if cell is None:
+                continue
+            tally = noop.get((compressor, budget)) or {"rows": 0, "no_op": 0, "unknown": 0}
+            no_op = (f"{tally['no_op']}/{tally['rows']}"
+                     if not tally["unknown"] else NO_KL_CELL)
+            lines.append(
+                f"- {compressor} budget {budget:.2f}: "
+                f"ΔCE mean {_fig(cell.get('mean_delta_ce_nats'), '{:+.4f}')} nats"
+                f", agreement {_fig(cell.get('agreement_rate'), '{:.3f}')}"
+                f", valid {cell['valid_rows']}/{cell['rows']}"
+                f", invalid {cell['invalid_rows']}"
+                f", declines {cell['declines']}, undecidable {cell['undecidable']}"
+                f", no-op rows {no_op}"
+                f", KL@1 {_fig(cell.get('mean_kl_first_position'), '{:.4f}')}"
+                f", mean retained {_fig(cell.get('mean_tokens_retained'), '{:.0f}')} chars"
+                f" ({READOUT_SHAPE})")
+
+    lines += ["", "## Reproduce", "", "```",
+              "eval/run_observation_compression_eval.py score --corpus <corpus.yaml> \\",
+              "    --compressor <name> --budget <frac> --out <run.jsonl>   # once per arm",
+              "eval/run_observation_compression_eval.py harvest --out <corpus.yaml> \\",
+              "    # prints the scanned row count and the four skip buckets; save",
+              "    # HarvestSkips.as_dict() as <skips.json> for the line below",
+              "eval/run_observation_compression_eval.py report --run <run.jsonl> \\",
+              f"    --corpus <corpus.yaml> --skips <skips.json> --floor {floor}",
+              "```", ""]
+    return "\n".join(lines)
+
+
+def write_note(run, corpus, *, out_dir=None, skips=None, floor: float,
+               date: str = "") -> Path:
+    """Render the note and put it in `eval/measurements/`, returning the path written.
+
+    The text is complete before anything touches disk, so a `ReportRefused` leaves no
+    half-note behind. `date` defaults to today in UTC — the note's filename is a citation
+    key, and a naive local stamp would be read as UTC by every later reader.
+    """
+    records = load_run_records(run)
+    counts = load_skips(skips)
+    stamp = date or datetime.now(timezone.utc).date().isoformat()
+    text = render_note(records, corpus=corpus, skips=counts, floor=floor, date=stamp,
+                       run_path=Path(run))
+    target = Path(out_dir) if out_dir else NOTE_DIR
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / f"{NOTE_STEM}-{stamp}.md"
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
 def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1721,7 +2034,38 @@ def main(argv: Sequence[str] | None = None) -> int:  # pragma: no cover - CLI
                    help="agreement floor from the full-arm self-consistency repeats")
     s.add_argument("--out", required=True)
 
+    rp = sub.add_parser("report",
+                        help="publish eval/measurements/observation-compression-<date>.md "
+                             "from a score run record")
+    rp.add_argument("--run", required=True,
+                    help="the JSONL `score --out` wrote")
+    rp.add_argument("--corpus", required=True,
+                    help="the corpus YAML that run scored; the note prints its path and "
+                         "byte size beside every published row id")
+    rp.add_argument("--skips", default="",
+                    help="a JSON HarvestSkips.as_dict() from the harvest run; omit it and "
+                         "the note prints a named gap per bucket")
+    rp.add_argument("--floor", type=float, required=True,
+                    help="agreement floor from the full-arm self-consistency repeats; "
+                         "required, because a silently-zero floor would publish a "
+                         "compressor that agrees on nothing as preserving the action")
+    rp.add_argument("--date", default="", help="YYYY-MM-DD stamp; defaults to today (UTC)")
+    rp.add_argument("--out-dir", default="", help=f"default {NOTE_DIR}")
+
     args = ap.parse_args(list(argv) if argv is not None else None)
+
+    if args.cmd == "report":
+        try:
+            printed = write_note(
+                Path(args.run), Path(args.corpus),
+                out_dir=Path(args.out_dir) if args.out_dir else None,
+                skips=Path(args.skips) if args.skips else None,
+                floor=args.floor, date=args.date)
+        except ReportRefused as exc:
+            print(f"REFUSED: {exc}", file=sys.stderr)
+            return 2
+        print(printed)
+        return 0
 
     if args.cmd == "harvest":
         got = harvest(

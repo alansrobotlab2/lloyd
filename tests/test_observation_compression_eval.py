@@ -1351,3 +1351,313 @@ def test_the_k0_capture_fixture_is_tracked_not_ignored():
     assert tracked.returncode == 0, (
         f"{rel} is not in the tree ({tracked.stderr.strip()}), so the nodes that read "
         "it would be skipped-or-broken on a fresh checkout instead of pinning anything")
+
+
+# ---------------------------------------------------------------------------
+# #4508 — publishing the note: the `report` route from a run record to disk
+# ---------------------------------------------------------------------------
+#
+# The six fields this section pins have been carried unpublished since #3967, and the
+# reason is structural: `main()` shipped two subcommands (`harvest`, `score`) and the
+# only place the frontier verdict, the span tally and the skip counts ever existed was
+# `score`'s stdout, which no one commits. The nodes below drive the third subcommand
+# over a run-record JSONL written the way `score --out` writes one, so the render path
+# is pinned BEFORE the frontier run exists — the owed run then publishes a note rather
+# than inventing one. Every number asserted here is the number the scripted stub was
+# told to emit; none is quoted off the note it is checking.
+
+#: The floor every node passes explicitly. `report` has no default floor: a silently
+#: zero floor would publish "preserves the action" for a compressor whose agreement
+#: collapsed to 0.0, so the argument is required and the note prints it.
+NOTE_FLOOR = 1.0
+
+#: A floor above any rate a 4-decimal aggregate can post, used to exhibit the case
+#: where NO cell clears — the case the item says must print a sentence, not a blank.
+NOTE_FLOOR_UNREACHABLE = 1.0001
+
+
+def _note_stub(row: "R.CorpusRow", *, cand_nll: float = 1.5) -> SurfacedStubEngine:
+    """Both arms emit the recorded call; the candidate arm scores `cand_nll`.
+
+    `full_topk` and `cand_topk` are EMPTY maps, which is what a real `prompt_logprobs: 0`
+    readout is — `test_the_k0_route_reports_no_kl_and_records_its_readout_shape` proves
+    that shape leaves `_position_topk` `{}` — so the records this fixture writes carry
+    `kl_first_position: null` and the note's readout-shape line is true of them.
+    """
+    step = R.render_action(row.next_action)
+    return SurfacedStubEngine(action_text=step, observation=row.observation,
+                              full_step=step, cand_step=step,
+                              full_nll=1.0, cand_nll=cand_nll,
+                              full_topk={}, cand_topk={})
+
+
+def _note_corpus(tmp_path: Path) -> tuple[list["R.CorpusRow"], Path]:
+    """Two pinned rows and the corpus file they were written to.
+
+    The second row is the harvested one under its own `row_id`: the roster the note
+    publishes is only pinned if it survives two rows, since a one-row roster passes
+    even when the renderer prints a single hard-coded line.
+    """
+    root, _big = _make_sessions(tmp_path)
+    base = R.harvest(root).rows[0]
+    second = R.CorpusRow(**{**base.to_dict(), "row_id": base.row_id + "-b"})
+    return [base, second], R.save_corpus([base, second], tmp_path / "corpus.yaml")
+
+
+def _note_run(tmp_path: Path, *, cand_nll_by_compressor: dict | None = None,
+              ) -> tuple[Path, Path]:
+    """Score every (row, compressor, budget) and write the JSONL `score` would write.
+
+    `cand_nll_by_compressor` prices each arm's candidate span differently: the stub
+    scores the full arm at 1.0 nats on every route, so a cell's mean ΔCE is exactly
+    `cand_nll - 1.0`, and two compressors priced identically could never disagree about
+    dominance.
+    """
+    rows, corpus = _note_corpus(tmp_path)
+    prices = cand_nll_by_compressor or {}
+    summariser = lambda obs, budget_chars: obs[:budget_chars]  # noqa: E731
+    recs = [
+        R.score_row(row, _note_stub(row, cand_nll=prices.get(c, 1.5)),
+                    compressor=c, budget=b, summariser=summariser)
+        for row in rows for c in R.COMPRESSORS for b in R.BUDGETS
+    ]
+    assert all(r["valid"] for r in recs), [r["invalid_reason"] for r in recs if not r["valid"]]
+    assert all(r["top_k"] == 0 and r["kl_first_position"] is None for r in recs), (
+        "the fixture stopped looking like the shipped K=0 readout, so the note's "
+        "readout-shape line would be asserting nothing about these bytes")
+    run = tmp_path / "run.jsonl"
+    with run.open("w", encoding="utf-8") as fh:
+        for rec in recs:
+            fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    return run, corpus
+
+
+def _note_skips_file(tmp_path: Path, **over) -> Path:
+    """A `HarvestSkips.as_dict()` written to disk — the file `report --skips` reads."""
+    counts = R.HarvestSkips(no_sidecar=0, below_min_bytes=12, no_tool_name=2,
+                            no_next_action=3, **over).as_dict()
+    path = tmp_path / "skips.json"
+    path.write_text(json.dumps(counts), encoding="utf-8")
+    return path
+
+
+def _note_text(tmp_path: Path, run: Path, corpus: Path, **kw) -> str:
+    out_dir = tmp_path / "measurements"
+    path = R.write_note(run, corpus, out_dir=out_dir,
+                        floor=kw.pop("floor", NOTE_FLOOR), **kw)
+    return path.read_text(encoding="utf-8")
+
+
+def test_the_report_subcommand_renders_the_dated_note_and_prints_its_path(tmp_path, capsys):
+    """#4508 clause 1: a third subcommand, over a run record and a corpus, on disk.
+
+    `report --run <the JSONL score wrote> --corpus <the corpus it was scored from>`
+    writes `observation-compression-<date>.md` into the repo's own `eval/measurements/`
+    and prints that path, because an unpublished note is the state this item exists to
+    end. The date comes from `--date` so the run is re-checkable; the default directory
+    is asserted against the REAL `.gitignore`, since a note that lands in an ignored
+    path is the same loss as no renderer at all (the same trap #3967 found for the
+    corpus at `eval/baselines/*`).
+    """
+    run, corpus = _note_run(tmp_path)
+    rc = R.main(["report", "--run", str(run), "--corpus", str(corpus),
+                 "--date", "2026-11-26", "--out-dir", str(tmp_path / "measurements"),
+                 "--floor", str(NOTE_FLOOR)])
+    assert rc == 0, "the CLI refused a run record it was given"
+    printed = capsys.readouterr().out.strip().splitlines()
+    assert printed[-1] == str(tmp_path / "measurements"
+                              / "observation-compression-2026-11-26.md"), printed
+    assert Path(printed[-1]).is_file(), "the printed path names no file"
+    assert printed[-1].startswith(str(tmp_path)), "the node's own out-dir is what printed"
+
+    default = R.NOTE_DIR
+    assert default == ROOT / "eval" / "measurements", default
+    assert default.is_dir(), "the repo has no eval/measurements to publish into"
+    ignored = subprocess.run(
+        ["git", "check-ignore", "-q", "--no-index",
+         str(default / "observation-compression-2026-11-26.md")],
+        cwd=ROOT, capture_output=True).returncode
+    assert ignored != 0, (
+        "a .gitignore rule swallows the published note, so the round could land the "
+        "renderer and still never publish the measurement")
+
+
+def test_the_note_header_names_every_row_id_with_its_corpus_path_and_size(tmp_path):
+    """#4508 clause 2: a published row id is pinable or it is decoration.
+
+    Both row ids in the run record appear, and each beside the corpus path and that
+    corpus's byte size measured off the file — #4508's own triage had to record two
+    corpora in `~/lloyd-data/eval-out/` at 11,646,966 and 1,245,716,690 bytes precisely
+    because a row id with no corpus named cannot be re-checked. The size is the file's,
+    not a sum of the rows' `observation_bytes`: the question is which file to go read.
+    """
+    rows, corpus = _note_corpus(tmp_path)
+    run = _note_run(tmp_path)[0]
+    note = _note_text(tmp_path, run, corpus,
+                      skips=_note_skips_file(tmp_path), date="2026-11-26")
+    for row in rows:
+        assert row.row_id in note, f"{row.row_id} missing from the roster"
+    assert str(corpus) in note, "the note names no corpus path"
+    size = corpus.stat().st_size
+    assert f"{size:,}" in note or f"{size} bytes" in note, (
+        f"the corpus byte size {size} is not in the note")
+    assert note.count("corpus") >= 2, "the roster collapsed to one mention"
+
+
+def test_the_note_names_the_smallest_preserving_budget_or_says_none_beats_rung4(tmp_path):
+    """#4508 clause 3: the frontier verdict, per compressor, or the explicit sentence.
+
+    Three compressors x three budgets at a floor of 1.0. The stub scores every full arm
+    at 1.0 nats, so the priced candidate arms give rung 4 a mean ΔCE of +0.5, `extractive`
+    +0.2 and `summary` +1.5 — and all three post agreement 1.0, because both arms are
+    scripted to emit the recorded call. That is the shape the note has to tell apart: two
+    compressors that clear the floor, one of them better than production at matched
+    budgets and one worse, so `beats rung4_truncate at matched budget` is True for
+    `extractive` and False for `summary`. Both clear 1.0, so both get a smallest
+    preserving budget, and it is the LOWEST budget on the axis (0.10), not whichever the
+    dict happened to iterate first.
+    """
+    run, corpus = _note_run(tmp_path, cand_nll_by_compressor={
+        R.RUNG4: 1.5, R.EXTRACTIVE: 1.2, R.SUMMARY: 2.5})
+    note = _note_text(tmp_path, run, corpus,
+                      skips=_note_skips_file(tmp_path), date="2026-11-26")
+    for c in R.COMPRESSORS:
+        assert f"{c}: smallest preserving budget: {R.BUDGETS[0]:.2f}" in note, (
+            f"{c} cleared the floor at 0.10 and the note does not say so")
+    assert f"{R.EXTRACTIVE}: beats {R.RUNG4} at matched budget: True" in note, note
+    assert f"{R.SUMMARY}: beats {R.RUNG4} at matched budget: False" in note, note
+    assert R.NO_PRESERVING_BUDGET_LINE not in note, (
+        "extractive beats rung 4 here, so the nothing-beats-it sentence must not print")
+
+
+def test_a_compressor_with_no_cell_over_the_floor_prints_the_matched_budget_sentence(
+        tmp_path):
+    """#4508 clause 3's other arm: no blank cell, a sentence.
+
+    Two facts fail together here, and the note must say both. The floor is 1.0001, one
+    ten-thousandth above the 1.000 every cell posts, so `frontier()` reports
+    `clearing_budget: None` for all three compressors — a full-arm self-consistency
+    spread above perfect self-agreement would read exactly like this. And the candidate
+    arms are priced worse than production (+1.5 nats both, against rung 4's +0.5), so no
+    compressor beats rung 4 at a matched budget either, which is the case the item says
+    must be stated in the open rather than left as an empty table.
+    """
+    run, corpus = _note_run(tmp_path, cand_nll_by_compressor={
+        R.RUNG4: 1.5, R.EXTRACTIVE: 2.5, R.SUMMARY: 2.5})
+    note = _note_text(tmp_path, run, corpus, floor=NOTE_FLOOR_UNREACHABLE,
+                      skips=_note_skips_file(tmp_path), date="2026-11-26")
+    assert R.NO_PRESERVING_BUDGET_LINE in note, note
+    for c in R.COMPRESSORS:
+        assert f"{c}: smallest preserving budget" not in note, note
+        assert f"{c}: beats {R.RUNG4} at matched budget: True" not in note, note
+    assert f"{R.EXTRACTIVE}: {R.NO_PRESERVING_BUDGET_LINE}" not in note, (
+        "the sentence is the note's one verdict, not a per-compressor filler")
+
+
+def test_the_note_carries_the_span_route_tally_and_all_four_skip_counts(tmp_path):
+    """#4508 clause 4: the two tallies, in the file, not only on a terminal.
+
+    The span-route line is the SAME string `render_report` prints — both read one
+    `aggregate()` — so the published note and the scored stdout cannot drift into two
+    different accounts of which route sized the windows. The four harvest buckets are
+    `HarvestSkips.as_dict()`'s keys in its order, each with its number: `no_sidecar 0`
+    is printed because a zero is a result, exactly as the harvest CLI prints it.
+    """
+    run, corpus = _note_run(tmp_path)
+    skips = _note_skips_file(tmp_path)
+    note = _note_text(tmp_path, run, corpus, skips=skips, date="2026-11-26")
+    recs = [json.loads(line) for line in run.read_text(encoding="utf-8").splitlines()]
+    stdout_line = next(ln for ln in R.render_report(
+        R.aggregate(recs), floor=NOTE_FLOOR).splitlines()
+        if ln.startswith("span routes over valid rows: "))
+    assert stdout_line in note, (
+        f"the note's route tally is not stdout's: {stdout_line!r}")
+    counts = json.loads(skips.read_text(encoding="utf-8"))
+    for reason in R.HARVEST_SKIP_REASONS:
+        assert f"{reason} {counts[reason]}" in note, f"{reason} missing from the note"
+    assert R.SKIP_GAP_LABEL not in note, "a reported count rendered as a gap"
+
+
+def test_a_skip_count_the_run_never_reported_prints_a_named_gap(tmp_path):
+    """#4508 clause 4's other arm: an unmeasured bucket is a gap, not an omission.
+
+    Two shapes of "not measured" reach a publisher: no skips file at all, and a skips
+    object missing one key — `harvest-2026-11-16.log` is 0 bytes, so the first shape is
+    the one this repo actually has. Either way all four names must still print, each
+    missing one under the named gap label: a note that silently drops `no_sidecar` reads
+    as a harvest that skipped nothing, which is the exact fiction the four buckets were
+    added to prevent.
+    """
+    run, corpus = _note_run(tmp_path)
+    no_file = _note_text(tmp_path, run, corpus, skips=None, date="2026-11-26")
+    assert no_file.count(R.SKIP_GAP_LABEL) == 4, no_file
+    for reason in R.HARVEST_SKIP_REASONS:
+        assert f"{reason} {R.SKIP_GAP_LABEL}" in no_file, reason
+
+    partial = tmp_path / "partial.json"
+    partial.write_text(json.dumps({"below_min_bytes": 12}), encoding="utf-8")
+    note = _note_text(tmp_path, run, corpus, skips=partial, date="2026-11-26")
+    assert "below_min_bytes 12" in note, note
+    assert note.count(R.SKIP_GAP_LABEL) == 3, note
+
+
+def test_every_published_delta_names_the_readout_shape_and_no_stable_logprob(tmp_path):
+    """#4508 clause 5: no number arrives without the shape that produced it.
+
+    Every note line carrying a ΔCE figure also names `prompt_logprobs: 0, top_k=0,
+    kl_first_position null`, and the note states once that no per-request numeric logprob
+    is stable on this route. Each rung-4 mean is rendered beside that budget's no-op
+    count — rows whose compressed arm kept every byte, where the arm measured the
+    observation it was handed — and beside its decline and undecidable counts. The no-op
+    count is one, not zero, because one rung-4 record was rewritten to 100% retained:
+    a count that always prints 0 would pass this node and fail the real run.
+    """
+    run, corpus = _note_run(tmp_path)
+    recs = [json.loads(ln) for ln in run.read_text(encoding="utf-8").splitlines()]
+    once = False
+    for rec in recs:
+        if not once and rec["compressor"] == R.RUNG4 and rec["budget"] == R.BUDGETS[0]:
+            rec["tokens_retained_pct"] = 100.0   # exactly one untouched rung-4 row
+            once = True
+    assert once, "the fixture found no rung-4 row at the smallest budget to rewrite" 
+    run.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs),
+                   encoding="utf-8")
+    note = _note_text(tmp_path, run, corpus,
+                      skips=_note_skips_file(tmp_path), date="2026-11-26")
+    deltas = [ln for ln in note.splitlines() if ln.startswith("- ") and "ΔCE mean" in ln]
+    assert len(deltas) == len(R.COMPRESSORS) * len(R.BUDGETS), (
+        f"{len(deltas)} delta lines for {len(R.COMPRESSORS)}x{len(R.BUDGETS)} cells")
+    for ln in deltas:
+        assert R.READOUT_SHAPE in ln, f"a delta line names no readout shape: {ln!r}"
+        assert "no-op rows " in ln and "declines " in ln and "undecidable " in ln, ln
+    assert R.NO_STABLE_LOGPROB_LINE in note, note
+    rung4_low = next(ln for ln in deltas
+                     if ln.startswith(f"- {R.RUNG4} budget {R.BUDGETS[0]:.2f}"))
+    assert "no-op rows 1" in rung4_low, rung4_low
+    assert f"KL@1 {R.NO_KL_CELL}" in rung4_low, (
+        "a K=0 cell must print the null KL as the null it is")
+
+
+def test_a_rung4_mean_with_no_no_op_count_is_refused(tmp_path):
+    """#4508 clause 5's refusal: a mean nobody can size is not published.
+
+    A run record that carries no `tokens_retained_pct` cannot say how many of its rows
+    the compressor left untouched, so its rung-4 mean is a number over an unknown
+    population — the rung-4 row is the BASELINE every other arm is ranked against, so
+    the ambiguity is not recoverable downstream. The renderer raises rather than
+    publishing, and the CLI turns that into a printed refusal and exit 2, not a note.
+    """
+    run, corpus = _note_run(tmp_path)
+    recs = [json.loads(ln) for ln in run.read_text(encoding="utf-8").splitlines()]
+    for rec in recs:
+        if rec["compressor"] == R.RUNG4:
+            del rec["tokens_retained_pct"]
+    run.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs),
+                   encoding="utf-8")
+    with pytest.raises(R.ReportRefused) as got:
+        R.write_note(run, corpus, out_dir=tmp_path / "measurements",
+                     floor=NOTE_FLOOR, skips=None, date="2026-11-26")
+    assert R.RUNG4 in str(got.value) and "tokens_retained_pct" in str(got.value), got.value
+
+    unwritten = tmp_path / "measurements" / "observation-compression-2026-11-26.md"
+    assert not unwritten.exists(), "the refusal wrote a note anyway"
