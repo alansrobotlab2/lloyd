@@ -1350,6 +1350,15 @@ NOT_VERSION_CODA = [
     # the role-token exclusion would be invisible on every other pair here — this
     # is the one that makes that branch falsifiable.
     ("Browser", "Browser Version"),
+    # #4568: a man-page section is a place in the manual, not a release. The six
+    # pairs the shipped predicate fired on (three of them live merge rows in the
+    # 2026-11-25 proposals); `name_tokens` hands the section over as a bare number.
+    ("fanotify", "fanotify(7)"),
+    ("auditctl(8)", "auditctl"),
+    ("inotify", "inotify(7)"),
+    ("capabilities", "capabilities(7)"),
+    ("fanotify_init", "fanotify_init(2)"),
+    ("fapolicyd.rules", "fapolicyd.rules(5)"),
 ]
 
 
@@ -1398,7 +1407,7 @@ VERSION_CONFLICT_PAIRS = [
 # 2026-11-19 row whose `nN` spelling is not a release token, and the other two
 # are the same shape in prose. Drop the both-sides precondition to a bare set
 # comparison and every row here fires — which is why they are here and
-# `NOT_VERSION_CODA` cannot stand in for them: on those seven pairs both release
+# `NOT_VERSION_CODA` cannot stand in for them: on those thirteen pairs both release
 # sets are EMPTY, so an empty-vs-empty comparison agrees whether or not the
 # precondition is enforced.
 ONE_SIDED_VERSION = [
@@ -1455,7 +1464,7 @@ def test_the_same_release_spelled_two_ways_is_not_a_version_disagreement():
 def test_the_version_disagreement_needs_a_release_token_on_both_names():
     """clause 3 (#4269) — one number and one ordinary word is a naming difference.
 
-    `NOT_VERSION_CODA` is the seven pairs that must stay unlabelled, restated here
+    `NOT_VERSION_CODA` is the thirteen pairs that must stay unlabelled, restated here
     because this shape is the one that could newly reach them: `alpha`, `library`
     and `version` are stage and role words, `vr` and `tool` are not version shapes,
     and an identical pair has ONE set rather than two that disagree.
@@ -2718,3 +2727,42 @@ def test_the_run_report_prints_the_marked_row_count_and_is_silent_at_zero(
     block = out.split("rows whose reversed pair is also live")[1]
     assert re.search(r"mutual_proposal\s+2\b", block), (
         f"the count printed is not the 2 rows of the seeded pair: {block[:300]}")
+
+
+# ---------------------------------------------------------------------------
+# #4568 — a man-page section suffix is not a release on either firing path
+# ---------------------------------------------------------------------------
+
+
+def test_a_man_section_is_read_off_the_raw_name_not_the_token_predicate():
+    """clause 2 (#4568) — the token predicate is not narrowed to get there.
+
+    `name_tokens` cannot see the parenthesis, so the section number is a bare
+    `7` by the time `is_release_token` is asked; the reading has to come from
+    the raw name, and every real version pair must keep firing.
+    """
+    assert ser.is_release_token("5") is True
+    assert ser.is_release_token("7") is True
+    assert ser.name_tokens("fanotify(7)") == {"fanotify", "7"}
+    for a, b in VERSION_CODA_PAIRS + VERSION_CONFLICT_PAIRS:
+        for pair in ((a, b), (b, a)):
+            assert ser.is_version_suffix_asymmetry(*pair) is True, pair
+    assert ser.release_tokens("fanotify(7)") == set()
+    assert ser.release_tokens("Information Retrieval 11(5)") == {"11"}
+
+
+def test_a_man_section_is_not_a_release_on_the_disagreement_path():
+    """clause 3 (#4568) — shape 3 compares release sets, and a section is not one."""
+    for pair in (("capabilities(7)", "capabilities(2)"),
+                 ("Information Retrieval 11", "Information Retrieval 11(5)")):
+        for p in (pair, pair[::-1]):
+            assert ser.is_version_suffix_asymmetry(*p) is False, p
+            assert ser.name_shape_review_flag(*p) is None, p
+
+
+def test_a_man_section_row_reaches_the_reviewer_unflagged():
+    """clause 4 (#4568) — the flag goes, the merge row stays in the record."""
+    assert ser.name_shape_review_flag("fanotify", "fanotify(7)") is None
+    assert ser.name_shape_review_flag("fanotify(7)", "fanotify") is None
+    row = {"canonical": "fanotify", "variant": "fanotify(7)", "action": "merge"}
+    assert ser.filter_artifact_proposals([row]) == [row]

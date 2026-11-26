@@ -192,6 +192,13 @@ V_PREFIXED_NUMBER = re.compile(r"v(\d+)", re.IGNORECASE)
 # `Alfie VR System`, #1175), and reading one as a version would flag half the
 # hyphenated vocabulary.
 RELEASE_SYMBOL_CHARS = set("+∞")
+# A trailing `(<digits>)` is a man-page section (`fanotify(7)`, `auditctl(8)`): it
+# says where a page lives in the manual, never which release a thing is (#4568).
+# `name_tokens` drops the parentheses, so the section would otherwise arrive as a
+# bare number and read as `fanotify` version 7. It is decided from the RAW name
+# and stripped before either release reading, so `is_release_token("5")` stays
+# True for `Mythos 5`, and both the containment and the disagreement shapes lose it.
+MAN_SECTION_SUFFIX = re.compile(r"\s*\(\d+\)\s*$")
 # The role→product class: `orchestrator` vs `Orchestrator AI`. Declined, by
 # the owed-check ruling on #1894 (2026-10-01, recorded by #1991): the flag
 # class is not widened to it. Measured on the committed witness
@@ -952,6 +959,11 @@ def has_release_symbol(name: str) -> bool:
     return bool(RELEASE_SYMBOL_CHARS & set(name or ""))
 
 
+def without_man_section(name: str) -> str:
+    """The raw name with a trailing man-page section (`(7)`) removed (#4568)."""
+    return MAN_SECTION_SUFFIX.sub("", name or "")
+
+
 def release_tokens(name: str) -> set[str]:
     """The name's release tokens, with `v3`-style spellings reduced to `3`.
 
@@ -963,7 +975,7 @@ def release_tokens(name: str) -> set[str]:
     themselves, or `Cosmos Reason V` would fold into `Cosmos Reason 5`.
     """
     reduced = set()
-    for tok in name_tokens(name):
+    for tok in name_tokens(without_man_section(name)):
         if not is_release_token(tok):
             continue
         marked = V_PREFIXED_NUMBER.fullmatch(tok)
@@ -1001,8 +1013,11 @@ def is_version_suffix_asymmetry(a: str, b: str) -> bool:
 
     Both orientations are tested, so the answer never depends on which name the
     proposal lists first, and equal tokens with no symbol on either side are not
-    an asymmetry.
+    an asymmetry. A trailing man-page section is stripped from both names first
+    (#4568): `fanotify` / `fanotify(7)` is one facility and its manual page, and
+    `capabilities(7)` / `capabilities(2)` are two sections, not two releases.
     """
+    a, b = without_man_section(a), without_man_section(b)
     ta, tb = name_tokens(a), name_tokens(b)
     for small, big, raw_small, raw_big in ((ta, tb, a, b), (tb, ta, b, a)):
         if not small:
