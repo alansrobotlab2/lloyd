@@ -44,7 +44,7 @@ ask.
 | 12 | RPC policy | `app/harness/rpc_policy.py` | Which tools may `lloyd_rpc` call from inside a `Bash` command (P9)? Programmatic tool calling bypasses the model's turn loop, so it needs its own allow-list rather than inheriting the loop's |
 | 13 | The desktop lease | `app/desktop_lease.py`, `app/routers/desktop.py` | Did Alan grant the lease, from Mission Control's Desktop tab? Capture stays read-only; acting requires the lease, and moving the mouse revokes it. The one surface where the human is in the loop physically ([[desktop]]) |
 | 14 | The review session's deny list | `workers/sources/arch_review.py` | What may the doc reviewer edit, and what may it never touch — a deny list that must stay a superset of layer 6 |
-| 15 | Sync and snapshot gates | `architecture/vault-protection.md` §2 | What may rewrite the vault's registration, and what happens to sync when a mass deletion is seen |
+| 15 | Sync and snapshot gates | `app/harness/sync_registration.py`, `agent-services/guardian/vaultwatch.py`, `scripts/backup/backup-vault.sh`; `architecture/vault-protection.md` §2 | What may rewrite the vault's registration, and what happens to sync when a mass deletion is seen |
 
 ## Where one rule is spelled more than once
 

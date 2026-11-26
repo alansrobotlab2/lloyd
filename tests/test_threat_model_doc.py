@@ -172,7 +172,7 @@ LADDER_DOC = ROOT / "architecture" / "authority-surfaces.md"
 LADDER_HEADING = "The ladder"
 
 #: How many ladder rows have to name a `.py` module for the overlap node to count
-#: as having read the ladder. Fourteen of fifteen do today; the floor is here so
+#: as having read the ladder. Fifteen of fifteen do since #4286; the floor is here so
 #: the node cannot go green over an empty intersection if the Module column ever
 #: turns to prose, which is the failure mode this file exists to refuse.
 MIN_LADDER_ROWS_WITH_A_MODULE = 10
@@ -194,8 +194,8 @@ _LADDER_ROW = re.compile(r"^\|\s*(?P<n>\d{1,2})\s*\|\s*(?P<rest>.*?)\s*\|\s*$",
                          re.MULTILINE)
 
 #: A module named inside a Module cell. The directory is required, so row 1's
-#: vault path (`~/obsidian/lloyd/SOUL.md`) and row 15's prose pointer
-#: (`architecture/vault-protection.md` §2) do not match, and neither does a bare
+#: vault path (`~/obsidian/lloyd/SOUL.md`) and the prose pointer row 15 keeps beside
+#: its modules (`architecture/vault-protection.md` §2) do not match, and neither does a bare
 #: `safety.py` in prose — the rule is about the module a row *names*.
 _LADDER_MODULE = re.compile(
     r"[A-Za-z0-9_.\-]*(?:[A-Za-z0-9_.\-]+/)+[A-Za-z0-9_.\-]+\.py")
@@ -250,10 +250,13 @@ def ladder_rows(text: str | None = None) -> list[tuple[int, list[str]]]:
 def ladder_module_rows(text: str | None = None) -> list[tuple[int, list[str]]]:
     """`(row number, [modules])` for the rows that name at least one `.py` module.
 
-    Rows naming none are skipped rather than failed: row 15's Module cell points
-    at `architecture/vault-protection.md` §2, a prose section, and demanding a
-    chokepoint-derived seam for it would grade a scope decision the map's owner
-    owes (#4046's owed note), not drift. Whether a multi-module row is satisfied
+    Rows naming none are skipped rather than failed: a Module cell that points only
+    at a prose section (row 15's did, at `architecture/vault-protection.md` §2, until
+    #4286 named its deciders) has no module the map could cite, and whether such a
+    row owes a seam is the map's seam criterion, published in the doc's not-cover
+    bullet, not a drift this extractor can see. No real row exercises the skip
+    today; the synthetic ladder in
+    `test_the_ladder_overlap_extractor_is_shown_able_to_fail` does. Whether a multi-module row is satisfied
     by one citation is the other edge, and it is answered the same way the map
     is drawn — B16 cites `app/desktop_lease.py` and not `app/routers/desktop.py`,
     so one hit names the row's seam and the row passes.
@@ -515,10 +518,14 @@ def test_every_ladder_row_that_names_a_module_is_a_seam_this_map_cites():
     row numbers, because a row inserted tomorrow moves every number after it: at
     least one row names more than one module (row 13 today — B16 cites
     `app/desktop_lease.py` and not `app/routers/desktop.py`, so one hit names the
-    row's seam and the row passes), and at least one names none (row 15, whose
-    Module cell is `architecture/vault-protection.md` §2, prose, which is skipped
-    rather than failed — whether it deserves a seam of its own is the scope call
-    the item owes, not a drift this node can see).
+    row's seam and the row passes). The other edge — a row naming no module is
+    skipped rather than failed — is no longer exercised by the real table: #4286
+    gave row 15 its modules, so fifteen of fifteen name one, and an assert that
+    some row names none would redden on exactly the table the seam criterion asks
+    for. That edge is pinned on the synthetic ladder in
+    `test_the_ladder_overlap_extractor_is_shown_able_to_fail` instead, and what is
+    asserted here is the property that survives either table: a row the extractor
+    skipped is one whose Module cell really holds no `.py` module.
     """
     named = ladder_module_rows()
     assert len(named) >= MIN_LADDER_ROWS_WITH_A_MODULE, (
@@ -530,10 +537,13 @@ def test_every_ladder_row_that_names_a_module_is_a_seam_this_map_cites():
         "no ladder row names more than one `.py` module, so the one-hit rule the "
         "map depends on is no longer exercised by anything and would silently "
         "start demanding every module a row mentions")
-    assert len(ladder_rows()) > len(named), (
-        "every ladder row now names a `.py` module, so the skip that lets a row "
-        "point at a prose section has stopped being exercised — re-check that the "
-        "skip is still the rule before trusting a green node")
+    named_numbers = {n for n, _ in named}
+    for n, cells in ladder_rows():
+        if n not in named_numbers:
+            assert not _LADDER_MODULE.search(cells[1]), (
+                f"ladder row {n} names a `.py` module in its Module cell "
+                f"({cells[1]!r}) but the extractor skipped it, so the overlap check "
+                "below never asks the map about that row")
 
     uncited = uncited_ladder_rows()
     assert not uncited, (
@@ -771,11 +781,14 @@ _CREDENTIAL_VAULT = "A vault write copies a credential into a file the sync clie
 #: id is returned separately, so `cells` is [B, Class, Capability, Control].
 _CAPABILITY, _CONTROL = 2, -1
 
-#: The line count of `architecture/threat-model.md` at the commit that added this
-#: node. The doc is cited by line number from inside this file — the gate-self-edit
-#: node above reads "`architecture/threat-model.md`:166-173 of the doc itself" — and
-#: the #4047 fix is a substitution of three cells that leaves the file at 402 lines.
-_DOC_LINES = 402
+#: The line count of `architecture/threat-model.md` as of the last edit that moved it.
+#: No node in this file quotes a line of the doc any more (the `:166-173` this comment
+#: used to name was cited by nothing); the doc is quoted by line number from outside —
+#: `scripts/automod/chrome_dist.py`'s docstring cites B11 at `threat-model.md:106` and
+#: T-24/T-25 at `:155` and `:156` — so a change to this count means re-checking those.
+#: The #4047 fix left the file at 402 lines; #4286 added B20, T-45, a T-45 note and
+#: the not-cover bullet's two rulings, for 417.
+_DOC_LINES = 417
 
 
 def _credential_rows(needles, want):
@@ -854,9 +867,10 @@ def test_the_credential_edits_stayed_inside_their_cells():
     The mechanism is recorded twice in `agent_mcp/http_tools.py`'s own comment
     (`:536` on 2026-10-31, `:549` on 2026-11-06): a witness anchor is graded by
     re-running a `git grep` and comparing the PRINTED line numbers, so one added
-    line silently invalidates every citation that quotes a number — including this
-    file's own, which quotes `:166-173` of this doc. The #4047 fix rewrote three
-    cells and left the file at 402 lines.
+    line silently invalidates every citation that quotes a number — the doc's
+    lines are quoted from `scripts/automod/chrome_dist.py` (see `_DOC_LINES`). The
+    #4047 fix rewrote three cells and left the file at 402 lines; #4286's B20 row
+    and rulings moved it to 417.
 
     The count is a proxy for the one thing the rest of this file cannot see: the
     row count, which the nodes above check against the 25/3 id sets, cannot move
@@ -865,8 +879,8 @@ def test_the_credential_edits_stayed_inside_their_cells():
     """
     assert len(DOC.read_text(encoding="utf-8").splitlines()) == _DOC_LINES, (
         "the doc's line count moved, so any citation quoting a line number inside it "
-        "— including this file's `:166-173` — now points somewhere else; re-point "
-        "those, then update `_DOC_LINES`")
+        "— `scripts/automod/chrome_dist.py`'s `threat-model.md:106/:155/:156` — now "
+        "points somewhere else; re-point those, then update `_DOC_LINES`")
     for rid in ("T-08", "T-20"):
         cells = _credential_rows(
             [_CREDENTIAL_BODY] if rid == "T-20" else [_CREDENTIAL_VAULT], 1)[1]

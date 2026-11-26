@@ -6,7 +6,7 @@ inline because `gate.py` carries six architecture-doc anchors that resolve by LI
 NUMBER — `Gate.run` at :2618 (cited by `architecture/automod.md:4534` and
 `architecture/threat-model.md:106`, and hardcoded as `GATE_LADDER_SPAN` in the doc-claim
 rail), :3511 (`measurement.md:297`), :3566 and :3595 (`testing.md:302` and `:300`), and
-`rung_review` at :4320 (`threat-model.md:154` and `:155`). Every one of them is below the
+`rung_review` at :4320 (`threat-model.md:155` and `:156`). Every one of them is below the
 chrome section at :613-806, so a round that grew that section in place would silently
 rot all six, and the rail that re-checks them by number and by content
 (`tests/test_architecture_coverage_doc_claims.py`) is not a thing a round may edit to
