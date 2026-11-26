@@ -890,3 +890,123 @@ def test_the_new_report_changes_no_seed_and_no_score_even_past_the_bound(
     assert without_report == stale_seeds, (
         f"taking the status changed the seeds: {stale_seeds} vs {without_report}")
     assert not EL.index_status(), "the suppressed arm still reported"
+
+
+# ── #4034: the alias regenerator is deliberately unscheduled, and says why ──────
+#
+# The decision lives where a reader of the script meets it (its docstring) and in the
+# two records that measured it; `--gold-check` is the seconds-long, read-only probe
+# that re-tests it as the registry grows. These nodes are hermetic: the store and the
+# gold file are built here, never the live ones.
+
+REGEN_SCRIPT = ROOT / "scripts" / "memory" / "regenerate_aliases.py"
+_STALE_OWED_PHRASE = "optional and owed to a human"
+
+
+def _regen_module():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("regenerate_aliases_4034", REGEN_SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_the_regenerator_docstring_records_that_it_is_deliberately_unscheduled():
+    doc = _regen_module().__doc__ or ""
+    assert "Deliberately unscheduled" in doc, doc[:400]
+    for evidence in ("zero ``regen:`` rows", "arm E", "control G", "86-query gold set",
+                     "moved no metric"):
+        assert evidence in doc, f"the decision no longer names {evidence!r}"
+
+
+def _fixture_store_and_gold(tmp_path: Path, expect: list[str]) -> tuple[Path, Path]:
+    db = tmp_path / "kg.sqlite"
+    st = ks.KGStore(db)
+    for name in ("TGS-RAG", "Knowledge Graph"):
+        st.entities.register(name, kind="system")
+    st.close()
+    gold = tmp_path / "gold.yaml"
+    gold.write_text(
+        "queries:\n"
+        "- id: tgs-rag-state\n"
+        "  query: what is the current state of tgs rag research?\n"
+        f"  expect_entities: {json.dumps(expect)}\n", encoding="utf-8")
+    return db, gold
+
+
+def _tree_state(root: Path) -> dict:
+    """Every file's bytes, except sqlite's WAL sidecars, which are reported apart.
+
+    A `?mode=ro` reader of a WAL-mode database still maps `-shm` (the readers'
+    lock index) and may leave an empty `-wal` beside a store whose writer had
+    closed — the live store always has both, its writers hold them open. Neither
+    is a write of data, so they are held to the stricter fact that matters: the
+    `-wal` carries no frame, i.e. zero bytes.
+    """
+    out = {}
+    for p in sorted(root.rglob("*")):
+        if not p.is_file():
+            continue
+        if p.name.endswith("-shm"):
+            continue
+        if p.name.endswith("-wal"):
+            out[str(p.relative_to(root))] = ("wal-bytes", p.stat().st_size)
+            continue
+        out[str(p.relative_to(root))] = (p.stat().st_size, p.read_bytes())
+    return out
+
+
+def _no_new_wal_frames(state: dict) -> dict:
+    return {k: v for k, v in state.items() if v != ("wal-bytes", 0)}
+
+
+def _gold_check(tmp_path: Path, db: Path, gold: Path, *extra: str):
+    env = dict(os.environ, LLOYD_KG_DB=str(db))
+    return subprocess.run([sys.executable, str(REGEN_SCRIPT), "--gold-check",
+                           "--gold", str(gold), *extra],
+                          cwd=str(tmp_path), env=env, capture_output=True, text=True,
+                          timeout=120)
+
+
+@pytest.mark.parametrize("expect,relevant", [(["TGS-RAG"], 1), (["Knowledge Graph"], 0)],
+                         ids=["gold-names-the-canonical", "gold-names-another-entity"])
+def test_gold_check_counts_a_surface_only_where_its_canonical_is_that_querys_gold(
+        tmp_path, expect, relevant):
+    """`TGS RAG` (the punct rule's spelling of `TGS-RAG`) sits in the query either way;
+    it is gold-relevant only when that query's gold is the canonical it routes to."""
+    db, gold = _fixture_store_and_gold(tmp_path, expect)
+    before = _tree_state(tmp_path)
+    res = _gold_check(tmp_path, db, gold)
+    assert res.returncode == 0, res.stderr[-1500:]
+    out = res.stdout
+    assert "planned_rows: 1" in out, out
+    assert "surface_hits: 1" in out, out
+    assert f"gold_relevant_rows: {relevant}" in out, out
+    assert _no_new_wal_frames(_tree_state(tmp_path)) == _no_new_wal_frames(before), (
+        "--gold-check wrote something")
+    st = ks.KGStore(db)
+    try:
+        assert st.aliases.count() == 0, "--gold-check wrote alias rows"
+    finally:
+        st.close()
+
+
+def test_gold_check_refuses_apply_and_report(tmp_path):
+    db, gold = _fixture_store_and_gold(tmp_path, ["TGS-RAG"])
+    before = _tree_state(tmp_path)
+    for extra in (("--apply",), ("--report", str(tmp_path / "out.json"))):
+        res = _gold_check(tmp_path, db, gold, *extra)
+        assert res.returncode == 2, (extra, res.stdout, res.stderr[-500:])
+    assert _no_new_wal_frames(_tree_state(tmp_path)) == _no_new_wal_frames(before)
+
+
+def test_the_alias_records_carry_the_decided_state_with_both_counts():
+    measurement = (ROOT / "eval" / "measurements" / "entity-anchoring-2026-09-25.md").read_text(
+        encoding="utf-8")
+    retrieval_md = (ROOT / "architecture" / "retrieval.md").read_text(encoding="utf-8")
+    sec37 = retrieval_md.split("### 3.7 ", 1)[1].split("\n### 3.8 ", 1)[0]
+    assert _STALE_OWED_PHRASE not in measurement
+    for where, text in (("the 09-25 measurement", measurement), ("retrieval.md §3.7", sec37)):
+        assert "deliberately unscheduled" in text, where
+        assert "3,065 planned rows" in text, where
+        assert "1 of 86 gold queries reachable" in text, where

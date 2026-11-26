@@ -1818,3 +1818,28 @@ def reset() -> None:
         if _default is not None:
             _default.close()
             _default = None
+
+
+def read_only_registry(path: Path | str | None = None) -> tuple[list[str], set[str]]:
+    """Entity names and lowercased alias surfaces, read through a `?mode=ro` handle.
+
+    For a probe that must not be able to write: `KGStore()` runs `_init_schema()`
+    (a write transaction) and sets `journal_mode=WAL` on every open, so even a
+    dry-run through `store()` holds a writable handle on the live file. This one
+    cannot — `uri=True` plus `mode=ro` refuses every write at the sqlite layer — and
+    an absent path raises `StoreUnavailable` rather than answering an empty registry.
+    It returns what `_Entities.all()` and `_Aliases.all_lower()` would (the alias
+    half without the entity self-identities). The caller is
+    `scripts/memory/regenerate_aliases.py --gold-check` (#4034).
+    """
+    target = _require_database(Path(path) if path is not None else _default_path)
+    try:
+        con = sqlite3.connect(f"file:{target.resolve()}?mode=ro", uri=True, timeout=30.0)
+        try:
+            names = [r[0] for r in con.execute("SELECT name FROM entities ORDER BY name")]
+            aliases = {r[0] for r in con.execute("SELECT surface_lc FROM aliases")}
+        finally:
+            con.close()
+    except sqlite3.Error as exc:
+        raise StoreUnavailable(f"cannot read {target} read-only: {exc}") from exc
+    return names, aliases

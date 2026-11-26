@@ -313,7 +313,13 @@ fact_entity_recall +0.172 [0.088, 0.265], anchorless 25 → 16 (strict 38 → 27
 every doc metric identical, +71 ms mean latency; the same seed count taken
 lexically (width 13) moves nothing. Rule-regenerated aliases
 (`scripts/memory/regenerate_aliases.py`, 2,100 rows on a copy) moved nothing on
-the gold set. `eval/measurements/entity-anchoring-2026-09-25.md`.
+the gold set, and the script is **deliberately unscheduled** (#4034): zero `regen:`
+rows in the live store, and a read-only gold-relevance read of the live registry on
+2026-11-11 found 3,065 planned rows with 1 of 86 gold queries reachable — one query
+cannot move `entity_hit`. `regenerate_aliases.py --gold-check` (a `?mode=ro` read
+through `app.kg_store.read_only_registry`, writes nothing) re-tests it; 2026-11-26:
+3,281 planned rows, still 1 of 88. Arming a job, and the `gold_relevant_rows` that
+would earn a new A/B, are Alan's rulings. `eval/measurements/entity-anchoring-2026-09-25.md`.
 
 ### 3.8 Topic phrases fused into the fact leg of `vault_recall` (#1456)
 

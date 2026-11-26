@@ -4,7 +4,13 @@
 seeds). Every entity metric moves clear of its paired 95% interval, no document
 metric moves at all, no query loses a hit, and the cost is +71 ms mean recall
 latency. The alias-regeneration script is shipped but measured **no gain** on the
-gold set; applying it to the live store is optional and owed to a human.
+gold set, and it is **deliberately unscheduled** (decided 2026-11-11, #4034): the
+live store holds zero `regen:` rows, arm E and control G below moved nothing, and a
+read-only gold-relevance check over the live registry found **3,065 planned rows
+with 1 of 86 gold queries reachable** (`TGS RAG` → `TGS-RAG`, a query that already
+spells the name). `regenerate_aliases.py --gold-check` re-tests it read-only
+(2026-11-26: 3,281 planned rows, still 1 gold-relevant row, 1 of 88 queries);
+`--apply` is for a store copy, never the live store.
 
 ## What was built
 
@@ -101,9 +107,10 @@ the early doc-leg start the embedding (~0.2 s) would sit in series.
    vectors measured here are at `~/lloyd-data/eval/1486/vec-f3/` (same model,
    transformers-built, same text) and can be copied there instead. Rebuild after a
    KG rebuild; entities created since are simply not semantic candidates.
-3. Optional, no measured gain: `scripts/memory/regenerate_aliases.py --report <path>`
-   (dry run), then `--apply` against the live store. Every row is `origin=regen:*`
-   and removable with `aliases.remove_exact`.
+3. ~~Apply `regenerate_aliases.py` to the live store~~ — decided against
+   (#4034, 2026-11-11): deliberately unscheduled, 3,065 planned rows with 1 of 86
+   gold queries reachable. Re-test with `--gold-check`, which writes nothing;
+   arming a job or a reopen threshold is Alan's ruling.
 4. Expect the nightly's entity metrics to step up once 1–2 land; the trend audit
    will read it as a change, which it is.
 5. The model weights live in the HF cache (`Qwen/Qwen3-Embedding-0.6B`,

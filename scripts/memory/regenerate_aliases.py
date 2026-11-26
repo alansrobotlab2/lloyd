@@ -36,9 +36,34 @@ Writes go only through ``app.kg_store``'s single alias writer, which stamps
 ``LLOYD_KG_DB`` / ``app.paths.VAULT_KG_DB`` names — point ``LLOYD_KG_DB`` at a
 copy to measure before touching the live one.
 
+Deliberately unscheduled (#4034). No job, autonomy task or unit runs this script,
+and that is a decision, not an omission. The evidence:
+
+* the live store holds zero ``regen:`` rows (read 2026-11-10/11: 281 alias rows,
+  227 ``sweep``/punct + 54 ``schema``/semantic, against ~17,000 entities) — the
+  script has never been applied there;
+* on 2026-09-25, on the 86-query gold set (the same 86 the 2026-11-11 re-read
+  used), arm E (regen alone, 2,100 rows on a copy) moved no metric, and control G
+  (regen + alias surfaces) was identical to arm B (alias surfaces alone) on every
+  metric (``eval/measurements/entity-anchoring-2026-09-25.md``);
+* the gold-relevance read over the live registry on 2026-11-11: 3,065 planned
+  rows, of which 1 is gold-relevant — 1 of 86 gold queries reachable (``TGS RAG``
+  → ``TGS-RAG``, whose query already spells the hyphenated name). One query cannot
+  move ``entity_hit`` or the anchorless count past its interval. ``--gold-check``
+  re-run read-only on 2026-11-26: 3,281 planned rows, still 1 gold-relevant row,
+  1 of the 88 queries the gold file holds now.
+
+The punct class is mostly harvested already, by the scheduled
+``entity-resolution-sweep.py --apply --tiers CASE,PUNCT`` (``origin="sweep"``).
+Re-test the decision with ``--gold-check`` as the registry grows; it opens the store
+read-only and writes nothing. At what ``gold_relevant_rows`` a full 09-25-style A/B
+earns its cost is Alan's ruling, and arming a recurring job is his too; until then
+``--apply`` is for a copy (``LLOYD_KG_DB``), never the live store.
+
 Usage:
   regenerate_aliases.py                       # dry-run, report to stdout
   regenerate_aliases.py --report out.json     # dry-run, full report
+  regenerate_aliases.py --gold-check          # read-only: planned vs gold-relevant rows
   LLOYD_KG_DB=/path/copy.sqlite regenerate_aliases.py --apply --report out.json
 """
 from __future__ import annotations
@@ -178,11 +203,95 @@ def run(apply: bool, report: Path | None = None) -> dict:
     return out
 
 
+#: The gold set `eval/run_eval.py` scores nightly.
+DEFAULT_GOLD = HERE.parent.parent / "eval" / "vault_recall_queries.yaml"
+
+
+def _spaced(text: str) -> str:
+    """Lowercase, `-`/`_` and every other non-alphanumeric read as a space."""
+    return " ".join(re.sub(r"[^0-9a-z]+", " ", str(text).lower().replace("_", " ")).split())
+
+
+def _eval_norm(text: str) -> str:
+    """`eval/run_eval.py::_norm`: lowercase, `-` and `_` equivalent."""
+    return str(text or "").lower().replace("-", "_")
+
+
+def _satisfies(canonical: str, gold: list[str]) -> bool:
+    """The eval's lenient entity rule: a gold name and the canonical contain one
+    another (either way), after `_eval_norm`."""
+    c = _eval_norm(canonical)
+    return any(g and (g in c or c in g) for g in (_eval_norm(x) for x in gold))
+
+
+def gold_check(planned_rows: list[dict], queries: list[dict]) -> dict:
+    """Pure: which planned rows could change what a gold query anchors on.
+
+    A row is gold-relevant when its surface, spaced, appears as a whole token run
+    inside a gold query's spaced text AND its canonical satisfies that same query's
+    `expect_entities`. A surface that sits in a query whose gold it cannot satisfy
+    is counted as a `surface_hit` only — it would seed something the query is not
+    scored on.
+    """
+    relevant: list[dict] = []
+    reachable: set[str] = set()
+    surface_hits = 0
+    spaced_q = [(q, f" {_spaced(q.get('query', ''))} ") for q in queries]
+    for row in planned_rows:
+        needle = _spaced(row["surface"])
+        if not needle:
+            continue
+        hit_ids = []
+        for q, text in spaced_q:
+            if f" {needle} " not in text:
+                continue
+            surface_hits += 1
+            if _satisfies(row["canonical"], q.get("expect_entities") or []):
+                hit_ids.append(str(q.get("id")))
+        if hit_ids:
+            relevant.append({**row, "queries": hit_ids})
+            reachable.update(hit_ids)
+    return {
+        "planned_rows": len(planned_rows),
+        "gold_queries": len(queries),
+        "surface_hits": surface_hits,
+        "gold_relevant_rows": len(relevant),
+        "gold_queries_reachable": len(reachable),
+        "relevant": relevant,
+    }
+
+
+def run_gold_check(gold: Path = DEFAULT_GOLD, db: Path | None = None) -> dict:
+    """`--gold-check`: the store through a `?mode=ro` handle, the gold file read,
+    nothing written anywhere."""
+    import yaml
+    from app.kg_store import read_only_registry
+    names, alias_lc = read_only_registry(db)
+    existing = alias_lc - {n.lower() for n in names}
+    queries = (yaml.safe_load(Path(gold).read_text(encoding="utf-8")) or {}).get("queries") or []
+    return gold_check(plan(names, existing)["rows"], queries)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--apply", action="store_true", help="write the rows (default: dry-run)")
     ap.add_argument("--report", type=Path, help="write the full plan/report JSON here")
+    ap.add_argument("--gold-check", action="store_true",
+                    help="read-only: print planned_rows and gold_relevant_rows; writes nothing")
+    ap.add_argument("--gold", type=Path, default=DEFAULT_GOLD,
+                    help="gold query file for --gold-check (default: %(default)s)")
     args = ap.parse_args(argv)
+    if args.gold_check:
+        if args.apply or args.report:
+            ap.error("--gold-check writes nothing: it takes neither --apply nor --report")
+        out = run_gold_check(args.gold)
+        for key in ("planned_rows", "gold_queries", "surface_hits",
+                    "gold_relevant_rows", "gold_queries_reachable"):
+            print(f"{key}: {out[key]}")
+        for row in out["relevant"]:
+            print(f"relevant: {row['surface']!r} -> {row['canonical']!r} "
+                  f"({row['rule']}) in {', '.join(row['queries'])}")
+        return 0
     print(json.dumps(run(args.apply, args.report), indent=1))
     return 0
 
