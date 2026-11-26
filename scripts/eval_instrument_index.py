@@ -1372,9 +1372,59 @@ def fitness_instruments() -> tuple[Instrument, ...]:
         for b in fit.load_manifest())
 
 
+# ── the claim-trace audit arm (#4263) ─────────────────────────────────────────
+#
+# Outside the ruled `INSTRUMENTS` tuple for the fitness arms' reason: that tuple is the
+# eight arms whose weights a recorded ruling sums to 1.0 (#4169), and a report-only arm
+# joining it would re-open that ruling for no gain. Like `behaviour_exhibit` it carries
+# weight 0.0 and is never averaged: its scalar is a contradicted rate pooled over four
+# assertion kinds whose extraction precision has not been hand-measured yet (#4263's
+# human clause), and a rate whose instrument precision is unknown has no business moving
+# a composite. What it earns by being here is the line a dead store prints: a day with no
+# dated artifact reads `missing or stale: claim_audit` in the headline.
+#
+# `scheduled_by` names `autonomy/109-behaviour-exhibit-daily.md`, the daily job that
+# already sweeps the same corpus with the same enumerator on the same `--days 7` mtime
+# window, two hours after #79's gzip pass and two before this index reads its stores —
+# the one existing task whose population and timing this audit's rows must match to be
+# comparable with the exhibit rates beside them. That task's prompt runs exactly one
+# command today; adding `python -m app.claim_trace_audit` to it is a vault edit to an
+# armed task, which is a person's (or owed-check's) step, not this module's. Until it is
+# made, the arm reads `missing` — the visible state this registration exists for.
+
+def _claim_audit_dir() -> Path:
+    """The audit's store, through the constant its writer returns (`out_dir()`)."""
+    from app import paths as p
+    return p.CLAIM_AUDIT_DIR
+
+
+CLAIM_AUDIT_INSTRUMENT = Instrument(
+    key="claim_audit",
+    title="Completion claims contradicted by their own trace, pooled over four kinds",
+    artifact=_claim_audit_dir,
+    pattern="claim-audit-*.jsonl",
+    value_path="run.pooled_contradicted",
+    unit="share",
+    polarity="down",
+    weight=0.0,
+    weight_why="RULING (#4263): reported, never averaged. A floor on fabrication over "
+               "four trace-checkable claim shapes whose extraction precision is owed a "
+               "hand-labelled sample before any rate is trusted; nothing gates on it",
+    cadence_days=1,
+    hand_run_by_ruling=False,
+    scheduled_by="autonomy/109-behaviour-exhibit-daily.md",
+    averageable=False,
+    consumer=None,
+)
+
+
+def claim_audit_instruments() -> tuple[Instrument, ...]:
+    return (CLAIM_AUDIT_INSTRUMENT,)
+
+
 def all_instruments() -> tuple[Instrument, ...]:
-    """What the publisher runs: the ruled table, then the fitness arms."""
-    return INSTRUMENTS + fitness_instruments()
+    """What the publisher runs: the ruled table, the claim-audit arm, the fitness arms."""
+    return INSTRUMENTS + claim_audit_instruments() + fitness_instruments()
 
 
 if __name__ == "__main__":

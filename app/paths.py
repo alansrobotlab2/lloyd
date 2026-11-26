@@ -541,3 +541,11 @@ FITNESS_SERIES = DATA_ROOT / "eval" / "fitness.jsonl"
 # The measured noise floor per bench (`fitness noise --repeat N`): min, max and
 # stdev of N runs at one commit. A delta inside it is not a move.
 FITNESS_NOISE_PATH = DATA_ROOT / "eval" / "fitness_noise.json"
+# The claim-trace audit (`app/claim_trace_audit.py`, #4263): one dated
+# `claim-audit-YYYY-MM-DD.jsonl` per run, one row per assertion kind (artifact, count,
+# command_success, identifier) carrying supported/contradicted/unsupported k/n with Wilson
+# intervals. Declared by its writer here, appended last because this file's line numbers
+# are anchors; the writer prunes its own files past `RETENTION_DAYS`. Report-only: the
+# instrument index carries it as a zero-weight arm, and no gate, promotion rule or
+# rollback path reads it.
+CLAIM_AUDIT_DIR = DATA_ROOT / "eval" / "claim-audit"

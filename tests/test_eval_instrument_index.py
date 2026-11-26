@@ -1003,6 +1003,47 @@ def test_each_component_path_is_the_path_its_own_writer_declares():
     assert lag.value_path == "p50" and lag.n_path == "n"
     assert lag.scheduled_by == "autonomy/101-gate-to-land-lag-daily-record.md"
 
+    # #4263: the claim-trace audit arm sits outside the ruled table (like the fitness
+    # arms) and resolves through the constant its writer returns, under the data root.
+    from app import claim_trace_audit
+    audit = next(i for i in EII.all_instruments() if i.key == "claim_audit")
+    assert audit not in EII.INSTRUMENTS
+    assert audit.artifact() == paths.CLAIM_AUDIT_DIR == claim_trace_audit.out_dir()
+    assert paths.CLAIM_AUDIT_DIR == paths.DATA_ROOT / "eval" / "claim-audit"
+    assert audit.pattern == f"{claim_trace_audit.FILE_PREFIX}*.jsonl"
+    assert audit.weight == 0.0 and audit.averageable is False
+    assert audit.cadence_days == 1 and audit.hand_run_by_ruling is False
+    # An EXISTING autonomy task file (the vault is not in a worktree, so the name is
+    # pinned here and its existence is checked by the live-vault node below).
+    assert audit.scheduled_by == "autonomy/109-behaviour-exhibit-daily.md"
+
+
+@pytest.mark.live_vault
+def test_the_claim_audit_arm_names_a_task_file_that_exists_in_the_vault():
+    audit = next(i for i in EII.all_instruments() if i.key == "claim_audit")
+    from app import paths
+    assert (paths.PRODUCTION_VAULT / audit.scheduled_by).is_file(), audit.scheduled_by
+
+
+def test_the_claim_audit_arm_reads_the_pooled_rate_its_writer_publishes(tmp_path):
+    """The arm's pointer against a real artifact the writer just wrote, not a hand-built
+    row: a `value_path` that drifted from the writer's shape would read `no-value`."""
+    from app import claim_trace_audit as CTA
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    doc = {"session_id": "20261120_100000_autocode_aa11", "platform": "worker",
+           "source": "autocode",
+           "messages": [{"role": "user", "content": "go"},
+                        {"role": "assistant", "content": "I edited `app/ghost.py`."}]}
+    (sessions / "20261120_100000_autocode_aa11.json").write_text(json.dumps(doc))
+    store = tmp_path / "claim-audit"
+    stamp = datetime.now(timezone.utc)
+    CTA.sweep(sessions, days=7, out=store, now=stamp)
+    audit = next(i for i in EII.all_instruments() if i.key == "claim_audit")
+    reading = EII.read_instrument(audit, today=stamp.date(), root_override=store)
+    assert reading.status == "measured", reading
+    assert reading.value == 1.0 and reading.denominator == 1 and reading.ci95
+
 
 def test_the_lag_component_path_is_not_a_re_typed_literal():
     """#3541 clause 1's negative half: `test_each_component_path_is_the_path_its_own_writer_declares`
@@ -1442,6 +1483,8 @@ def _roots_file(tmp_path, values: dict, *, omit: tuple[str, ...] = (),
     snapshot that points the publisher at them instead of at the live data root."""
     roots = _seed_all(tmp_path, values, omit=omit, days=days)
     roots.update({i.key: tmp_path / "no-fitness-row" / i.key for i in EII.fitness_instruments()})
+    roots.update({i.key: tmp_path / "no-claim-audit" / i.key
+                  for i in EII.claim_audit_instruments()})
     path = tmp_path / "roots-snapshot.json"
     path.write_text(json.dumps({k: str(v) for k, v in roots.items()}, indent=1), encoding="utf-8")
     return path
@@ -1472,7 +1515,8 @@ def test_the_module_cli_appends_one_row_and_exits_zero_on_the_ok_branch(tmp_path
         "this fixture is the ok branch — the exit-1 test below is the other one, so "
         "the pair pins a mapping rather than self-consistency")
     assert rows[0]["date"] == "2026-10-13", "`--now` is what stamps the row"
-    assert len(rows[0]["components"]) == 8 + len(EII.fitness_instruments()), (
+    assert len(rows[0]["components"]) == (8 + len(EII.claim_audit_instruments())
+                                          + len(EII.fitness_instruments())), (
         "the subprocess publishes the whole table, arms carried by ruling included — "
         "nine since #3886 added the ninth, eight since #4169 retired the scorecard arm")
 
@@ -1505,7 +1549,8 @@ def test_the_module_cli_exits_1_and_publishes_the_refusal_when_one_arm_survives(
     rows = EII.read_series(out)
     assert len(rows) == 1, "a refused run publishes one row, not zero"
     assert rows[0]["totals"]["status"] == "refused"
-    assert len(rows[0]["dead_or_stale"]) == 7 + len(EII.fitness_instruments())
+    assert len(rows[0]["dead_or_stale"]) == (7 + len(EII.claim_audit_instruments())
+                                             + len(EII.fitness_instruments()))
 
 
 def test_no_record_prints_and_creates_nothing_even_on_the_refused_branch(tmp_path):
@@ -2220,7 +2265,7 @@ def test_the_fitness_arms_are_one_per_manifest_bench_and_leave_the_ruled_table_a
     arms = EII.fitness_instruments()
     names = [b.name for b in fit.load_manifest()]
     assert [a.key for a in arms] == [f"fitness_{n}" for n in names]
-    assert EII.all_instruments() == EII.INSTRUMENTS + arms
+    assert EII.all_instruments() == EII.INSTRUMENTS + EII.claim_audit_instruments() + arms
     assert len(EII.INSTRUMENTS) == 8, "the ruled table is not what grew"
     assert {a.key for a in arms}.isdisjoint(ALL_KEYS)
     polarity = {b.name: ("up" if b.higher_is_better else "down") for b in fit.load_manifest()}
@@ -2350,3 +2395,29 @@ def test_the_fitness_runner_never_reads_the_index():
                 "tests/test_automod_fitness.py"):
         assert _index_reads_in(ROOT / rel) == [], rel
         assert rel not in DECLARED_IN
+
+
+# ── #4263: the claim-audit store is report-only too ───────────────────────────
+
+#: The only files that may name the claim-audit store or its writer: the writer, its
+#: path constant, the index that reports it, and tests.
+CLAIM_AUDIT_DECLARED_IN = frozenset({
+    "app/claim_trace_audit.py",
+    "app/paths.py",
+    "scripts/eval_instrument_index.py",
+})
+
+
+def test_no_gate_promotion_or_rollback_path_reads_the_claim_audit_store():
+    """#4263 clause 5: nothing is gated on the contradicted rate. The index's own boundary
+    (the node above) covers a reader of the index; this one covers a reader of the store
+    or of its writer directly, so a `contradicted` row can only ever be reported."""
+    needles = ("CLAIM_AUDIT_DIR", "claim_trace_audit", "claim-audit")
+    offenders = []
+    for path in _python_files_in_tree():
+        rel = path.relative_to(ROOT).as_posix()
+        if rel in CLAIM_AUDIT_DECLARED_IN or rel.startswith("tests/"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        offenders.extend(f"{rel}: {n}" for n in needles if n in text)
+    assert offenders == [], f"something outside the writer reads the claim audit: {offenders}"
