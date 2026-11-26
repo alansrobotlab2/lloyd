@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Manual smoke check of all 14 browser MCP tools against a running lloyd-mcp.
 
+Every `browser_*` tool `agent_mcp.browser.list_tools()` registers is reported here
+by name — browser_select and browser_drag as a SKIP, the other twelve driven over
+the MCP transport. `tests/test_smoke_browser_coverage.py` pins that set and the
+count above to the registered tools, so a new tool cannot land unsmoked again.
+
 Run with the aggregator up:  .venvs/lloyd/bin/python -m scripts.smoke_browser_mcp
 
 Deliberately NOT named test_*.py: it drives a live MCP server over HTTP, so
@@ -18,8 +23,11 @@ MCP client in this repo and broke the moment the transport changed.
 
 import asyncio
 import json
+import os
 import re
 import sys
+import tempfile
+from pathlib import Path
 
 from app.harness.mcp_pool import (
     DEFAULT_LLOYD_MCP_SERVERS,
@@ -425,6 +433,70 @@ report("browser_select", True, "SKIP -- no dropdown on google.com")
 
 print("\n-- Test 17: browser_drag --", flush=True)
 report("browser_drag", True, "SKIP -- no drag targets on google.com")
+
+# =====================================================================
+# 18. browser_upload_files -- refuse a path outside upload_roots, then attach
+#     a small file from inside one. `browser_navigate` takes http(s) only, so a
+#     `data:` URL cannot be loaded as the page; the file input is created on
+#     example.com instead, which loads nothing further.
+# =====================================================================
+print("\n-- Test 18: browser_upload_files --", flush=True)
+upload_file = None
+try:
+    from app.config import CONFIG
+    raw_roots = (CONFIG.get("browser") or {}).get("upload_roots") or ["~/lloyd-data"]
+    if isinstance(raw_roots, str):
+        raw_roots = [raw_roots]
+    roots = [Path(os.path.expanduser(str(r).rstrip("/*"))) for r in raw_roots]
+    root = next((r for r in roots if r.is_dir()), None)
+    if root is None:
+        raise RuntimeError(f"no browser.upload_roots directory exists: {raw_roots}")
+    payload = b"lloyd smoke upload\n"
+    with tempfile.NamedTemporaryFile(dir=root, prefix="smoke-browser-upload-",
+                                     suffix=".txt", delete=False) as fh:
+        fh.write(payload)
+        upload_file = Path(fh.name)
+    outside = str(Path(__file__).resolve())  # this script: outside every upload root
+
+    call_tool("browser_navigate", {"url": "https://example.com"})
+    r0 = call_tool("browser_evaluate", {"script": (
+        "(() => { const i = document.createElement('input'); i.type = 'file'; "
+        "document.body.appendChild(i); return document.querySelectorAll("
+        "'input[type=file]').length; })()")})
+    ok0 = not is_error(r0) and "1" in text_of(r0)
+
+    files_probe = ("(() => { const f = document.querySelector('input[type=file]'); "
+                   "return f.files.length ? f.files[0].name + ':' + f.files[0].size "
+                   ": 'files.length=' + f.files.length; })()")
+    r1 = call_tool("browser_upload_files", {"selector": "input[type=file]",
+                                            "paths": [outside]})
+    txt1 = text_of(r1)
+    ok1 = '"error"' in txt1 and outside in txt1
+    r2 = call_tool("browser_evaluate", {"script": files_probe})
+    ok2 = "files.length=0" in text_of(r2)
+
+    r3 = call_tool("browser_upload_files", {"selector": "input[type=file]",
+                                            "paths": [str(upload_file)]})
+    txt3 = text_of(r3)
+    ok3 = not is_error(r3) and '"error"' not in txt3
+    r4 = call_tool("browser_evaluate", {"script": files_probe})
+    want = f"{upload_file.name}:{len(payload)}"
+    ok4 = want in text_of(r4)
+
+    all_ok = ok0 and ok1 and ok2 and ok3 and ok4
+    report("browser_upload_files", all_ok,
+           f"input={'ok' if ok0 else 'fail'}, refused_outside={'ok' if ok1 else 'fail'}, "
+           f"left_empty={'ok' if ok2 else 'fail'}, attach={'ok' if ok3 else 'fail'}, "
+           f"on_page={'ok' if ok4 else 'fail'}")
+    if not all_ok:
+        for txt, label in [(text_of(r0), "input"), (txt1, "refuse"), (text_of(r2), "empty"),
+                           (txt3, "attach"), (text_of(r4), "on_page")]:
+            print(f"    {label}: {txt[:200]}", flush=True)
+except Exception as e:
+    report("browser_upload_files", False, str(e))
+finally:
+    if upload_file is not None:
+        upload_file.unlink(missing_ok=True)
 
 # =====================================================================
 # SUMMARY
