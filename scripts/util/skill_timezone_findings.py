@@ -1,20 +1,25 @@
 #!/usr/bin/env python3
 """Refuse a commit whose OWN added lines put a wrong-zone clock into a skill template.
 
-The rule is `scripts/skill_timezone.py`'s — one definition, three readers now. Two of
-them predate this file and neither of them stands at this door:
+The rule is `scripts/skill_timezone.py`'s — one definition, four readers now. Two of
+them predate this file and judge a whole body, never a commit's own lines:
 
-  * ``scripts/automod/vault_round.py::skill_timezone_errors`` (the land rail), whose
-    selector is ``p.startswith("skills/") and p.endswith("/SKILL.md")`` — a DETAIL file
-    inside a skill directory never reaches it;
+  * ``scripts/automod/vault_round.py::skill_timezone_errors`` (the land rail's whole-body
+    scan), whose selector is ``p.startswith("skills/") and p.endswith("/SKILL.md")`` — a
+    DETAIL file inside a skill directory never reaches it;
   * ``tests/test_skill_timezone_literals.py``, the reporting copy. Both of its live-vault
     corpus scans read ``*/SKILL.md``; #4516 widened them to each active skill's spliced
     FOLDER (``_active_skill_folders``), so a subject a fold moved into a detail file is
     judged there too, and the map-file-only reader was deleted rather than left beside it —
     a corpus function nothing calls is the old blind spot kept compilable.
 
-Neither of those is this door, which is what this module exists for. The land rail speaks
-on a round's diff and the reporting copy speaks in pytest, whose automod invocation
+The other two read THIS module: ``scripts/util/vault-commit.sh``'s ``TIMEZONE_RUNG``, the
+door it was written for, and — since #4069 (repo 94167339) —
+``scripts/automod/vault_round.py``'s ``land()``, which imports it as ``STF`` and runs
+``STF.findings`` over the staged index, so the land rail does judge a detail file, through
+this module and diff-relative. Neither whole-body reader is the nightly's door, which is
+what this module exists for. The whole-body scan speaks on a round's diff and the
+reporting copy speaks in pytest, whose automod invocation
 deselects ``live_vault`` outright — so on the night a job commits, nothing stands between a
 runbook and its own commit. The violation that founded this file was a ``vault-commit.sh``
 subject interpolating the LOCAL day, carried by a detail file of the job that writes
@@ -36,14 +41,17 @@ own ``git commit`` and is never validated by ``vault_round.validate()``. The cla
 therefore entered that door unrefused, and clause 5 of the filing kept it that way on a
 reason of fact rather than of shape: widening the LAND rail to detail files is a
 whole-body scan, so while that violation sat inside a file the nightly commits every cycle,
-the widening would have refused every round touching it. The fact has now gone and the
-shape argument stands alone, which makes the widening #3881's owed-check ruling to make and
-not this file's to assume in either direction. Diff-relativity remains the only shape this
-door can take regardless of that ruling, and this module is that shape.
+the widening would have refused every round touching it. That fact went on 2026-11-22
+(vault 8dc107f44, #4516), and the widening is no longer an open question: #4069 (repo
+94167339) settled it — the whole-body scan stays ``skills/*/SKILL.md``, and a detail file is
+judged at both doors by this module's diff-relative pass instead. Diff-relativity is the
+only shape this door can take, and this module is that shape.
 
-Why diff-relative rather than a scan of every touched file: the tree already carries
-violations this wrapper commits every cycle. A whole-body check on touched files would
-freeze the nightly-reflection batch — which spans ``memory/ lloyd/ people/ projects/
+Why diff-relative rather than a scan of every touched file: a whole-body check judges lines
+no one in this commit wrote. On 2026-11-07 the tree carried one such line that this wrapper
+committed every cycle (#2454's ``template_clock_violations`` count above; 0 by the same
+count on 2026-11-22), and the next one arrives the same way. A whole-body check on touched
+files would freeze the nightly-reflection batch — which spans ``memory/ lloyd/ people/ projects/
 knowledge/ skills/ backlog/ autonomy/`` — on somebody else's line, and that is #2245's
 stranded-snapshot failure mode, not a rail. So the question this module asks of each
 violation is the one #3545 and #3589 ask of their own classes: **did THIS commit write

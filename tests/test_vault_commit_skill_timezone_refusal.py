@@ -662,3 +662,65 @@ def test_the_land_rail_reads_the_same_matcher_and_states_no_rule_of_its_own():
             "allowed for prose about why the zone matters, a pattern would be a restatement")
     assert "PST" in skill_timezone and "date +" in skill_timezone, (
         "the single source of the patterns must be the module both doors read")
+
+
+# ------------------------------------------- #4579: the prose says what was settled
+def _module_docstring() -> str:
+    import ast
+    return " ".join((ast.get_docstring(ast.parse(MODULE.read_text(encoding="utf-8")))
+                     or "").split())
+
+
+def _land_rung_comment() -> str:
+    """The comment block above `land()`'s `STF.findings` call, flattened."""
+    src = (REPO / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
+    at = src.index("clock_records, clock_lines, clock_unread = STF.findings(VAULT)")
+    start = src.rindex("# The #4069 skill clock-literal rung.", 0, at)
+    return " ".join(ln.strip().lstrip("#").strip()
+                    for ln in src[start:at].splitlines())
+
+
+def test_the_matcher_records_the_widening_as_settled_by_4069_not_deferred_to_3881():
+    """#4579 clauses 1, 3 and 4. The module header describes the shape as it is now.
+
+    #3881 is closed and its owed-check already ruled and filed #4069, which shipped the
+    shape (repo 94167339): the whole-body scan stays `skills/*/SKILL.md` and both doors
+    judge detail files diff-relative through this module. A header that still hands the
+    widening to a closed item's owed-check reads as a live deferral and gets re-filed,
+    which is how #4578 happened.
+    """
+    doc = _module_docstring()
+    src = MODULE.read_text(encoding="utf-8")
+    assert "owed-check ruling to make" not in src, "the widening is still deferred to #3881"
+    assert "#4069 (repo 94167339) settled it" in doc, doc
+    assert "the whole-body scan stays ``skills/*/SKILL.md``" in doc, doc
+    # The clause-3 no-restatement references to #3881 are legitimate and stay.
+    assert "(#3881 clause 3)" in src and 'f"(#3881)."' in src
+    # Clause 3: no present-tense violation claim; the figures stated are dated and name
+    # the command that produced them.
+    assert "already carries" not in src, "the header still claims a standing violation"
+    assert ("Measured over ``~/obsidian/skills/**/*.md`` on 2026-11-22: 0 violations"
+            in doc), doc
+    assert "On 2026-11-07 the tree carried one such line" in doc, doc
+    assert "``template_clock_violations``" in doc, doc
+    # Clause 4: the land rail is a reader of THIS module, not a door that never reads it.
+    assert "three readers" not in doc and "Neither of those is this door" not in doc, doc
+    assert "``scripts/automod/vault_round.py``'s ``land()``, which imports it" in doc, doc
+
+
+def test_the_land_rung_comment_records_the_violation_as_swept_not_standing():
+    """#4579 clauses 2 and 5. The rung comment is in the past tense about line 110, and
+    the change to it is prose: the selector, the counts and the detail-file node stand."""
+    comment = _land_rung_comment()
+    src = (REPO / "scripts" / "automod" / "vault_round.py").read_text(encoding="utf-8")
+    assert "carries one today" not in src, "the rung still states a swept violation as live"
+    assert "until vault 8dc107f44 swept it on 2026-11-22" in comment, comment
+    assert "the condition expired with it" in comment, comment
+    assert "The diff-relative rule still holds" in comment, comment
+    assert src.count("date +") == 0 and src.count("$(") == 0
+    assert 'p.startswith("skills/") and p.endswith("/SKILL.md")' in src, (
+        "the whole-body selector moved; #4579 was prose-only")
+    detail_node = (REPO / "tests" / "test_automod_vault_round.py").read_text(
+        encoding="utf-8")
+    assert "def test_land_refuses_a_clock_literal_it_added_to_a_skill_detail_file(" in (
+        detail_node), "the settled design's own node is gone"

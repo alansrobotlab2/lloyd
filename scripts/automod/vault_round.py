@@ -2452,14 +2452,14 @@ def land(paths: list[str], message: str, *, item_id: int | None = None,
     # exactly that content. A file this round never staged is not in `git diff --cached`
     # and is not judged, so dirty-unstaged skill files cannot wedge this land.
     #
-    # And it is DIFFERENT-relative, which is what makes it safe to open this door at all
-    # while a violation is live in the vault: `skills/nightly-reflection-knowledge-write/`
-    # `step-1-and-commit-detail.md` line 110 carries one today, and the 2026-11-11
-    # owed-check ruling forbids widening `skill_timezone_errors` — whole-body, above —
-    # to detail files while it stands, because that would refuse every round touching
-    # that file. A line this commit did not write is context and is not refused, so the
-    # nightly can keep rewording that very file; the fix is two characters, and the
-    # matcher names them in its own words below rather than this module restating them.
+    # And it is DIFF-relative, which is what made it safe to open this door while a
+    # violation was live in the vault: `skills/nightly-reflection-knowledge-write/`
+    # `step-1-and-commit-detail.md` line 110 carried one until vault 8dc107f44 swept it on
+    # 2026-11-22 (#4516). The 2026-11-11 owed-check ruling against widening
+    # `skill_timezone_errors` — whole-body, above — to detail files was conditioned on
+    # that line; the condition expired with it, and #4069's shape stands as shipped. The
+    # diff-relative rule still holds: a line this commit did not write is context and is
+    # not refused, and the matcher names any remedy in its own words below.
     clock_records, clock_lines, clock_unread = STF.findings(VAULT)
     if clock_unread:
         # Said out loud, exactly as the strand and orphan rungs say theirs. This door
