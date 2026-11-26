@@ -422,3 +422,183 @@ def test_a_pool_park_is_always_booked_in_the_store_the_pass_read(tmp_path, monke
     assert {(e["item_id"], e["from"], e["to"]) for e in rows} == {
         (9294, "up_next", "draft"), (9295, "draft", "up_next")}, (
         "no move this pass makes goes unbooked, in either direction")
+
+
+# ── #4591: a re-triage mark is one of the events that ENDS a claim ──────────
+#
+# The abstention's own reason has always promised three endings — "until this item
+# lands, is promoted or is re-triaged" (`493740d2`, #3467) — while
+# `_machine_event_ts` counted two plus a confirmed verdict and read `backlog_retriage`
+# nowhere. So the promise was unimplemented and the abstention could not expire for an
+# item the loop had already re-triaged. #4276 is the measured case: a `steward_move`
+# into `up_next` at 2026-11-21T04:22:28Z, a `backlog_retriage` row 3.5 days later at
+# 2026-11-24T16:24:33Z, and `desired_statuses` answering `up_next` with the abstention
+# on the morning of 2026-11-26 — 12 of the 21 disagreement rows in the window that
+# filed #4591.
+
+#: The arm the re-triaged item falls through to, measured rather than assumed. #4276
+#: carries no `backlog_implement` row, so it never reaches `_awaits_triage` inside the
+#: `elif iid in outcomes:` arm; it reaches the pool park below it. Both say `draft`,
+#: which is what ends the disagreement; only the sentence differs, and this constant is
+#: the one the live item actually gets.
+RETRIAGE_FALLTHROUGH = PARK
+
+
+def _retriage_mark(item_id, *, ts, round_id="SM_RETRIAGE_FIXTURE"):
+    """One `backlog_retriage` row as `retriage_spent_items` writes it (`backlog.py:8201`).
+
+    Through `append_event`, like every other row here, so the fixture carries the
+    `created_at` stamp the production store carries and no field list can drift."""
+    S.append_event({"event": "backlog_retriage", "item_id": item_id,
+                    "round_id": round_id, "ts": ts,
+                    "reason": "its one unattended attempt is spent; the loop re-triages"},
+                   path=S.LEDGER_PATH)
+
+
+def _confirmed_then_claimed(d: Path, item_id, *, base=None, to="up_next"):
+    """The #4276 shape: confirmed, moved up by the steward, then re-triaged after it.
+
+    The item file is written `up_next` with no `triage:` key, which is the live item's
+    real state — `~/obsidian/backlog/4276-plans-leg-live-qmd-block-via-a-bash-session-embed-.md`
+    reads `status: up_next` and no triage line, so its board line reads `triage=none` and
+    the steward's prompt ("an `up_next` item whose line reads `triage=none` goes back to
+    `draft`", `workers/sources/board_steward.py:336-350`) prescribes exactly the move it
+    proposed. The machine's answer before #4591 was the steward's status, held by an
+    abstention that could not expire.
+    """
+    base = base or (time.time() + 3600)
+    write_item(d, item_id, status="up_next")
+    S.append_event({"event": "backlog_triage", "item_id": item_id, "verdict": "confirmed",
+                    "acceptance": "the test prints draft", "ts": base}, path=S.LEDGER_PATH)
+    _steward_move(item_id, frm="draft", to=to, ts=base + 600,
+                  note="triage=confirmed and round_flag=none; back to draft for its second triage")
+    return base
+
+
+def test_a_retriage_mark_newer_than_the_claim_ends_the_abstention(isolated):
+    """#4591 clause 1: the ending the abstention promised is now a real ending.
+
+    With a confirmed verdict, a `steward_move` to `up_next`, and a later
+    `backlog_retriage` row, `desired_statuses` must not answer the steward's status. It
+    answers `draft` with one of the table's own second-triage reasons, because the mark
+    voids the confirmation (`confirmed_verdicts` refuses a row before a mark) and
+    `reconcile_statuses` then moves the item to where autotriage reads.
+
+    The reason asserted is the one the live item gets, not the one the item text
+    predicted: #4276 has no `backlog_implement` row, so control reaches the pool park
+    (`draft`, "never triaged; autotriage reads draft") and not `_awaits_triage` inside
+    the `elif iid in outcomes:` arm. The control item beside it is what keeps the node
+    honest: with no mark at all the abstention still answers the steward, so this node
+    cannot go green by the branch having been deleted instead of bounded.
+    """
+    base = time.time() + 3600
+    _confirmed_then_claimed(isolated, 9200, base=base)
+    _retriage_mark(9200, ts=base + 1200)                    # 10 min after the claim
+    _claimed_item(isolated, 9201)                           # control: a claim, no mark
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[9200][0] == "draft", (
+        f"the re-triaged item is still held at {want[9200]} — the abstention outlived "
+        "the ending its own reason promises")
+    assert "abstains" not in want[9200][1], (
+        f"the table is still deferring to a claim its own re-triage ended: {want[9200][1]}")
+    assert want[9200][1] == RETRIAGE_FALLTHROUGH, want[9200]
+    assert len(want[9200]) == 2, "a re-triage is not a person's decision: nothing tagged"
+
+    assert want[9201][0] == "up_next" and "abstains" in want[9201][1], (
+        f"the claim with no mark stopped answering the steward as well: {want[9201]}")
+
+
+def test_a_claim_newer_than_every_retriage_mark_still_wins_the_table(isolated):
+    """#4591 clause 2: #3467's purpose survives the new ending.
+
+    The branch exists because the steward and the autocode poll are both on a 900 s clock
+    and the machine re-derives statuses from ledger rows the steward's write is not one
+    of — without the abstention the steward's write is walked back on the next poll, and
+    the revert books itself as a machine decision. So a claim newer than every ending
+    must still answer the steward's status, and applying it must move nothing.
+
+    All three endings are present and older here — an `item_landed` row, a `promoted`
+    row joined through the `backlog_implement` that opened its round, and a
+    `backlog_retriage` mark — because the fix adds the third of those and this is the
+    node that says adding it did not make the claim lose to anything.
+    """
+    base = time.time() + 3600
+    write_item(isolated, 9210, status="up_next")
+    path = B.item_by_id(9210).path
+    B.update_frontmatter(path, {"activity_log": [
+        f"{datetime.now(timezone.utc).isoformat()} up_next: board steward: the note"]})
+    S.append_event({"event": "backlog_retriage", "item_id": 9210, "ts": base},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "item_landed", "item_id": 9210, "ts": base + 60,
+                    "round_id": "SM_OLD"}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": 9210, "phase": "finished",
+                    "round_id": "SM_OLD", "ts": base + 120}, path=S.LEDGER_PATH)
+    S.append_event({"event": "promoted", "round_id": "SM_OLD", "ts": base + 180},
+                   path=S.LEDGER_PATH)
+    _steward_move(9210, frm="draft", to="up_next", ts=base + 600, note="the note")
+
+    events = B._machine_event_ts(S.LEDGER_PATH, B.confirmed_verdicts(S.LEDGER_PATH,
+                                                                    with_archives=True))
+    assert events[9210] == base + 180, (
+        f"the newest ending is {events[9210]}, not the promotion at {base + 180} — the "
+        "corpus stopped reading one of its kinds")
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[9210][0] == "up_next", f"the claim lost to an older ending: {want[9210]}"
+    assert "board steward" in want[9210][1], want[9210][1]
+    assert "abstains" in want[9210][1], "the abstention branch is not what answers here"
+
+    before = path.read_text(encoding="utf-8")
+    moved = B.reconcile_statuses(S.LEDGER_PATH, None)
+    assert moved == [], f"reconciling a claim that matches its item moved it: {moved}"
+    assert path.read_text(encoding="utf-8") == before, "a matching claim wrote a status_moved row"
+
+
+def test_a_retriage_mark_filed_only_in_a_rotation_ends_the_claim_too(isolated):
+    """#4591 clause 3: both sides of the inequality read one corpus.
+
+    `claim[0] >= machine_event.get(iid, 0.0)` compares a claim read over live PLUS the
+    `promotions-archive-*.jsonl.gz` rotations (#4412) against an event set that must be
+    read the same way, or a mark the 14-day fold has filed away stops ending anything
+    and the abstention silently re-arms fourteen days after it was written. So the mark
+    goes into a rotation while the `steward_move` stays live — the exact shape the sweep
+    leaves when the claim is young and the mark is old — and the answer must not move.
+    """
+    base = time.time() + 3600
+    _confirmed_then_claimed(isolated, 9220, base=base)
+    _retriage_mark(9220, ts=base + 1200)
+    assert B.desired_statuses(S.LEDGER_PATH, None)[9220][0] == "draft", (
+        "the ending does not work with the mark live either")
+
+    # Move ONLY the mark into a rotation, leaving the claim live.
+    rows = S.ledger_rows(S.LEDGER_PATH)
+    moved = [r for r in rows if r.get("event") == "backlog_retriage"]
+    kept = [r for r in rows if r.get("event") != "backlog_retriage"]
+    assert len(moved) == 1, f"expected one mark row, found {len(moved)}"
+    (S.LEDGER_PATH.parent / ARCHIVE).write_bytes(
+        gzip.compress("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                              for r in moved).encode()))
+    S.LEDGER_PATH.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n"
+                                     for r in kept), encoding="utf-8")
+
+    assert B.retriage_marks(S.LEDGER_PATH).get(9220) is None, (
+        "the rotation put nothing out of the live read, so the rest of this node proves "
+        "nothing")
+    want = B.desired_statuses(S.LEDGER_PATH, None)
+    assert want[9220][0] == "draft", (
+        f"the claim beat a re-triage that is only filed elsewhere: {want[9220]}")
+    assert "abstains" not in want[9220][1], want[9220][1]
+
+    # The shape that makes this a one-corpus question at all: the claim is the newest
+    # thing the LIVE file says about the item, so a live-only read of the endings leaves
+    # `claim[0] >= machine_event` true and the abstention standing. What ends it is the
+    # same read the claim side makes.
+    claim = B._steward_claims(S.LEDGER_PATH)[9220][0]
+    events = B._machine_event_ts(S.LEDGER_PATH, B.confirmed_verdicts(S.LEDGER_PATH,
+                                                                    with_archives=True))
+    assert events[9220] == claim + 600, (
+        f"the ending for the item is {events[9220]}, which is not the rotated mark at "
+        f"{claim + 600} — the corpus did not follow the claim into the rotation")
+    assert claim > base, (
+        "the steward's row is no longer the newest live event for the item, so this node "
+        "is no longer the shape it claims to test")

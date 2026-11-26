@@ -928,9 +928,9 @@ hold_note = _hold_note
 #
 #   * the landing sweep's `_close_settled_items` `if close:` hold — :4904;
 #   * the member-fold in that same sweep — :4967;
-#   * `desired_statuses`' met-landing branch — :5788;
+#   * `desired_statuses`' met-landing branch — :5806;
 #   * `record_verdict`'s RETIRING branch, which reaches `done` on a `stale`/
-#     `already_done` triage with no landing and no sha behind it at all — :7591.
+#     `already_done` triage with no landing and no sha behind it at all — :7609.
 #
 # The first three are the met-landing routes `hand_run_pending`'s docstring enumerates
 # beside this one; the retiring branch is a fourth road, and the only thing it asks of
@@ -945,8 +945,8 @@ hold_note = _hold_note
 # unguarded met-landing routes (50 came through owed-check), and 296 of those 448 named
 # a step no OPEN item names today, so a widened guard would have held 296 met-landing
 # closes in one month. And a held met-landing does not rest; it goes back to work:
-# `desired_statuses` answers it `out[iid] = ("draft", …)` at :5790, reached from the
-# `hand_run_pending` call at :5788, which returns the item to the pool the dispatcher
+# `desired_statuses` answers it `out[iid] = ("draft", …)` at :5808, reached from the
+# `hand_run_pending` call at :5806, which returns the item to the pool the dispatcher
 # serves. That is what made it a capability removed, not a caution added — and it is
 # also why #3017 is not the precedent to copy: that widening followed a death measured
 # on the sweep's OWN route (#2998), while #3812 and #4008/#4009 are owed-check's route

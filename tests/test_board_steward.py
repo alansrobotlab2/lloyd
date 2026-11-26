@@ -9205,3 +9205,51 @@ def test_the_persistence_guard_leaves_the_window_figures_and_leg_wording_untouch
     assert ev["judged"] == w["judged"] and ev["rate"] == w["rate"], ev
     assert ev["leg"] == D.LEG_RATE, ev
     assert ev["disagree"] == w["disagree"], ev
+
+
+# ── #4591: the disagreement this filing was about stops being one ────────────
+
+def test_a_steward_move_back_to_draft_after_a_re_triage_is_booked_as_agreement(board):
+    """#4591 clause 4: the tick scores the fix as agreement, on the #4276 shape.
+
+    #4591 was filed because a tick booked `steward_move` -> `up_next` for #4276 against a
+    table that answered `up_next` ONLY by abstaining — "the machine abstains until this
+    item lands, is promoted or is re-triaged" — while the steward, reading a board line of
+    `triage=none`, proposed `draft`. That pair is the disagreement, and the item's own row
+    is 12 of the 21 rows in the window that measured the sub-floor rate.
+
+    So the ending has to be visible from the scorer's side too. The fixture is the live
+    item's shape exactly: `status: up_next` with no `triage:` key, a confirmed verdict,
+    the steward's `up_next` row, and a `backlog_retriage` mark after it. `expected` is the
+    real `desired_statuses` output, not a hand-typed pair, because the clause is about
+    what the tick books, and a hand-typed table would score whatever it was told.
+
+    Before the fix this node reddens on its own first line: the table answers `up_next`
+    and the proposal lands in `disagree` with the abstention sentence in
+    `disagree_sides` — which is the row the filing quoted verbatim.
+    """
+    base = time.time() + 3600
+    _write(board, 9276, "up_next")                      # no `triage:` key, like #4276
+    _ev(event="backlog_triage", item_id=9276, verdict="confirmed",
+        acceptance="prints draft", ts=base)
+    _ev(event="steward_move", item_id=9276, frm="draft", to="up_next", ts=base + 600,
+        note="triage=confirmed and round_flag=none; back to draft for its second triage",
+        tick="t-fixture")
+    _ev(event="backlog_retriage", item_id=9276, round_id="SM_FIXTURE", ts=base + 1200,
+        reason="its one unattended attempt is spent; the loop re-triages")
+
+    expected = B.desired_statuses(S.LEDGER_PATH, None)
+    assert expected[9276][0] == "draft", (
+        f"the table still answers the steward's own status: {expected[9276]}")
+    assert "abstains" not in expected[9276][1], expected[9276][1]
+
+    a = W.agreement([{"item_id": 9276, "status": "draft"}], expected, {9276: "up_next"})
+    assert a["disagree"] == [] and a["disagree_sides"] == [], (
+        f"the tick still books the move as a disagreement: {a['disagree']} / "
+        f"{a['disagree_sides']}")
+    assert a["agree"] == [9276], a
+    assert a["judged"] == 1 and a["rate"] == 1.0, (
+        f"a booked agreement that left the denominator moves the rate the flip is "
+        f"judged from: {a['judged']} / {a['rate']}")
+    assert a["machine_moves"] == 1, (
+        "the table does want a move on this item, so the tick has a decision to score")

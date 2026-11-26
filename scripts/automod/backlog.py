@@ -5453,17 +5453,30 @@ def _steward_claims(ledger: Path) -> dict[int, tuple[float, str, str]]:
 def _machine_event_ts(ledger: Path, confirmed: dict[int, dict]) -> dict[int, float]:
     """`{item_id: newest machine event}` — the timestamps that END a steward claim.
 
-    Three kinds, and no more: the landing (`item_landed`), the promotion
-    (`promoted`), and a fresh confirmed verdict. `promoted` names a round and never an
-    item, so it joins through the `backlog_implement` row that opened the round — the
-    same join `board_steward.item_refs` makes for the same reason.
+    Four kinds, and no more: the landing (`item_landed`), the promotion (`promoted`),
+    a fresh confirmed verdict, and the re-triage mark (`backlog_retriage`). `promoted`
+    names a round and never an item, so it joins through the `backlog_implement` row
+    that opened the round — the same join `board_steward.item_refs` makes for the same
+    reason.
 
     A `status_moved` row is deliberately NOT one of them, and the reason is the whole
     point of the change: that row is the very move the claim exists to stop, so a
     machine that could end the abstention by writing it would end it by doing the
-    thing the abstention forbids, and the steward's write would last one poll.
+    thing the abstention forbids, and the steward's write would last one poll. The
+    re-triage mark is not that row. `retriage_spent_items` writes it as the loop's own
+    second life — the same row `confirmed_verdicts` voids a contract against and
+    `_awaits_triage` parks an item for — so it is a decision of the machine's, made
+    after the steward's, and it is the third thing the abstention's own note promises:
+    "until this item lands, is promoted or is re-triaged" (`desired_statuses`,
+    #3467). The promise was in the reason string since `493740d2` while the corpus
+    here counted three kinds, so an item re-triaged after a steward move kept the
+    abstention for ever: #4276's claim of 2026-11-21T04:22:28Z outranked its
+    re-triage of 2026-11-24T16:24:33Z by 3.5 days and held an item with no `triage:`
+    key in `up_next`, where the dispatcher takes only confirmed items and autotriage
+    reads only `draft` — 12 of the 21 disagreement rows in the window that filed
+    #4591, the largest single driver of the sub-floor rate.
 
-    All three resolve over live PLUS the rotations, because this returns one side of
+    All four resolve over live PLUS the rotations, because this returns one side of
     the inequality `claim[0] >= machine_event.get(iid, 0.0)` and the other side
     (`_steward_claims`, #4412) does. Measuring a claim over 60k rows and the events
     that retire it over 20k would let a claim outrank an event that is simply
@@ -5471,7 +5484,10 @@ def _machine_event_ts(ledger: Path, confirmed: dict[int, dict]) -> dict[int, flo
     `backlog_implement` row — and with it the round their `promoted` row joins
     through — in `promotions-archive-202610.jsonl.gz` while their `steward_move`
     row is still live, so a live-only read here would leave a claim that a landed
-    round had already answered standing over the table for ever.
+    round had already answered standing over the table for ever. The marks are read
+    through `retriage_marks(..., with_archives=True)` rather than a second decode of
+    the row kind, so this side and the `_awaits_triage`/`confirmed_verdicts` side
+    cannot fall out of step over which fold a mark survived.
     """
     out: dict[int, float] = {}
 
@@ -5492,6 +5508,8 @@ def _machine_event_ts(ledger: Path, confirmed: dict[int, dict]) -> dict[int, flo
             _note(iid, float(d.get("ts") or 0.0))
     for iid, ev in confirmed.items():
         _note(iid, float(ev.get("ts") or 0.0))
+    for iid, ts in retriage_marks(ledger, with_archives=True).items():
+        _note(iid, ts)
     return out
 
 
