@@ -1027,3 +1027,200 @@ def test_a_data_trip_from_a_copy_takes_no_hold_and_says_so_in_its_marker(
     assert marker["actions"]["promotions"] == "halted", (
         "the refusal took the promotion halt with it — it must not: the halt is local "
         "state, and losing it would make a copy's trip less safe, not more")
+
+
+# ═══════ #4594: a lift that names nobody inherits who held ═══════
+#
+# `pause_journal` id 75 was taken `2026-11-22T21:17:25.840615+00:00` with
+# `actor=mission-control`; id 76 closed it 27 h 21 m 24 s later with
+# `actor=unattributed`, `hold_id=75`. As at 2026-11-26 the store read `48|24|2`
+# for total rows | lifts | lifts journalled `unattributed`. The lift really was
+# unnamed by its caller — but the reason the row could not say WHO at all, rather
+# than saying "the holder, and the caller did not contradict it", is that the
+# take's name was never persisted anywhere a lift could read: the current-state
+# rows carry a KIND (`(_pool, operator_pause_holder)`, #2498) and nothing else,
+# while `pause(False)` built its journal actor out of its own argument and fell to
+# `PAUSE_ACTOR_DEFAULT`. Four notes spent that 27 h attributing an owed-check
+# row's age to queue capacity before one named the human hold, and the lift row is
+# the first record any later reader reaches.
+#
+# Every assertion below therefore reads the LIFT ROW back out of `pause_journal`
+# and never off `pause()`'s own argument — the value the defect already had in
+# hand and threw away is not evidence that it was persisted.
+
+
+def _journal_pairs(pool) -> list[tuple]:
+    """Every journal row as `(id, value, holder_kind, actor, hold_id)`, oldest first.
+
+    `id` and `hold_id` are both in the tuple because the pairing is what makes an
+    inherited name checkable as inherited rather than merely present:
+    `rows[1][4] == rows[0][0]` says this lift closed THAT take, so the name the lift
+    carries is the name the take carries, not a string that happens to repeat.
+    """
+    import sqlite3
+    with sqlite3.connect(str(pool.queue.db_path)) as conn:
+        return conn.execute(
+            "SELECT id, value, holder_kind, actor, hold_id FROM pause_journal "
+            "ORDER BY id"
+        ).fetchall()
+
+
+def test_a_lift_that_names_no_actor_journals_the_name_that_took_the_hold(monkeypatch, tmp_path):
+    """Clause 1: a named take, a restart, an unnamed lift — and the lift names the holder.
+
+    Both sides go through the route, because that is the only surface a person's
+    click and a resume curl actually arrive at, and the lift goes through a SECOND
+    client over the same database file, which is what a backend boot is for this
+    state: `WorkerPool.__init__` reloads the hold through `_load_operator_pause`, so
+    the new process knows the fleet is halted while nothing inside it has the take's
+    argument to hand. An inheritance that lived in the taking pool's memory would
+    pass a same-pool test and die here, which is the half the item's "surviving a
+    process restart" is for.
+    """
+    client, pool = _route_client(monkeypatch, tmp_path, db="held.db")
+    res = _post_raw(client, {"paused": True, "actor": "mission-control"})
+    assert res.status_code == 200, res.text
+
+    client2, pool2 = _route_client(monkeypatch, tmp_path, db="held.db")   # the next boot
+    assert pool2.paused is True, (
+        "the boot did not inherit the halt, so the lift below proves nothing about "
+        "what survives a restart — it only proves a lift in the same process")
+    res2 = _post_raw(client2, {"paused": False})
+    assert res2.status_code == 200, res2.text
+    assert res2.json()["paused"] is False, res2.json()
+
+    rows = _journal_pairs(pool2)
+    assert [r[1:4] for r in rows] == [
+        ("1", "person", "mission-control"),
+        ("0", "person", "mission-control")], (
+        "a resume that named nobody journalled something other than the holder whose "
+        "hold it ended — that is the pause_journal id 76 reading this item is about")
+    assert rows[1][3] != PAUSE_ACTOR_DEFAULT, (
+        f"the lift row is back to {PAUSE_ACTOR_DEFAULT!r}: id 76 again")
+    assert rows[0][4] is None and rows[1][4] == rows[0][0], (
+        "the lift no longer points at the take whose name it now carries, so the "
+        "agreement between the two actors is a coincidence a reader cannot check")
+
+
+def test_a_lift_that_names_itself_is_journalled_under_that_name_not_the_holders(
+        monkeypatch, tmp_path):
+    """Clause 2, first half: inheritance is the FALLBACK, never the override.
+
+    The journal's named lifts today are `mission-control`, `eval-window` and
+    `claude-code-attended-alan: data trip cleared` — a release by a second party who
+    says so must keep saying so, or this change would quietly replace attribution
+    with assumption wherever both parties are known.
+    """
+    client, pool = _route_client(monkeypatch, tmp_path, db="two-names.db")
+    assert _post_raw(client, {"paused": True,
+                              "actor": "mission-control"}).status_code == 200
+    assert _post_raw(client, {"paused": False,
+                              "actor": "second-party"}).status_code == 200
+
+    rows = _journal_pairs(pool)
+    assert [r[1:4] for r in rows] == [
+        ("1", "person", "mission-control"),
+        ("0", "person", "second-party")], (
+        "an actor the caller actually sent was overwritten by the persisted one — the "
+        "persisted name may only fill a blank, never edit a statement")
+
+
+def test_the_startup_reconcile_of_a_dead_machines_hold_still_names_the_reconcile(
+        monkeypatch, tmp_path):
+    """Clause 2, second half: the release nobody chose keeps its own distinguishing name.
+
+    `_release_dead_machine_pause` passes `actor=PAUSE_ACTOR_RECONCILE` explicitly, and
+    that name is how a later reader tells a release that was reconciled from one a
+    person clicked — the 20 h 52 m halt of 2026-10-09 is readable only because of it.
+    Inheriting `eval-window:4594` here would erase the fact that no human resumed the
+    fleet, which is the one thing #2615 clause 2 exists to protect.
+    """
+    import datetime as dt
+    import sqlite3
+
+    from workers.pool import (MACHINE_LEASE_STALE_SECONDS, PAUSE_ACTOR_RECONCILE,
+                              PAUSE_WM_HOLDER_KEY, PAUSE_WM_SOURCE, WorkerPool)
+    from workers.queue import WorkQueue
+
+    client, pool = _route_client(monkeypatch, tmp_path, db="dead-machine.db")
+    assert _post_raw(client, {"paused": True, "holder_kind": "machine",
+                              "actor": "eval-window:4594"}).status_code == 200
+
+    stale = (dt.datetime.now(dt.timezone.utc)
+             - dt.timedelta(seconds=MACHINE_LEASE_STALE_SECONDS + 60)).isoformat()
+    with sqlite3.connect(str(pool.queue.db_path)) as conn:
+        conn.execute("UPDATE watermarks SET updated_at=? WHERE source=? AND key=?",
+                     (stale, PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
+        conn.commit()
+
+    reborn = WorkerPool(WorkQueue(pool.queue.db_path), slots=1)   # the next boot
+    assert reborn.paused is False, (
+        "the boot did not reconcile the aged machine hold, so nothing below was "
+        "executed by the path this node is about")
+
+    rows = _journal_pairs(reborn)
+    assert [r[1:4] for r in rows] == [
+        ("1", "machine", "eval-window:4594"),
+        ("0", "machine", PAUSE_ACTOR_RECONCILE)], (
+        "the reconcile lifted the hold under the dead setter's name, so the journal "
+        "now claims a human resumed dispatch and nobody did")
+
+
+def test_a_hold_that_named_nobody_journals_nobody_even_after_an_earlier_hold_was_named(
+        monkeypatch, tmp_path):
+    """Clause 3 (the control): inheritance fills a blank, it does not reach backwards.
+
+    One database, two holds. The first is named, so its lift inherits; the second
+    names nobody, and BOTH of its rows must read `unattributed` — otherwise the name
+    of whoever held in November gets claimed by a hold taken by nobody in December,
+    which is invented attribution of exactly the kind #2615 retired the `0` sentinel
+    for. A fix that persisted the actor only when one was sent, and never cleared it,
+    passes the nodes above and fails on this line.
+    """
+    client, pool = _route_client(monkeypatch, tmp_path, db="twice.db")
+    assert _post_raw(client, {"paused": True,
+                              "actor": "mission-control"}).status_code == 200
+    assert _post_raw(client, {"paused": False}).status_code == 200
+    assert _post_raw(client, {"paused": True}).status_code == 200
+    assert _post_raw(client, {"paused": False}).status_code == 200
+
+    rows = _journal_pairs(pool)
+    assert [r[1:4] for r in rows] == [
+        ("1", "person", "mission-control"),
+        ("0", "person", "mission-control"),
+        ("1", "person", PAUSE_ACTOR_DEFAULT),
+        ("0", "person", PAUSE_ACTOR_DEFAULT)], (
+        f"a hold that named nobody inherited a previous holder's name: {rows}")
+    assert rows[2][4] is None and rows[3][4] == rows[2][0], (
+        "the second lift does not close the second take, so the two rows above are "
+        "not the pair this node claims to be reading")
+
+
+def test_a_lease_beat_that_names_nobody_leaves_the_standing_name_for_the_lift_to_inherit(
+        tmp_path):
+    """Clause 3's other edge: a refresh is not a new hold and must not blank the name.
+
+    A machine hold's take write IS its lease (`_load_operator_pause` measures the
+    holder row's `updated_at`), so a harness that re-posts its own hold to stay alive
+    is calling `pause(True)` repeatedly — and callers that keep a lease without
+    repeating their name are exactly the shape #2655 left in place. If a nameless
+    beat blanked the persisted actor, the lift would land back on `unattributed` for
+    the very holds whose leases beat most often.
+    """
+    from workers.pool import WorkerPool
+    from workers.queue import WorkQueue
+
+    pool = WorkerPool(WorkQueue(tmp_path / "refresh.db"), slots=1)
+    pool.pause(True, owner="operator", holder_kind="machine", actor="eval-window:4594")
+    pool.pause(True, owner="operator", holder_kind="machine")   # the lease beat
+    pool.pause(False, owner="operator")
+
+    rows = _journal_pairs(pool)
+    assert [r[1] for r in rows] == ["1", "0"], (
+        f"a lease refresh appended a journal row ({rows}): a refresh is not a hold, "
+        "and 16 identical INFO lines for one hold is the over-count #2615 removed")
+    assert [r[1:4] for r in rows] == [
+        ("1", "machine", "eval-window:4594"),
+        ("0", "machine", "eval-window:4594")], (
+        "a beat that named nobody erased who was holding, and the lift inherited the "
+        "blank")

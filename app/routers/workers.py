@@ -583,8 +583,13 @@ async def workers_pause(request: Request):
     refreshes its lease without moving the hold's start instant.
 
     `actor` (#2615) is the optional third field: who or what named it, as a free
-    string the caller owns. It goes to the hold journal, never to a current-state
-    row, and a call that names none is recorded there as `unattributed`.
+    string the caller owns. It goes to the hold journal, and on a TAKE it is
+    persisted beside the holder kind so a later resume that names nobody can say
+    whose hold it ended (#4594). A `{"paused": false}` with no `actor` therefore
+    journals the name of whoever took the hold — `pause_journal` id 76 lifted id 75
+    and said only `unattributed` — while a resume that DOES name itself keeps its own
+    name. A take or lift that names nobody over a hold that named nobody is still
+    recorded as `unattributed`.
     """
     pool = get_pool()
     if not pool:
@@ -597,12 +602,14 @@ async def workers_pause(request: Request):
     holder_kind = (HOLDER_MACHINE if data.get("holder_kind") == HOLDER_MACHINE
                    else HOLDER_PERSON)
     # #2615: `actor` is who or what named it — a free string the caller owns (a
-    # Mission Control user, a harness name, a pid), not a new enum, and not a
-    # current-state row either: it reaches the hold journal in workers.db, which is
-    # where "who held the fleet, when, for how long" became answerable at all. An
-    # empty, missing or whitespace-only name stays unset and the pool records
-    # `unattributed`, because the value that answered this question through the
-    # 2026-10-11..12 holds was the string `0`.
+    # Mission Control user, a harness name, a pid), not a new enum: it reaches the
+    # hold journal in workers.db, which is where "who held the fleet, when, for how
+    # long" became answerable at all, and on a take it is persisted there alongside
+    # the kind so a nameless lift can inherit it (#4594). An empty, missing or
+    # whitespace-only name stays UNSET rather than becoming the empty string — that
+    # `None` is exactly what tells the pool "this caller named nobody", which on a
+    # resume means "say whose hold this was" and on a take means `unattributed`, the
+    # name that replaced the `0` this question used to be answered with.
     actor = str(data.get("actor") or "").strip() or None
     pool.pause(paused, owner=owner, holder_kind=holder_kind, actor=actor)
     return JSONResponse({"paused": pool.paused,

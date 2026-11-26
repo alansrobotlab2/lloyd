@@ -805,6 +805,20 @@ PAUSE_WM_KEY = "operator_paused"
 #: cannot have a live setter behind it any more.
 PAUSE_WM_HOLDER_KEY = "operator_pause_holder"
 
+#: WHO named that hold, persisted so a lift can inherit it (#4594). The holder row
+#: above answers "what KIND held", and the take's `actor` went nowhere durable: it
+#: reached the take's own journal row and nowhere else, so a release that named no
+#: actor re-derived its journalist from its own argument and wrote
+#: `PAUSE_ACTOR_DEFAULT`. `pause_journal` ids 75→76 are the reading that produced
+#: this row — a `person` hold taken `2026-11-22T21:17:25.840615+00:00` by
+#: `mission-control`, released 27 h 21 m 24 s later by a row that said
+#: `unattributed`, which is why four notes attributed the resulting alarm's age to
+#: queue capacity before one named the human hold. Like the holder row this is
+#: CURRENT state naming the last holder: a lift does not clear it, and the next
+#: TAKE overwrites it whether or not that hold names anybody, so a name never
+#: reaches backwards into a hold that did not earn it.
+PAUSE_WM_ACTOR_KEY = "operator_pause_actor"
+
 #: A human, through Mission Control or a curl, or anything that names no kind
 #: (a guardian trip names an ACTOR and no kind — `{"paused": true,
 #: "actor": "guardian-vault-trip"}` — and waits for a person; #2846).
@@ -890,6 +904,21 @@ def lease_is_stale(lease_age_s: Optional[float]) -> bool:
 def _holder_kind(raw: Optional[str]) -> str:
     """Normalise a holder row's value to one of the two kinds."""
     return HOLDER_MACHINE if raw == HOLDER_MACHINE else HOLDER_DEFAULT
+
+
+def _actor_or_default(raw: Optional[str]) -> str:
+    """Normalise a name to a NAME: one rule for both sides of a hold (#2615, #4594).
+
+    Applied to the `actor` a caller sends and to the actor the take left in
+    `PAUSE_WM_ACTOR_KEY`, because the two failure shapes are the same one: `None`,
+    `""` and `"   "` all mean "nobody said", and each must land on
+    `PAUSE_ACTOR_DEFAULT` rather than on the `0` sentinel the 2026-10-11..12 holds
+    were left with. A blank is never journaled, and an absent row — a lift over a
+    hold taken before this row existed, or one whose watermark was deleted — reads
+    as unnamed rather than as a claim about who held.
+    """
+    name = (raw or "").strip()
+    return name or PAUSE_ACTOR_DEFAULT
 
 
 def operator_pause_state(queue: WorkQueue) -> dict[str, Any]:
@@ -1290,10 +1319,16 @@ class WorkerPool:
 
         `actor` (#2615) is who or what named it — a free string a caller sends
         (a Mission Control user, a harness name, a pid), not a new enum, and the
-        question `holder_kind` was never able to answer. It reaches the hold
-        journal only: the current-state rows stay two-valued, and a caller that
-        names nothing is recorded as `unattributed` rather than as the `0`
-        sentinel that tonight's holds left behind.
+        question `holder_kind` was never able to answer. A take journals it AND
+        persists it on `PAUSE_WM_ACTOR_KEY` (#4594), so a LIFT that names nobody
+        inherits the holder's name instead of journalling `unattributed` over a hold
+        somebody did name: `pause_journal` id 76 lifted id 75, taken by
+        `mission-control` 27 h 21 m 24 s earlier, and said only `unattributed`. An
+        actor on the lift still wins — inheritance fills a blank and never edits a
+        statement — as does `PAUSE_ACTOR_RECONCILE` on the startup release. A caller
+        that names nothing is still recorded as `unattributed`, never as the `0`
+        sentinel that tonight's holds left behind, whenever the hold it is lifting
+        (or taking) named nobody either.
 
         Re-pausing a hold this process already holds refreshes the holder row and
         leaves the pause row's stamp alone on purpose: that stamp IS the hold's
@@ -1304,7 +1339,8 @@ class WorkerPool:
         over-count a grep of stderr would have made.
         """
         kind = HOLDER_MACHINE if holder_kind == HOLDER_MACHINE else HOLDER_PERSON
-        journal_actor = (actor or "").strip() or PAUSE_ACTOR_DEFAULT
+        named = bool((actor or "").strip())
+        journal_actor = _actor_or_default(actor)
         if owner == "automod":
             refresh = paused and self._automod_paused()
             self._paused_automod = paused
@@ -1321,16 +1357,25 @@ class WorkerPool:
             self._paused_operator = paused
             transitioned = paused != already_held
             held_kind = HOLDER_DEFAULT
+            # The name the TAKE left behind, which a lift that names nobody
+            # inherits (#4594). Defaults to the unnamed reading so a lift whose take
+            # predates this row, or whose read below failed, journals exactly what
+            # it journaled before rather than inventing a holder.
+            held_actor = PAUSE_ACTOR_DEFAULT
             if not paused:
                 self._paused_automod = False
             try:
                 # Read on the lift, before anything is written: the journal records
                 # the kind that WAS holding, and the resume call's own
                 # `holder_kind` is not that (the same error the stderr line makes
-                # with `holder=`).
+                # with `holder=`). The actor is read in the same breath for the same
+                # reason — it is the fact the lift row never had a way to state.
                 if transitioned:
                     held_kind = _holder_kind(
                         self.queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY))
+                    if not paused:
+                        held_actor = _actor_or_default(
+                            self.queue.wm_get(PAUSE_WM_SOURCE, PAUSE_WM_ACTOR_KEY))
                     self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_KEY,
                                       "1" if paused else "0")
                 # Written on every TAKE: for a machine hold this write IS the lease
@@ -1342,10 +1387,26 @@ class WorkerPool:
                 # consults the holder row only while the pause row reads `1`.
                 if paused:
                     self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_HOLDER_KEY, kind)
+                    # The name goes down with the kind, because it is the lift's only
+                    # way to learn who held (#4594). Two arms, and the split is the
+                    # whole rule: a NEW hold writes whatever this call says, the
+                    # default included, so an earlier holder's name can never reach
+                    # into a hold that named nobody; a lease BEAT overwrites the name
+                    # only when it names someone, so the promoter's per-minute
+                    # re-take of a hold it named once cannot blank that name.
+                    if transitioned or named:
+                        self.queue.wm_set(PAUSE_WM_SOURCE, PAUSE_WM_ACTOR_KEY,
+                                          journal_actor)
             except Exception:
                 # The pause still holds for this process; only its survival of
                 # a restart is lost, and that is worth a loud line, not a refusal.
                 logger.exception("Worker pool: pause not persisted; a restart will clear it")
+            if transitioned and not paused and not named:
+                # Inheritance is the fallback, never the override: a lift that names
+                # itself keeps its own name, and only a blank takes the holder's. The
+                # assignment is above the journal call and above the log line below so
+                # the two can never disagree about who resumed the fleet.
+                journal_actor = held_actor
             if transitioned:
                 self._journal_pause(value="1" if paused else "0",
                                     holder_kind=kind if paused else held_kind,
