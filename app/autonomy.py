@@ -5149,11 +5149,11 @@ def max_retries_budget(task: dict) -> int:
     `agent_mcp/autonomy.py::_parse_task_file` for `autonomy_tasks` /
     `autonomy_get_task`). Before #2640 each of those two projections defaulted the
     field to a literal 3 of its own while this module retired a key-less task at
-    `_DEFAULT_MAX_RETRIES`, so on the five task files carrying no `max_retries:`
-    key — #82, #83, #86, #91, #92 as measured on 2026-10-13, #86 already one
-    failure deep — the budget a person read was not the budget that disabled the
-    task, and it was wrong in the direction that handed the task two extra
-    failures.
+    `_DEFAULT_MAX_RETRIES`, so on a task file carrying no `max_retries:` key (five
+    of them when #2640 landed, 2026-10-13) the budget a person read was not the
+    budget that disabled the task, wrong in the direction that handed it two extra
+    failures. Now a file omitting the key is retired at `_DEFAULT_MAX_RETRIES` and
+    shows that number on both read surfaces.
 
     Nothing about retirement moves: a file declaring `max_retries: N` is still
     disabled at N, one omitting the key still at `_DEFAULT_MAX_RETRIES`. Only the

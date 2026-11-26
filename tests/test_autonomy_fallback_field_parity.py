@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import datetime
 import inspect
+import re
 import sys
 from pathlib import Path
 
@@ -528,3 +529,61 @@ def test_neither_projection_re_types_a_default_anymore():
         for needle in banned:
             assert needle not in src, (
                 f"the {label} projection re-types a default: {needle!r}")
+
+
+# ── #4102: the docstring states the property, not the fleet of one day ──────
+#
+# `max_retries_budget`'s docstring said the fallback mattered for "the five task
+# files carrying no `max_retries:` key — #82, #83, #86, #91, #92", in the present
+# tense. A month later #82 and #86 declared the key and three new files had joined
+# the key-less set, and the sentence a reader trusts about which files the fix
+# protects named the wrong ones. The docstring may remember the count on the day
+# #2640 landed, qualified as such; it may not state a count or an id list as the
+# current fleet. The checker below is the one rule, run over the live docstring
+# and over the pre-fix sentence (the positive control).
+_COUNT_WORDS = r"(?:\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+_FLEET_COUNT = re.compile(rf"\b{_COUNT_WORDS}\s+(?:\w+\s+)?task\s+files?\b", re.I)
+_ID_LIST = re.compile(r"#\d+(?:\s*,\s*#\d+){2,}")
+_PRE_FIX_SENTENCE = (
+    "while this module retired a key-less task at `_DEFAULT_MAX_RETRIES`, so on "
+    "the five task files carrying no `max_retries:` key — #82, #83, #86, #91, #92 "
+    "as measured on 2026-10-13, #86 already one failure deep — the budget a person "
+    "read was not the budget that disabled the task")
+
+
+def _fleet_claims(doc: str) -> list[str]:
+    """Present-tense fleet counts or id lists in `doc`; a count is allowed only in
+    a sentence that dates it to the day #2640 landed."""
+    text = " ".join(doc.split())
+    found = [m.group(0) for m in _ID_LIST.finditer(text)]
+    for sentence in re.split(r"(?<=[.;])\s+", text):
+        if _FLEET_COUNT.search(sentence) and "#2640 landed" not in sentence:
+            found.append(_FLEET_COUNT.search(sentence).group(0))
+    return found
+
+
+def test_the_budget_docstring_states_the_property_not_a_fleet_count():
+    doc = " ".join((SCHED.max_retries_budget.__doc__ or "").split())
+    assert doc, "max_retries_budget lost its docstring"
+    claims = _fleet_claims(doc)
+    assert not claims, (
+        f"max_retries_budget's docstring states the key-less fleet as a present "
+        f"fact: {claims} — state the property, or date the count to #2640")
+    # The property half: what any key-less file gets, on every surface.
+    assert "omitting the key is retired at `_DEFAULT_MAX_RETRIES`" in doc, (
+        "the docstring no longer says a key-less file is retired at the constant")
+    assert "both read surfaces" in doc, (
+        "the docstring no longer says the key-less number shows on both surfaces")
+    # Any mention of the five stays qualified as the state when #2640 landed.
+    for m in re.finditer(r"\bfive\b", doc):
+        window = doc[max(0, m.start() - 80):m.end() + 80]
+        assert "#2640 landed" in window, (
+            f"an unqualified 'five' in the docstring: …{window}…")
+
+
+def test_the_fleet_claim_checker_flags_the_pre_fix_sentence():
+    claims = _fleet_claims(_PRE_FIX_SENTENCE)
+    assert any("five task files" in c for c in claims), claims
+    assert any(c.startswith("#82") for c in claims), claims
+    # And it passes the same count once dated to the landing.
+    assert not _fleet_claims("five task files carried no key when #2640 landed.")
