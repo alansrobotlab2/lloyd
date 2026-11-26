@@ -16587,3 +16587,90 @@ def test_the_3009_header_cites_its_parity_pins_by_node_name():
     backwards = block + " so the " + _REFUTED_PARITY_DIRECTION + " today."
     assert _parity_pin_comment_problems(backwards), "the refuted direction passed"
 
+
+# --------------------------------------------------------------------------- #
+# tools.md §2 "Routes on :8500" against the aggregator's mounted routes (#4435)
+# --------------------------------------------------------------------------- #
+
+#: The Starlette routes the aggregator mounts beside the MCP transport.
+_MCP_MAIN = ROOT / "agent_mcp" / "main.py"
+_ROUTES_HEADING = "### Routes on :8500"
+_ROUTE_ROW = re.compile(r"^\|\s*`(?:GET|POST|PUT|PATCH|DELETE)\s+(/[^`\s]*)`\s*\|",
+                        re.MULTILINE)
+
+
+def mounted_aggregator_routes(src: str) -> set[str]:
+    """`Route("…")` paths inside `custom_starlette_routes=[ … ]`, plus `/mcp`.
+
+    `/mcp` is the SDK's own transport mount, never a `Route(...)` in that list, so it
+    is added by name — the table's first row is it.
+    """
+    m = re.search(r"custom_starlette_routes=\[(.*?)^\s*\],", src, re.DOTALL | re.MULTILINE)
+    assert m, "no `custom_starlette_routes=[ … ]` block in agent_mcp/main.py"
+    return set(re.findall(r'Route\(\s*"([^"]+)"', m.group(1))) | {"/mcp"}
+
+
+def routes_table(text: str) -> str:
+    """The `### Routes on :8500` subsection of tools.md, up to the next heading."""
+    m = re.search(rf"^{re.escape(_ROUTES_HEADING)}$(.*?)(?=^#{{2,3}} |\Z)",
+                  text, re.MULTILINE | re.DOTALL)
+    assert m, f"no {_ROUTES_HEADING!r} subsection in architecture/tools.md"
+    return m.group(1)
+
+
+def documented_aggregator_routes(text: str) -> set[str]:
+    return set(_ROUTE_ROW.findall(routes_table(text)))
+
+
+def route_table_drift(doc: str, src: str) -> tuple[set[str], set[str]]:
+    """(mounted but not in the table, in the table but not mounted)."""
+    mounted, documented = mounted_aggregator_routes(src), documented_aggregator_routes(doc)
+    return mounted - documented, documented - mounted
+
+
+def test_the_routes_table_names_exactly_the_routes_the_aggregator_mounts():
+    """#4435 clause 4: §2 presents itself as the enumeration of what :8500 serves, and it
+    lost `POST /browser/input` the day the route was mounted. Set equality, both ways."""
+    src, doc = _MCP_MAIN.read_text(encoding="utf-8"), _text("tools.md")
+    mounted = mounted_aggregator_routes(src)
+    assert len(mounted) > 1 and "/browser/input" in mounted, (
+        f"the route extraction found {sorted(mounted)}; an extractor that matched "
+        "nothing would pass on an empty diff")
+    assert documented_aggregator_routes(doc), "the §2 table parsed as no rows"
+    missing, extra = route_table_drift(doc, src)
+    assert (missing, extra) == (set(), set()), (
+        f"architecture/tools.md §2 drifted from agent_mcp/main.py: mounted but not "
+        f"listed {sorted(missing)}, listed but not mounted {sorted(extra)}")
+
+
+def test_the_routes_parity_check_fails_when_a_row_is_deleted():
+    """#4435 clause 4, the planted defect: drop the `/browser/input` row from a copy of
+    the page and the same helper the parity node uses reports exactly that route."""
+    src, doc = _MCP_MAIN.read_text(encoding="utf-8"), _text("tools.md")
+    rows = [l for l in doc.splitlines() if l.startswith("| `POST /browser/input` |")]
+    assert len(rows) == 1, "the /browser/input row is not on the page exactly once"
+    planted = doc.replace(rows[0] + "\n", "")
+    assert route_table_drift(planted, src) == ({"/browser/input"}, set())
+    planted_src = src.replace('Route("/loaded"', 'Route("/planted", x),\n        Route("/loaded"')
+    assert route_table_drift(doc, planted_src) == ({"/planted"}, set())
+
+
+def test_the_browser_input_row_says_what_it_serves_who_may_call_it_and_where_the_tradeoff_is():
+    """#4435 clauses 1-3: the row names its reader and payload, states the credential as a
+    fact (`/health` is the only open path), and points at the Mission Control section that
+    already carries the route-not-a-tool / gate trade-off instead of restating it."""
+    rows = [l for l in routes_table(_text("tools.md")).splitlines()
+            if l.startswith("| `POST /browser/input` |")]
+    assert len(rows) == 1
+    serves = rows[0].split("|")[2]
+    for need in ("Mission Control", "Browser tab", "pointer", "keyboard", "Playwright"):
+        assert need in serves, f"the row's Serves cell no longer says {need!r}"
+    assert "`X-Lloyd-Aggregator-Token`" in serves and "`/health`" in serves
+    assert "OPEN_PATHS" in serves
+    anchor = "Pointer and keyboard, and the password mask"
+    assert f"`architecture/mission-control.md` §{anchor}" in serves
+    assert re.search(rf"^### {re.escape(anchor)}\b", _text("mission-control.md"),
+                     re.MULTILINE), "the section the row points at no longer exists"
+    import agent_mcp.aggregator_auth as auth
+    assert auth.OPEN_PATHS == frozenset({"/health"}), (
+        "OPEN_PATHS moved; the row's 'only entry' claim needs re-checking")

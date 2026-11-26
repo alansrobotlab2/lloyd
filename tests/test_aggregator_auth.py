@@ -394,3 +394,52 @@ def test_the_promotion_probes_stay_on_the_open_path():
     assert "/health" in src, "the promotion liveness probe moved off /health"
     assert mcp_main.PORT == 8500
     assert A.OPEN_PATHS == frozenset({"/health"})
+
+
+# ── the prose enumerations of the guarded routes (#4435) ─────────────────────
+
+def _mounted_custom_routes() -> set[str]:
+    import re
+    src = (ROOT / "agent_mcp" / "main.py").read_text(encoding="utf-8")
+    m = re.search(r"custom_starlette_routes=\[(.*?)^\s*\],", src, re.DOTALL | re.MULTILINE)
+    assert m, "no `custom_starlette_routes=[ … ]` block in agent_mcp/main.py"
+    routes = set(re.findall(r'Route\(\s*"([^"]+)"', m.group(1)))
+    assert "/browser/input" in routes and len(routes) > 1
+    return routes
+
+
+def _comment_block(path: Path, prefix: str, anchor: str) -> str:
+    """The contiguous `prefix` comment lines around the first line containing `anchor`."""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    i = next(n for n, l in enumerate(lines) if anchor in l)
+    lo = i
+    while lo > 0 and lines[lo - 1].lstrip().startswith(prefix):
+        lo -= 1
+    hi = i
+    while hi + 1 < len(lines) and lines[hi + 1].lstrip().startswith(prefix):
+        hi += 1
+    return " ".join(l.lstrip()[len(prefix):].strip() for l in lines[lo:hi + 1])
+
+
+def test_the_open_paths_docstring_names_every_route_that_needs_the_credential():
+    """#4435 clause 5: the `OPEN_PATHS` docstring lists what needs the credential, and it
+    had stopped at five while `main.py` mounted eight custom routes. Derived, not typed:
+    every mounted route but the open ones, plus `/mcp`, must be named there."""
+    doc = _comment_block(ROOT / "agent_mcp" / "aggregator_auth.py", "#:",
+                         "Paths served with no credential")
+    guarded = (_mounted_custom_routes() - A.OPEN_PATHS) | {"/mcp"}
+    missing = sorted(r for r in guarded if f"`{r}`" not in doc)
+    assert missing == [], f"OPEN_PATHS docstring omits guarded routes: {missing}"
+    assert "`/browser/input`" in doc
+
+
+def test_the_1053_comment_names_the_three_mutating_custom_routes():
+    """#4435 clause 5: the #1053 comment over the ASGI wrap counts the mutating custom
+    routes the credential covers; `/browser/input` made it three."""
+    block = _comment_block(ROOT / "agent_mcp" / "main.py", "#",
+                           "Everything above is the route table")
+    assert "(#1053)" in block
+    assert "three mutating custom routes" in block, block[:300]
+    for r in ("/changes/revert", "/browser/navigate", "/browser/input"):
+        assert f"`{r}`" in block, f"the #1053 comment no longer names {r}"
+        assert r in _mounted_custom_routes()

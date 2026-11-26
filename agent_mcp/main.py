@@ -1162,9 +1162,9 @@ starlette_app = combined.streamable_http_app(
 # only removes tools from `tools/list`, the effect ledger is fed from harness
 # `_meta`, and the bench/eval sandbox is keyed on a session id an out-of-band
 # caller simply omits. Wrapping the ASGI app is what makes the control
-# un-forgettable: a new route is inside it on the day it is added, and the two
-# mutating custom routes (`/changes/revert`, `/browser/navigate`) are covered by
-# the same line as the MCP transport. `GET /health` is the sole open path —
+# un-forgettable: a new route is inside it on the day it is added, and the three
+# mutating custom routes (`/changes/revert`, `/browser/navigate`, `/browser/input`)
+# ride the same line as the MCP transport. `GET /health` is the sole open path —
 # supervisord, `app/routers/health.py`, the promotion gate and the guardian all
 # probe it with no credential, and refusing it would turn a healthy aggregator
 # into a restart storm.

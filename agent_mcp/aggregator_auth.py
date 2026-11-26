@@ -86,12 +86,12 @@ DEFAULT_TOKEN_PATH = Path.home() / ".local" / "state" / "lloyd" / "aggregator-to
 #: Paths served with no credential. `GET /health` is supervisord's and the
 #: gate's liveness probe (`promote.MCP_HEALTH`, `app/routers/health.py`,
 #: `agent-services/guardian/policy.MCP_HEALTH_URL`): all three run before or
-#: independently of anything that holds the secret, and the body is a module
-#: health map, not user data. Everything else — `/mcp`, `/state`,
-#: `/changes`, `/changes/revert`, `/browser/navigate` — needs the credential.
-#: `/state` is not on the list because the dashboard proxies it every 2 s and
-#: the bench runner reads it before a trial; both are processes that can read
-#: the file.
+#: independently of anything that holds the secret; the body is a module health
+#: map, not user data. Everything else needs the credential — `/mcp`, `/state`,
+#: `/loaded`, `/browser/navigate`, `/browser/input`, `/changes`, `/changes/revert`,
+#: `/subagents/{task_id}/{verb}`. `/state` is not on the list because the
+#: dashboard proxies it every 2 s and the bench runner reads it before a trial;
+#: both are processes that can read the file.
 OPEN_PATHS = frozenset({"/health"})
 
 _TOKEN_BYTES = 32
