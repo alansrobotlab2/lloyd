@@ -198,14 +198,27 @@ on the closed pair bench_009 + bench_010 only.
 
 ## A normalized score needs one population
 
-`eval/run_eval.py` emits `<metric>_normalized = score / ceiling` only when both
-halves say they divided over the same number of queries (`ci95[metric].n` and
-`ceiling.n[metric]`). The gold-side ceiling drops every query whose gold was never
-offered to the second labeler, the score does not, so on a full-corpus nightly
-the two differ (2026-10-01: 66 vs 53 for `entity_hit_rate`, printed 1.2799) and
-the ratio is null with a `population mismatch` note naming both n's, in
-`ceiling_notes` and on the printed line (#2014). Scoring the numerator over the
-ceiling's own query set would keep the field live; that is a separate change.
+`eval/run_eval.py` divides each of the six ceiling-bearing metrics over ONE query
+set: the intersection of the ids the run scored a value for (the gold-bearing,
+non-errored queries `_metric_value` counts) and the ids the ceiling states it
+averaged that metric over (`lac.ceiling(...)["ids"][metric]`, with
+`n[metric] == len(ids[metric])`). Both halves are re-averaged over it — the score as
+the run's mean over those records, the divisor as `lac.ceiling(art, ids=<them>)` —
+and the pair is published beside the ratio as
+`summary.overall.ceiling_population[metric]` (`score`, `ceiling`, `n`, `ceiling_n`,
+`ids`) and on the printed line as `matched: score=… ceiling=… n=…`, while
+`summary.overall.<metric>` keeps the full-population score and `ceiling[metric]` the
+ceiling over every scored id (#4285, `ceiling_population` in `eval/run_eval.py`).
+Neither population contains the other, which is why matching only the numerator
+would not do: the score leaves a query with no gold on the leg (#1663), the ceiling
+keeps it (as a hard zero on the hit and rank legs) and instead drops a query whose
+gold was never offered to the second labeler. On nightly-20261118 against the
+2026-11-15 artifact the full halves were 66 vs 55 queries on the entity leg and 79
+vs 49 on the doc leg; the intersection is 35 and 42. The `population mismatch` guard
+(#2014) still stands behind the matched pair: a ratio is emitted only when both
+halves state the same n, so a ceiling with no population entry (hand-built, or a
+caller that passed no records) is judged on the full halves and withheld with both
+n's in `ceiling_notes` and on the printed line when they differ.
 
 Because that veto can stand for weeks, the emitted block also says what produced
 the divisor and how long ago: `ceiling.menu_builder` carries the artifact's own
@@ -221,9 +234,8 @@ builder nobody could name and an age nobody was printing. That state has since b
 retired by the command the note names: `$LLOYD_DATA/eval/baselines/label-agreement/`
 now holds two artifacts, the newer labelled by djev on 2026-10-14 and carrying
 `menu_builder: query-token-overlap/v1`, and the 2026-10-29 nightly prints it beside
-`artifact_age_days: 15`. The veto did not go with the attribution — every
-`*_normalized` in that artifact is still null, `entity_hit_rate` among a
-`population mismatch` of 66 scored against 52, which is what #2014 is about.
+`artifact_age_days: 15`. The attribution did not lift the population veto — that
+took #4285's matched population above.
 
 The ceiling itself is a function of the candidate menu the second labeler was
 shown, so the artifact names its menu builder (`menu_builder`, beside `caps`) and

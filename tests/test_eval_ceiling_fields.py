@@ -1727,14 +1727,19 @@ def test_the_harness_stays_line_count_neutral_for_cited_prose():
     constants, the `--skill-arm` declaration and the `main()` call), so both citations
     moved — 2702→2844 and 2947→3097 — and the two `architecture/` pages were re-numbered
     in the same commit as this list, which is the only order in which the rule holds.
+
+    #4285 took the third road: its edits above `main` are line-for-line replacements and
+    its new helpers (`ceiling_population` and its three companions) are appended after
+    `main`, so no cited line moved and only the total below did (3,131 → 3,218).
     """
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 3131, (
-        f"eval/run_eval.py is {len(lines)} lines, not the 3,131 every `architecture/` "
-        "line citation and this list were re-numbered to on 2026-11-25, when #4399's "
+    assert len(lines) == 3218, (
+        f"eval/run_eval.py is {len(lines)} lines, not the 3,218 #4285 left it at by "
+        "appending after `main` (every `architecture/` line citation and this list were "
+        "re-numbered to 3,131 on 2026-11-25, when #4399's "
         "skills_search arm grew it from the 2,975 #4404's episodic-floor leg had reached "
         "on 2026-11-20 (from 2,735 before that) — behaviour, not prose, so the rule was "
-        "the re-number this node documents rather than line-neutrality. Re-number in the "
+        "the re-number this node documents rather than line-neutrality). Re-number in the "
         "one commit that moves the harness again, or make the change line-neutral like "
         "#4050's")
     for n, fragment in CITED_PROSE_LINES:
@@ -1868,3 +1873,184 @@ def test_no_vault_still_skips_the_ceiling_node(tmp_path, monkeypatch):
     monkeypatch.setattr(_SELF, "SKILL", empty / "SKILL.md")
     with pytest.raises(pytest.skip.Exception):
         test_the_skill_names_the_ceiling_and_the_veto()
+
+
+# ── #4285: one population per ceiling ratio ──────────────────────────────────
+
+#: The six metrics `lac.ceiling` measures (the seventh, the fact leg, is unmeasured).
+CEILINGED = ("entity_hit_rate", "entity_recall_avg", "doc_hit_rate",
+             "doc_recall_avg", "mrr_doc", "ndcg10")
+
+
+def _goldless_corpus() -> list[dict]:
+    """The synthetic corpus plus `eta`, a query with doc gold and NO entity gold — the
+    row shape that makes the two populations differ on a real nightly: the run's
+    scorer drops it from every entity rate (`_counts_on_leg`, #1663), the ceiling
+    admits it to `ent_ok` unconditionally."""
+    return _synth_corpus() + [
+        {"id": "eta", "query": "which note records the overnight backup window",
+         "category": "docs", "expect_entities": [],
+         "expect_docs": ["knowledge/software/backup-window.md"]}]
+
+
+def _artifact_over(corpus: list[dict]) -> dict:
+    names = [e["expect_entities"][0] for e in corpus if e["expect_entities"]] + [
+        "Inner Voice", "Knowledge Graph", "vLLM", "Whisper"]
+    paths = [d["expect_docs"][0] for d in corpus] + [
+        "memory/2026-09-24.md", "projects/lloyd/x.md"]
+    return lac.label_corpus(
+        labeler=lac.stub_labeler(),
+        labeler_identity={"kind": "engine", "model": "fixture-ceiling-model",
+                          "endpoint": "fixture://local"},
+        queries=[dict(q) for q in corpus], entity_names=names, vault_paths=paths,
+        entity_cap=len(names), doc_cap=len(paths))
+
+
+def _run_records(corpus: list[dict], hits: dict[str, bool]) -> list[dict]:
+    """One scored record per query, carrying the `expected` block every nightly record
+    has carried since nightly-20260925, so the run's gold-bearing filter is live."""
+    out = []
+    for q in corpus:
+        hit = hits.get(q["id"], False)
+        has_ent = bool(q.get("expect_entities"))
+        out.append({
+            "id": q["id"], "category": q.get("category", "c"), "latency_ms": 100.0,
+            "error": None,
+            "expected": {"entities": list(q.get("expect_entities") or []),
+                         "docs": list(q.get("expect_docs") or [])},
+            "scoring": {"entity_hit": hit if has_ent else False, "doc_hit": hit,
+                        "entity_recall": (1.0 if hit else 0.0) if has_ent else None,
+                        "doc_recall": 1.0 if hit else 0.0,
+                        "rr_doc": 1.0 if hit else 0.0, "ndcg10": 1.0 if hit else 0.0,
+                        "fact_entity_recall": None, "first_doc_rank": 1}})
+    return out
+
+
+def _mean_over(records: list[dict], metric: str, ids: list[str]) -> float:
+    by_id = {r["id"]: r for r in records}
+    vals = [ev._metric_value(by_id[i], metric) for i in ids]
+    return sum(vals) / len(vals)
+
+
+def test_the_ceiling_states_the_exact_ids_it_averaged_each_metric_over():
+    """Clause 1: `n[metric]` is reported as a population, not inferred from `excluded`.
+
+    `eta` is in the entity leg's `ent_ok` (no entity gold to be unoffered) but scores no
+    entity recall, so `entity_hit_rate` averages over it and `entity_recall_avg` does
+    not — a difference `excluded` (empty here) cannot express."""
+    art = _artifact_over(_goldless_corpus())
+    ceil = lac.ceiling(art)
+    assert set(ceil["ids"]) == set(ceil["n"]), "every metric with an n states its ids"
+    for metric, n in ceil["n"].items():
+        assert n == len(ceil["ids"][metric]), metric
+    assert ceil["excluded"] == {"entity": [], "doc": []}
+    assert "eta" in ceil["ids"]["entity_hit_rate"]
+    assert "eta" not in ceil["ids"]["entity_recall_avg"]
+    assert ceil["ids"]["fact_entity_recall_avg"] == []
+    # Restricted to a subset, the stated ids are inside that subset.
+    part = lac.ceiling(art, ids=["alpha", "eta"])
+    assert part["ids"]["entity_hit_rate"] == ["alpha", "eta"]
+    assert part["ids"]["entity_recall_avg"] == ["alpha"]
+    assert part["n"]["entity_recall_avg"] == 1
+
+
+def test_a_ratio_divides_over_the_ceilings_ids_when_they_are_a_strict_subset(
+        tmp_path, monkeypatch):
+    """Clauses 2 and 4: the run scored six queries, the ceiling measured five of them
+    (`zeta` post-dates the artifact). Before #4285 every ratio was withheld as 6 vs 5;
+    now each is the run's mean over the ceiling's five ids divided by the ceiling
+    re-averaged over those same five, and that matched reading is published beside a
+    headline that still carries the full six-query score."""
+    corpus = _synth_corpus()
+    art = _artifact_over(corpus)
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    zeta = {"id": "zeta", "query": "which unit keeps the guardian alive",
+            "category": "safety", "expect_entities": ["Guardian"],
+            "expect_docs": ["knowledge/software/guardian.md"]}
+    hits = {"alpha": True, "beta": True, "gamma": False, "delta": True,
+            "epsilon": False, "zeta": False}
+    records = _run_records(corpus + [zeta], hits)
+    summary = ev.summarize(records)
+    full = {m: summary["overall"][m] for m in CEILINGED}
+    fields = ev.ceiling_context(corpus, scored_ids=[r["id"] for r in records],
+                                records=records)
+    ev._normalize_against_ceiling(fields, summary["overall"])
+    summary["overall"].update(fields)
+    path = tmp_path / "nightly-4285.json"
+    path.write_text(json.dumps({"summary": summary}), encoding="utf-8")
+    o = json.loads(path.read_text(encoding="utf-8"))["summary"]["overall"]
+
+    ceiling_ids = lac.ceiling(art)["ids"]
+    checked = 0
+    for metric in CEILINGED:
+        ids = ceiling_ids[metric]
+        assert set(ids) < {r["id"] for r in records}, metric   # a STRICT subset
+        assert o["ci95"][metric]["n"] == 6, metric
+        divisor = lac.ceiling(art, ids=ids)["values"][metric]
+        pop = o["ceiling_population"][metric]
+        assert pop["ids"] == ids and pop["n"] == len(ids) == pop["ceiling_n"], metric
+        assert pop["score"] == pytest.approx(_mean_over(records, metric, ids), abs=1e-4)
+        assert pop["ceiling"] == divisor, metric
+        assert o[metric] == full[metric], "the headline keeps the full-population score"
+        if not divisor:
+            continue        # the zero-ceiling rule answers first, as before
+        assert o[f"{metric}_normalized"] is not None, metric
+        assert o[f"{metric}_normalized"] == pytest.approx(
+            _mean_over(records, metric, ids) / divisor, abs=1e-3), metric
+        assert ev.POPULATION_MISMATCH not in (o.get("ceiling_notes") or {}).get(metric, "")
+        checked += 1
+    assert checked >= 2, "the fixture must leave at least the entity leg divisible"
+    assert o["entity_hit_rate_normalized"] is not None
+
+
+def test_the_matched_population_is_the_intersection_not_the_ceilings_set(
+        tmp_path, monkeypatch):
+    """The triage's finding: the ceiling's set is NOT a subset of the run's on a real
+    nightly — a gold-less row (`eta`) sits in the ceiling's entity population as a hard
+    zero and nowhere in the run's. The population is the intersection, and the divisor
+    is re-averaged over it, so that zero leaves the ceiling too (on nightly-20261118 it
+    moved `entity_hit_rate`'s divisor from 0.4364 to 0.6857)."""
+    corpus = _goldless_corpus()
+    art = _artifact_over(corpus)
+    _write(art, tmp_path)
+    monkeypatch.setenv(lac.OUT_DIR_ENV, str(tmp_path))
+    records = _run_records(corpus, {"alpha": True, "beta": True, "delta": True})
+    summary = ev.summarize(records)
+    fields = ev.ceiling_context(corpus, scored_ids=[r["id"] for r in records],
+                                records=records)
+    ev._normalize_against_ceiling(fields, summary["overall"])
+    assert "eta" in lac.ceiling(art)["ids"]["entity_hit_rate"]
+    pop = fields["ceiling_population"]["entity_hit_rate"]
+    assert "eta" not in pop["ids"] and len(pop["ids"]) == 5
+    assert pop["ceiling"] == lac.ceiling(art, ids=pop["ids"])["values"]["entity_hit_rate"]
+    assert pop["ceiling"] > fields["ceiling"]["entity_hit_rate"], (
+        "the gold-less hard zero left the divisor with the query it belongs to")
+    assert fields["entity_hit_rate_normalized"] == pytest.approx(
+        _mean_over(records, "entity_hit_rate", pop["ids"]) / pop["ceiling"], abs=1e-3)
+
+
+def test_the_guard_still_withholds_a_matched_pair_whose_two_ns_differ():
+    """Clause 3: the matched halves go through the #2014 guard unchanged, so a
+    population entry whose two n's disagree — or whose score half cannot state its n —
+    is withheld with both n's in the note rather than divided. A ceiling with no
+    population entry (hand-built, or a caller without records) is judged on the full
+    halves exactly as before; the two existing #2014 nodes above pin that edge."""
+    fields = _ceilinged({"entity_hit_rate": 53, "doc_hit_rate": 49, "entity_recall_avg": 38})
+    fields["ceiling_population"] = {
+        "entity_hit_rate": {"score": 0.9, "ceiling": 0.6, "n": 35, "ceiling_n": 34,
+                            "ids": []},
+        "doc_hit_rate": {"score": 0.8, "ceiling": 0.7, "n": None, "ceiling_n": 42,
+                         "ids": []},
+    }
+    ev._normalize_against_ceiling(fields, _scored(66, 79))
+    for metric, (sn, cn) in {"entity_hit_rate": (35, 34), "doc_hit_rate": (None, 42)}.items():
+        assert fields[f"{metric}_normalized"] is None, metric
+        note = fields["ceiling_notes"][metric]
+        assert note.startswith(ev.POPULATION_MISMATCH) and f"n={sn}" in note, note
+        assert f"n={cn}" in note, note
+    # Equal matched n's divide, over the matched halves and not the full ones.
+    fields["ceiling_population"]["entity_hit_rate"]["ceiling_n"] = 35
+    del fields["ceiling_notes"]
+    ev._normalize_against_ceiling(fields, _scored(66, 79))
+    assert fields["entity_hit_rate_normalized"] == round(0.9 / 0.6, 4)

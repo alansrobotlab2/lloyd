@@ -1540,7 +1540,7 @@ def _artifact_age_days(ran_at: object, now: datetime | None = None) -> int | Non
 
 
 def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None,
-                    now: datetime | None = None) -> dict:
+                    now: datetime | None = None, records: list[dict] | None = None) -> dict:
     """Read the label-agreement artifact and turn it into `summary.overall` fields.
 
     `scored_ids` must be the ids THIS run scored. The ceiling is re-averaged over
@@ -1559,7 +1559,7 @@ def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None,
                                or null when it predates the key) and
                                `artifact_age_days` (whole days since it ran, or null
                                when its timestamp cannot be read)
-      `<metric>_normalized`    score / ceiling, or null
+      `<metric>_normalized`    score / ceiling over `ceiling_population` (#4285), or null
       `<metric>_ceiling_kind`  which kind of ceiling that divisor was, or null
 
     Four states it distinguishes, because the whole subject of the field is that an
@@ -1677,7 +1677,7 @@ def ceiling_context(queries: list[dict], *, scored_ids: list[str] | None = None,
         fields[f"{metric}_normalized"] = None
         fields[f"{metric}_ceiling_kind"] = (
             ceil["kind"] if ceil["values"].get(metric) is not None else None)
-    return fields
+    return attach_ceiling_population(fields, art, records, scored_ids)
 
 
 def _ceiling_absent_fields(reason: str) -> dict:
@@ -1685,7 +1685,7 @@ def _ceiling_absent_fields(reason: str) -> dict:
     fields: dict = {
         "label_agreement": {"entity_label_agreement": None,
                             "doc_label_agreement": None, "labeler": None,
-                            "artifact": None, "reason": reason},
+                            "artifact": None, "reason": reason}, "ceiling_population": None,
         "ceiling": {"kind": None, "reason": reason, "remediation": lac.ceiling_remediation()},
     }
     for metric in CI_METRICS:
@@ -1774,13 +1774,13 @@ def _normalize_against_ceiling(fields: dict, overall: dict) -> None:
     answer at all could satisfy these gold labels, so the ratio is 0/0 and a printed
     0.0 would claim a scored position where there is a division by nothing.
 
-    A ceiling divided over a different number of queries than the score leaves the
-    value null too, with both n's in the note (#2014): see the guard below.
+    Both halves are the matched pair in `fields["ceiling_population"]` when it exists (#4285,
+    `_matched_halves`), else the full ones; differing n's still null it (#2014, below).
     """
-    ceil = fields.get("ceiling") or {}
+    full_ceil, full_overall = fields.get("ceiling") or {}, overall
     for metric in CI_METRICS:
-        cap = ceil.get(metric)
-        score = overall.get(metric)
+        ceil, overall = _matched_halves(full_ceil, full_overall, fields, metric)
+        cap, score = ceil.get(metric), overall.get(metric)
         if cap is None or score is None:
             continue
         # The kind travels with the ratio it describes — set here rather than left to
@@ -2052,8 +2052,8 @@ def summarize(records: list[dict], *,
     for metric in CI_METRICS:
         overall.setdefault(f"{metric}_normalized", None)
         overall.setdefault(f"{metric}_ceiling_kind", None)
-    overall.setdefault("label_agreement", None)
-    overall.setdefault("ceiling", None)
+    for _key in ("label_agreement", "ceiling", "ceiling_population"):
+        overall.setdefault(_key, None)
 
     per_cat = {}
     for cat, rs in by_cat.items():
@@ -2255,7 +2255,7 @@ def print_table(records: list[dict], summary: dict) -> None:
             suffix = f"   score/ceiling=null (ceiling=null kind={kind or 'null'})"
         else:
             suffix = (f"   score/ceiling={'null' if norm is None else norm}"
-                      f" (ceiling={cap} kind={kind})")
+                      f" (ceiling={cap} kind={kind}{_matched_suffix(o, metric)})")
             # Why a ceilinged metric has no ratio, on the line itself (#2014): the
             # reporter copies this page, and a bare null beside a real ceiling reads
             # as a bug rather than as two populations.
@@ -2971,7 +2971,7 @@ def main() -> int:
         # The ids that were actually scored, not the ids that were asked about: an
         # errored query has no score to normalize, so including it would widen the
         # ceiling's denominator past the metric's.
-        scored_ids=[r["id"] for r in records if not r.get("error")])
+        scored_ids=[r["id"] for r in records if not r.get("error")], records=records)
     _normalize_against_ceiling(_ceiling_fields, summary["overall"])
     summary["overall"].update(_ceiling_fields)
     # #2358, filled here for the same reason the ceiling block is: the audit has to
@@ -3125,6 +3125,93 @@ def main() -> int:
               f"check compares; this is the absolute ceiling (#1129).")
     print_failures(failures)
     return 0
+
+
+# ── #4285: one population per ceiling ratio ──────────────────────────────────
+# Appended after `main` rather than beside `_normalize_against_ceiling` so that no line
+# `architecture/` cites by number moves (`test_the_harness_stays_line_count_neutral_for_
+# cited_prose`); Python resolves these names at call time.
+
+def ceiling_population(art: dict, records: list[dict],
+                       scored_ids: list[str] | None = None) -> dict:
+    """Per ceiling-bearing metric, the ONE query set both halves of the ratio cover.
+
+    The two halves drop different queries (#4285): the run's score leaves a query with
+    no gold on the metric's leg (`_counts_on_leg`, #1663), the ceiling keeps it (its
+    `ent_ok`/`doc_ok` admit a gold-less row) and drops a query whose gold was never
+    offered. On nightly-20261118 that was 66 vs 55 for `entity_hit_rate` and 79 vs 49 on
+    the doc leg, so every ratio was withheld as a population mismatch. Neither set is
+    the other's subset, so restricting one half to the other's ids is not enough: the
+    population is the INTERSECTION of the ids the run scored a value for and the ids
+    `lac.ceiling` states it averaged (`ids[metric]`), and both halves are re-averaged
+    over it — the score as the mean of `_metric_value` over those records, the divisor
+    as `lac.ceiling(art, ids=<intersection>)`.
+
+    Entry per metric: `score` (matched numerator), `ceiling` (matched divisor), `n` (how
+    many queries the score averaged), `ceiling_n` (how many the divisor averaged — the
+    population guard compares the two, so it stays a real check rather than an identity)
+    and `ids`. `summary.overall.<metric>` is untouched: it stays the full-population
+    score, and this block is the reading the ratio was taken over. An errored record is
+    never in the population, for the same reason it is not in `scored_ids`.
+    """
+    measured = lac.ceiling(art, ids=scored_ids)
+    stated = measured.get("ids") or {}
+    by_id = {r.get("id"): r for r in records
+             if isinstance(r, dict) and not r.get("error")}
+    out: dict = {}
+    for metric in CI_METRICS:
+        if measured["values"].get(metric) is None or metric not in stated:
+            continue
+        matched = [qid for qid in stated[metric]
+                   if qid in by_id and _metric_value(by_id[qid], metric) is not None]
+        vals = [_metric_value(by_id[qid], metric) for qid in matched]
+        divisor = lac.ceiling(art, ids=matched) if matched else None
+        out[metric] = {
+            "score": round(sum(vals) / len(vals), 4) if vals else None,
+            "ceiling": divisor["values"].get(metric) if divisor else None,
+            "n": len(vals),
+            "ceiling_n": divisor["n"].get(metric) if divisor else 0,
+            "ids": matched,
+        }
+    return out
+
+
+def attach_ceiling_population(fields: dict, art: dict, records: list[dict] | None,
+                              scored_ids: list[str] | None) -> dict:
+    """Put `ceiling_population` on the fields `ceiling_context` built, and return them.
+
+    None when the caller handed no records: the population is a fact about a run's
+    per-query values, and a caller with only aggregates has none to state.
+    """
+    fields["ceiling_population"] = (
+        None if records is None else ceiling_population(art, records, scored_ids))
+    return fields
+
+
+def _matched_halves(ceil: dict, overall: dict, fields: dict, metric: str
+                    ) -> tuple[dict, dict]:
+    """The (ceiling, score) halves `_normalize_against_ceiling` divides for `metric`.
+
+    The matched pair from `ceiling_population` when the run stated one, shaped exactly
+    like the full halves so the #2014 population guard reads it unchanged; otherwise the
+    full halves, which is what a hand-built ceiling or a caller without records gets —
+    and there differing n's still withhold the ratio.
+    """
+    pop = (fields.get("ceiling_population") or {}).get(metric)
+    if not isinstance(pop, dict):
+        return ceil, overall
+    return ({**ceil, metric: pop.get("ceiling"), "n": {metric: pop.get("ceiling_n")}},
+            {metric: pop.get("score"), "ci95": {metric: {"n": pop.get("n")}}})
+
+
+def _matched_suffix(o: dict, metric: str) -> str:
+    """The matched population on the printed line, so the page's ratio is not read
+    against the full-population ceiling printed beside it (#4285)."""
+    pop = (o.get("ceiling_population") or {}).get(metric)
+    if not isinstance(pop, dict):
+        return ""
+    return (f" matched: score={pop.get('score')} ceiling={pop.get('ceiling')}"
+            f" n={pop.get('n')}")
 
 
 if __name__ == "__main__":

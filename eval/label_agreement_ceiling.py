@@ -1143,24 +1143,33 @@ def ceiling(artifact: dict, *, ids: list[str] | None = None) -> dict:
     excluded_doc = [r["id"] for r in rows if r not in doc_ok]
     values: dict[str, Any] = {}
     ns: dict[str, int] = {}
+    # The exact query ids each metric averaged over (#4285), so `n[metric]` is stated
+    # as a population rather than inferred from `excluded`: a row with no recall value
+    # leaves a metric without being excluded from its leg, so `excluded` alone cannot
+    # say which queries a figure describes. `n[metric] == len(ids[metric])` always.
+    ids_by_metric: dict[str, list[str]] = {}
     for metric in ENTITY_METRICS:
         vals = [(_r.get("surrogate") or {}).get(_FIELD[metric]) for _r in ent_ok]
         known = [v for v in vals if v is not None]
         values[metric] = (round(_avg(vals), 4) if known else None)
         ns[metric] = len(known)
+        ids_by_metric[metric] = [_r["id"] for _r, v in zip(ent_ok, vals) if v is not None]
     for metric in DOC_METRICS:
         vals = [(r.get("surrogate") or {}).get(_FIELD[metric]) for r in doc_ok]
         known = [v for v in vals if v is not None]
         values[metric] = (round(_avg(vals), 4) if known else None)
         ns[metric] = len(known)
+        ids_by_metric[metric] = [r["id"] for r, v in zip(doc_ok, vals) if v is not None]
     for metric, reason in UNMEASURED_METRICS.items():
         values[metric] = None
         ns[metric] = 0
+        ids_by_metric[metric] = []
     labels_unofferable, unofferable_detail = _unofferable_counts(rows)
     return {
         "kind": CEILING_KIND,
         "values": values,
         "n": ns,
+        "ids": ids_by_metric,
         "excluded": {"entity": excluded_entity, "doc": excluded_doc},
         "unmeasured": dict(UNMEASURED_METRICS),
         # The count `_narrow`'s docstring has promised since #654 and never wrote:
