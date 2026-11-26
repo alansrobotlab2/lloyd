@@ -645,11 +645,11 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
     is admission — root `.gitignore` ends `*.json`, and `git add` of a name no negation
     rescues exits 0 having staged nothing, which is the silent failure #2282 spent two
     review attempts on. So each new name goes through `_ignore_rule` with the control
-    sibling beside it, and the whole tracked family is counted, because "9" is the number
+    sibling beside it, and the whole tracked family is counted, because "10" is the number
     `git ls-files tests/fixtures | grep -c qmd` prints once the four #2302 witnesses,
-    #2119's nightly, #2539's loss report, #3508's walk-stamp extract and #4484's two
-    post-swap witnesses are all in the index — a family count, so a round that commits
-    another witness widens this number and its own clause together.
+    #2119's nightly, #2539's loss report, #3508's walk-stamp extract, #4484's two post-swap
+    witnesses and #4478's swap-nightly witness are all in the index — a family count, so a
+    round that commits another witness widens this number and its own clause together.
     """
     exact = {  # name -> (lines, bytes), as `wc -l -c` of the runtime report prints them
         REHEARSAL_REPORT: (68, 1783),
@@ -691,15 +691,29 @@ def test_the_three_new_cited_reports_are_exact_tracked_and_admissible():
         ["git", "-C", str(ROOT), "ls-files", "tests/fixtures"],
         capture_output=True, text=True)
     qmd = sorted(ln for ln in listed.stdout.split("\n") if "qmd" in ln)
-    # 9 as of #4484, which committed the two reports the `SWAP_OCCUPANCY_CEILING` comment
-    # cites: this is the widening the paragraph above sanctions, done in the same change
-    # that added the witnesses rather than left for the next round to discover.
-    assert len(qmd) == 9, (
-        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 9: "
+    # 10 as of #4478, which committed the third witness of the 2026-11-20 unattended swap:
+    # this is the widening the paragraph above sanctions, done in the same change that added
+    # the witness rather than left for the next round to discover red.
+    assert len(qmd) == 10, (
+        f"`git ls-files tests/fixtures | grep -c qmd` prints {len(qmd)} ({qmd}), not 10: "
         "four cited reports plus #2119's nightly witness plus #2539's loss report plus "
-        "#3508's walk-stamp extract plus #4484's two post-swap witnesses is the whole "
-        "committed family, and one fewer means a figure some paragraph quotes is in no "
-        "repository")
+        "#3508's walk-stamp extract plus #4484's two post-swap witnesses plus #4478's "
+        "swap-nightly witness is the whole committed family, and one fewer means a figure "
+        "some paragraph quotes is in no repository")
+
+    # ...and the enumerated dict stays the October five. The November names are cited and
+    # witnessed, but they are NOT members of `CITED_REPORTS`: every node keyed on that dict
+    # treats it as the set whose members are controlled against
+    # `$LLOYD_DATA/_pipeline/reflection/`, a directory in no repository, so a name added
+    # here is a pin that grades bytes a fresh clone cannot have — #2396's defect exactly.
+    # A new citation needs no dict entry because `_assert_citations_resolve` resolves the
+    # open set from the tree and its index alone; that widening is #2755.
+    assert set(CITED_REPORTS) == {REHEARSAL_REPORT, SWAP_REPORT, MAINTENANCE_BEFORE,
+                                  MAINTENANCE_AFTER, MAINTENANCE_LOSS}, (
+        f"CITED_REPORTS enumerates {sorted(CITED_REPORTS)}, not the five October reports: "
+        "the three November witnesses are cited and pinned as tracked bytes, and a dict "
+        "entry would additionally ask every `_report`/REFLECTION node for their runtime "
+        "copy, which lives outside this repository")
 
     spec = (ROOT / "scripts" / "automod" / "spec.py").read_text(encoding="utf-8")
     # Slice from the DECLARATION, not from the first mention of the name. Those were the
@@ -1588,16 +1602,33 @@ def test_a_citation_with_no_witness_fails_the_family_scan_naming_the_missing_fil
 BAND_CONSTANTS = ("CAPACITY_OCCUPANCY_TRIGGER", "CAPACITY_APPROACHING_OCCUPANCY",
                   "CAPACITY_DEAD_MIB_FLOOR", "SWAP_OCCUPANCY_CEILING")
 
-#: The invocation that swapped the 2026-11-08 copy in, and the nightly the next morning:
-#: the two dated reports the ceiling's comment now cites, committed because that comment
+#: The invocation that swapped the 2026-11-08 copy in, the nightly that ran that swap, and
+#: the nightly the next morning: the three dated reports of the first unattended swap. The
+#: first two are the ones the ceiling's comment cites, committed because that comment
 #: quotes six figures out of them and #2396's rule is that a figure with no witness is
-#: re-derivable only on the box that ran the job. Both names are admitted past the root
-#: `*.json` rule by the two family negations already in `tests/fixtures/.gitignore`, which
-#: `test_the_two_post_swap_witnesses_are_tracked_and_admissible` re-asks of
+#: re-derivable only on the box that ran the job. The third is the one §5's paragraph was
+#: written for and could not name: `side_copy_swap`'s `attempted`, `swapped`,
+#: `retrieval_ok` and `retrieval_hits` keys exist in no other file of this family — the
+#: route report's own `swap` is null, because the nightly performed the swap and the route
+#: only built the copy — so until #4478 the most consequential sentence §5 carries had no
+#: witness behind it. All three names are admitted past the root `*.json` rule by the two
+#: family negations already in `tests/fixtures/.gitignore`, which
+#: `test_the_three_post_swap_witnesses_are_exact_tracked_and_admissible` re-asks of
 #: `git check-ignore` instead of trusting — #2282 spent a round learning that an ignored
 #: witness reads as a green suite whose nodes never ran.
 SWAP_IN_REPORT = "qmd-side-copy-rebuild-20261108-2026-11-20T050054.json"
+SWAP_NIGHTLY_REPORT = "qmd-index-maintenance-2026-11-20.json"
 NEXT_MORNING_REPORT = "qmd-index-maintenance-2026-11-21.json"
+
+#: Each November witness: the scoped negation that admits it, and the `wc -l -c` of the
+#: runtime report it was copied byte-for-byte from. A dated report is immutable, so that
+#: pair is a figure a reader can re-derive with
+#: `wc -l -c $LLOYD_DATA/_pipeline/reflection/<name>` rather than a claim of this file.
+NOVEMBER_WITNESSES = {
+    SWAP_IN_REPORT: ("!qmd-side-copy-rebuild-*.json", 75, 1967),
+    SWAP_NIGHTLY_REPORT: ("!qmd-index-maintenance-*.json", 286, 10134),
+    NEXT_MORNING_REPORT: ("!qmd-index-maintenance-*.json", 205, 7562),
+}
 
 #: The three shapes the retired pre-swap decay took in that comment. Each describes an
 #: allocation the 2026-11-20 swap halved (1020.0 MiB -> 464.0), which is why the comment
@@ -1866,24 +1897,35 @@ def test_the_out_of_band_witness_records_neither_scheduled_block():
         "this report is no longer an out-of-band night, so it witnesses nothing")
 
 
-def test_the_two_post_swap_witnesses_are_tracked_and_admissible():
-    """The two new witnesses are in the index, admissible, and identical to the live copies.
+def test_the_three_post_swap_witnesses_are_exact_tracked_and_admissible():
+    """The three November witnesses are the bytes, in the index, admitted by existing rules.
 
     `git add` of a name no negation rescues exits 0 while staging nothing (#2282), so the
     admissibility question is asked of `git check-ignore` on every run rather than assumed
-    from the two family rules that happen to already exist. `_assert_matches_runtime` is
-    the provenance control: quiet where `_pipeline/reflection/` is unreachable, a hard
-    disagreement where the committed bytes and the report have drifted apart.
+    from the two family rules that happen to already exist. The line and byte counts are
+    the runtime report's own: they are what makes "the copy is byte-identical rather than
+    retyped" a figure a reader can re-derive instead of a claim, which is the half that a
+    gate tree cannot settle on its own — `_assert_matches_runtime`, run here through
+    `_report`, is quiet where `_pipeline/reflection/` holds no such file and a hard
+    disagreement where the committed bytes and the live report have drifted apart.
     """
-    for name, negation in ((SWAP_IN_REPORT, "!qmd-side-copy-rebuild-*.json"),
-                           (NEXT_MORNING_REPORT, "!qmd-index-maintenance-*.json")):
+    for name, (negation, lines, size) in NOVEMBER_WITNESSES.items():
         fixture = _fixture(name)
         assert fixture.is_file(), (
-            f"no committed witness at {fixture}; every figure the ceiling's comment quotes "
-            "from this report would then live only on the box that ran the job")
+            f"no committed witness at {fixture}; every figure §5's swap paragraph and the "
+            "ceiling's comment quote from this report would then live only on the box that "
+            "ran the job")
+        raw = fixture.read_text(encoding="utf-8")
+        assert raw.count("\n") == lines and len(raw.encode()) == size, (
+            f"the committed {name} is {raw.count(chr(10))} lines / {len(raw.encode())} B, "
+            f"not the {lines} lines / {size} B that "
+            f"`wc -l -c $LLOYD_DATA/_pipeline/reflection/{name}` prints: a witness that was "
+            "retyped rather than copied witnesses nothing")
+
         rel = fixture.relative_to(ROOT).as_posix()
         rc, source, pattern = _ignore_rule(rel)
-        assert rc == 0 and pattern == negation, (
+        assert rc == 0 and source.startswith("tests/fixtures/.gitignore") \
+            and pattern == negation, (
             f"{rel} is resolved by {source!r} with pattern {pattern!r}, not {negation!r}; the "
             "family negation in tests/fixtures/.gitignore is what admits a witness past the "
             "root `*.json` rule, and that file is a denied path for a round")
@@ -1895,4 +1937,357 @@ def test_the_two_post_swap_witnesses_are_tracked_and_admissible():
             ["git", "-C", str(ROOT), "ls-files", "--error-unmatch", rel], capture_output=True)
         assert tracked.returncode == 0, (
             f"{rel} is on disk but not in the index, so a fresh clone has nothing to read")
-        _assert_matches_runtime(name, fixture)
+        assert _report(name), f"{name} resolved to an empty payload"
+
+
+# --- #4478: the citation the doc used to apologise for, and the paragraph that now makes it ---
+#
+# §5's account of the first unattended swap closed for five days with a sentence apologising
+# for its own missing citations: the nightly of 2026-11-20 swapped a live index unattended,
+# and the document describing that route could not name the three reports whose figures its
+# sentence quoted — no witness of those bytes was committed, and this doc's family rail
+# (`_assert_citations_resolve`) refuses a dated report with nothing behind it. #4484
+# committed two of the three witnesses; #4478 committed the third, the nightly itself
+# (286 lines / 10,134 B), and the paragraph regained the citation.
+#
+# What the rail cannot do is notice a WITHHELD one. It fails a citation with no witness and
+# says nothing about a paragraph that quotes three reports and names none of them, which is
+# why the doc could be green while being re-derivable only on the box that ran the job —
+# #2396's "green that means nothing" in a new costume. So the nodes below read the paragraph
+# rather than the fixture list: the citations have to be MADE, each report standing beside the
+# claim only it supports, and the two sentences that recorded the refusal have to be gone. An
+# absence claim is controlled here by re-matching its own regex against a line assembled from
+# the retired prose — `assert not X in text` with no positive control is the 0-hit answer
+# that reads as a clean sweep.
+
+#: The span's two ends, so the citation leg reads the unattended-swap material and not the
+#: file: the sentence that opens the claim of exactly one unattended swap (#4484's own
+#: passage anchor, so a rewrite has to move it on purpose) up to the sentence handing the
+#: narrative over to the two hand runs.
+SWAP_EVENT_START = "Exactly one unattended swap exists"
+SWAP_EVENT_END = "The two hand runs"
+
+#: §5's heading, for the one claim scoping makes: the paragraph is in §5 and nowhere else.
+SWAP_EVENT_SECTION = "## 5. Keeping it healthy"
+
+#: The two shapes the refusal took in prose — §5's apology and the review log's copy of it —
+#: plus the shape a withheld citation takes in a comment. Pinned as absences over the whole
+#: flattened doc; each is first re-matched against the retired line below it.
+RETIRED_WITHHOLDING = (
+    (re.compile(r"report names are deliberately not cited"),
+     "Its report names are deliberately not cited here, and #4477 owes the citation."),
+    (re.compile(r"no witness of those bytes is committed"),
+     "no witness of those bytes is committed under `tests/fixtures/`"),
+    (re.compile(r"report is \*\*not\*\* cited"),
+     "the first unattended swap's report is **not** cited because its bytes have no witness"),
+    (re.compile(r"no witness[^\n]{0,60}is committed"),
+     "the citation is refused because no witness of those bytes is committed"),
+)
+#: The pointer §5's apology aimed at, and the one this item is. #4477 is the unrelated
+#: hand-commit item for the `.gitignore` retirement comment.
+WRONG_POINTER = "#4477"
+CORRECT_POINTER = "#4478"
+
+
+def _swap_event_paragraph() -> str:
+    """§5's paragraph on the first unattended swap, from its own clause to the hand runs.
+
+    Bounded by two phrases the paragraph itself carries rather than by a character window:
+    `0.6691` appears three times in `architecture/qmd.md` — in this paragraph, in §4's decay
+    note and in the 2026-11-21 review-log entry — so a leg that read a fixed distance
+    forward from the swap would grade one of the other two as if §5 had cited for it, and
+    would fail on prose this round never touched.
+    """
+    flat = _flat(_doc())
+    for anchor in (SWAP_EVENT_START, SWAP_EVENT_END):
+        assert anchor in flat, (
+            f"the swap paragraph no longer carries the anchor {anchor!r}, so the citation "
+            "leg has no bounds and would silently read the whole document")
+    start = flat.index(SWAP_EVENT_START)
+    end = flat.index(SWAP_EVENT_END, start)
+    assert SWAP_EVENT_SECTION in flat[:start] and SWAP_EVENT_SECTION not in flat[start:end], (
+        f"the bounded span is no longer inside {SWAP_EVENT_SECTION!r}: the paragraph moved "
+        "out of §5, and the leg that says it is scoped to §5 has to stop believing that")
+    return flat[start:end]
+
+
+def _sentences(text: str) -> list[str]:
+    """Prose split at a sentence terminator followed by whitespace.
+
+    The citation form survives this: `…/qmd-index-maintenance-2026-11-20.json` has a period
+    followed by a filename character and a quoted figure like `0.3419,` a period followed by
+    a digit, so neither ends a sentence. The alternative was a fixed character window, which
+    would have to keep the paragraph's length right instead.
+    """
+    return re.split(r"(?<=[.!?])\s+", text)
+
+
+def _citations(text: str) -> set[str]:
+    """The report names a passage cites, by basename."""
+    return {Path(c).name for c in CITED_REPORT_RE.findall(text)}
+
+
+def _swap_paragraph_figures() -> dict[str, tuple[str, ...]]:
+    """What each citing sentence must carry, read out of that report's committed bytes.
+
+    Derived rather than quoted, so the pairing is a claim about the witnesses and not about
+    this file's memory of them. The four key spellings are the exception and are checked
+    before they are demanded: `attempted`, `swapped`, `retrieval_ok` and `retrieval_hits` are
+    asserted to hold the values §5 prints, out of the nightly's `side_copy_swap` block, which
+    is the reason that report and not the route report backs the swap sentence — the route
+    report's own `swap` field is null, because the nightly performed the swap and the route
+    only built and verified the copy.
+    """
+    nightly = _report(SWAP_NIGHTLY_REPORT)
+    assert "side_copy_swap" in nightly, (
+        f"{SWAP_NIGHTLY_REPORT} carries no scheduled-swap block, so the four keys §5's "
+        "sentence turns on are in nothing")
+    swap = nightly["side_copy_swap"]
+    assert (swap["attempted"], swap["swapped"], swap["retrieval_ok"]) == (True, True, True), swap
+    gate = _vec0(SWAP_NIGHTLY_REPORT, "before")
+    assert swap["occupancy"] == gate["occupancy"], (
+        f"the gate reading {swap['occupancy']} and the report's own before-snapshot "
+        f"{gate['occupancy']} disagree, so §5's occupancy is attributed to neither")
+    side = _vec0(SWAP_IN_REPORT, "side_after")
+    ver = _report(SWAP_IN_REPORT)["verification"]
+    assert _report(SWAP_IN_REPORT).get("swap") is None, (
+        "the route report now records a swap of its own, so the nightly is no longer the "
+        "only document of it and the pairing below has to be re-read, not widened")
+    morning = _vec0(NEXT_MORNING_REPORT, "before")
+    return {
+        # The nightly: the swap's own keys plus the reading the gate fired on. Printed to
+        # four places like the JSON and with the MiB thousands-separated, so the paragraph
+        # shows its figures were copied out of a report rather than rounded by hand.
+        SWAP_NIGHTLY_REPORT: ("attempted: true", "swapped: true", "retrieval_ok: true",
+                              f"retrieval_hits: {swap['retrieval_hits']}",
+                              f"{gate['occupancy']:.4f}",
+                              f"{gate['allocated_mib']:,.0f}"),
+        # The route report: the copy that went in the other way, and its verification.
+        SWAP_IN_REPORT: (f"{side['occupancy']:.4f}", f"{ver['vsearch_hits']} hits"),
+        # The next morning: the post-swap reading on the halved footprint.
+        NEXT_MORNING_REPORT: (f"{morning['occupancy']:.4f}",
+                              f"{morning['allocated_mib']:g}"),
+    }
+
+
+def _assert_swap_citations_made(scope: str) -> None:
+    """Fail unless each of the three reports is cited in the sentence that states its figures.
+
+    Shared by the green node and by the falsification node, so what a tampered copy
+    demonstrates is this assertion and not a hand-written analogue of it.
+    """
+    figures = _swap_paragraph_figures()
+    sentences = _sentences(scope)
+    absent = sorted(set(figures) - _citations(scope))
+    assert not absent, (
+        f"the swap paragraph quotes figures from {sorted(figures)} and cites none of "
+        f"{absent}. The family rail refuses a citation with no witness and is silent about "
+        "a paragraph that names no report at all, which is how the doc came to be "
+        "re-derivable only on the box that ran the job — the state whose two apologies this "
+        "section retires")
+    for name, needles in figures.items():
+        citing = [s for s in sentences if name in _citations(s)]
+        assert len(citing) == 1, (
+            f"{name} is cited by {len(citing)} sentences of the paragraph, not exactly one, "
+            f"so its figures cannot be attributed to it: {scope}")
+        missing = [n for n in needles if n not in citing[0]]
+        assert not missing, (
+            f"{name} is cited in a sentence that does not state {missing}. That report is "
+            f"the only one of the three whose bytes carry them, so the citation stands "
+            f"beside a different claim than the one it supports: {citing[0]}")
+
+
+def test_the_swap_paragraph_cites_each_report_beside_the_claim_only_it_supports():
+    """#4478 clauses 2 and 3: the citation is MADE, inside §5's paragraph.
+
+    Admissibility is already pinned by
+    `test_the_three_post_swap_witnesses_are_exact_tracked_and_admissible`; this is the other
+    half — the doc has to actually name the reports, and each of the three has to stand in
+    the one sentence whose figures only it carries. `attempted: true, swapped: true,
+    retrieval_ok: true, retrieval_hits: 5` and the 0.3419 / 1,020 MiB gate reading are in the
+    nightly of 2026-11-20 and nowhere else; 0.7511 and the 5 verification hits are in the
+    rebuild report and nowhere else; the next morning's 0.6691 on 528 MiB is in the nightly
+    of 2026-11-21 and nowhere else. A citation of the wrong one is a citation that cannot
+    support its sentence, which is what the pairing leg refuses.
+
+    The scoping claim is checked beside the leg: this paragraph is one of the three places in
+    the doc that print `0.6691`, and a leg that read the file rather than the paragraph would
+    pass on §4's decay note or on the review log's copy.
+    """
+    scope = _swap_event_paragraph()
+    _assert_swap_citations_made(scope)
+
+    whole = _flat(_doc())
+    assert scope.count("0.6691") == 1, (
+        f"the bounded paragraph now prints 0.6691 {scope.count('0.6691')} times, so the "
+        "citation leg's own bound is not the single claim it was written for")
+    assert whole.count("0.6691") > 1, (
+        "0.6691 has stopped appearing outside this paragraph, so the scoping this leg "
+        "demands has nothing left to be scoped against and the demo is gone")
+    for needle in ("Exactly one unattended swap exists", "The BUILD is scheduled as of"):
+        assert needle in scope, (
+            f"#4484's passage anchor {needle!r} is no longer inside the bounded span, so "
+            "what this node reads is not the paragraph whose citation it grades")
+
+
+def test_both_withholding_sentences_and_the_wrong_pointer_are_gone():
+    """#4478 clause 4: the doc stops saying something the fixtures now contradict.
+
+    Two sentences recorded the refusal — §5's apology, and the 2026-11-21 review-log entry's
+    copy of it — and the apology pointed the owed work at #4477, which is the hand-commit
+    item for the `.gitignore` retirement comment, not this one. Checked over the flattened
+    file rather than one line, because a dated review entry is re-read as a description of the
+    job as often as as history. Each retired shape is re-matched against the prose that used
+    to carry it before its absence is believed, and the review log keeps its own true
+    sentence about #4478 so the history is a correction rather than an amputation.
+    """
+    for pattern, sample in RETIRED_WITHHOLDING:
+        assert pattern.search(sample), (
+            f"the retired shape {pattern.pattern!r} does not match the prose it is supposed "
+            "to retire, so its absence from the doc would prove nothing")
+    flat = _flat(_doc())
+    for pattern, _sample in RETIRED_WITHHOLDING:
+        hit = pattern.search(flat)
+        assert hit is None, (
+            f"the doc still says {hit.group(0)!r}: three November witnesses are committed "
+            "and tracked, so the sentence is false as written and the citation it withheld "
+            "is the point of this node")
+    assert WRONG_POINTER not in _doc(), (
+        f"{WRONG_POINTER} is named somewhere in the doc again: it is the hand-commit item "
+        "for the `.gitignore` retirement comment, and §5's owed-work pointer belongs to "
+        f"{CORRECT_POINTER}")
+    assert CORRECT_POINTER in flat and "the missing fixtures" in flat, (
+        f"the review log no longer records {CORRECT_POINTER} as the fixtures item, so the "
+        "correction reads as an erasure rather than a closure")
+    assert "swapped" in flat and "retrieval_ok" in flat, (
+        "the paragraph stopped stating what the swap keys it now cites actually record")
+
+
+def test_a_withheld_or_misplaced_citation_fails_the_leg_naming_the_report(tmp_path, monkeypatch):
+    """The citation leg can fail, and fails on the pairing rather than on an unreadable doc.
+
+    Four tampered copies of the doc, each run through the same
+    `_assert_swap_citations_made` the green node calls, with the untampered text passing
+    first as the baseline that makes each tamper the only difference:
+
+    - two citations swapped, which is the defect a set-membership check cannot see;
+    - one citation deleted;
+    - all three deleted, the shape of the base paragraph #4478 closed — every figure
+      stated, no report named, the family rail green throughout;
+    - one citation moved outside the paragraph, into the review log at the end of the file,
+      where the family rail accepts it and this leg still refuses it: that is the scoping.
+    """
+    clean = _doc()
+    _assert_swap_citations_made(_swap_event_paragraph())
+
+    def cite(name: str) -> str:
+        return f"`$LLOYD_DATA/_pipeline/reflection/{name}`"
+
+    cites = {name: cite(name) for name in _swap_paragraph_figures()}
+    for name, one in cites.items():
+        assert clean.count(one) == 1, f"{one} is not the paragraph's one citation of {name}"
+
+    def tamper(text: str, label: str):
+        assert text != clean, f"the tamper labelled {label!r} changed nothing"
+        path = tmp_path / "qmd.md"
+        path.write_text(text, encoding="utf-8")
+        monkeypatch.setattr(sys.modules[__name__], "DOC", path)
+        try:
+            _assert_swap_citations_made(_swap_event_paragraph())
+        except AssertionError as exc:
+            return str(exc)
+        raise AssertionError(f"the tamper labelled {label!r} passed the citation leg")
+
+    swapped = (clean.replace(cites[SWAP_NIGHTLY_REPORT], "\x00")
+                    .replace(cites[SWAP_IN_REPORT], cites[SWAP_NIGHTLY_REPORT])
+                    .replace("\x00", cites[SWAP_IN_REPORT]))
+    msg = tamper(swapped, "two citations swapped")
+    assert SWAP_NIGHTLY_REPORT in msg and "attempted: true" in msg, msg
+
+    msg = tamper(clean.replace(cites[NEXT_MORNING_REPORT], ""), "one citation deleted")
+    assert NEXT_MORNING_REPORT in msg, msg
+
+    stripped = clean
+    for one in cites.values():
+        stripped = stripped.replace(one, "")
+    msg = tamper(stripped, "all three citations deleted (the base paragraph)")
+    for name in cites:
+        assert name in msg, f"a paragraph citing nothing failed without naming {name}: {msg}"
+
+    moved = (clean.replace(cites[NEXT_MORNING_REPORT], "")
+                 + "\n- 2026-11-26 — review-log note: the post-swap reading is in "
+                 + cites[NEXT_MORNING_REPORT] + ".\n")
+    msg = tamper(moved, "one citation moved outside §5's paragraph")
+    assert NEXT_MORNING_REPORT in msg, msg
+    assert CITED_REPORT_RE.search(moved), (
+        "the moved copy stopped citing the report anywhere, so this case would prove "
+        "scoping by deletion instead: the citation has to be present in the file and "
+        "absent from the paragraph")
+
+
+def _mention_a_citation_within(text: str, radius: int = 200) -> int:
+    """How many `0.6691` mentions have a report citation within `radius` characters.
+
+    The shape of the instrument this section refuses to be. A leg that reads a fixed
+    distance forward from each mention counts the file, not the paragraph, so its verdict
+    moves with line wrapping and with prose two sections away. Counted here only to
+    demonstrate that difference, never to grade anything.
+    """
+    return sum(1 for m in re.finditer(r"0\.6691", text)
+               if CITED_REPORT_RE.search(text[m.end():m.end() + radius]))
+
+
+def test_a_reflow_outside_the_paragraph_moves_the_citation_leg_nothing(tmp_path, monkeypatch):
+    """#4478 clause 3: the leg is bounded by the paragraph, so prose elsewhere cannot move it.
+
+    `0.6691` is printed three times in `architecture/qmd.md` — §4's decay note, §5's swap
+    sentence, and the 2026-11-21 review-log entry — and only the middle one is the claim
+    this item's citation answers for. `_swap_event_paragraph` therefore bounds the leg by
+    two phrases the paragraph itself carries (`Exactly one unattended swap exists` up to
+    `The two hand runs`) rather than by a character count, because a forward window grades
+    whichever mention happens to sit nearest a citation and fails on prose no round touched.
+
+    Every other node in this section proves its leg by making it fail; this one has to
+    survive a tamper. The tamper parks the 11-21 citation immediately after §4's `0.6691`,
+    which is exactly what a 200-character window would find and attribute to that mention,
+    and rewrites the surrounding §4 prose. §5's own citations are untouched, so: the bounded
+    span comes back byte-identical, its leg still passes, and the window instrument sees two
+    cited mentions where the paragraph has one. A window-shaped leg cannot produce that
+    triple, which is what makes the scoping claim a tested one rather than a docstring.
+    """
+    clean = _doc()
+    anchor = "occupancy 0.6691 with 174.7 MiB dead"
+    assert clean.count(anchor) == 1, (
+        f"the §4 decay note no longer prints {anchor!r} exactly once, so this tamper would "
+        "be editing the wrong sentence and the span comparison below would prove nothing")
+    clean_span = _swap_event_paragraph()
+    assert _mention_a_citation_within(clean_span) == 1, (
+        "the bounded span's own 0.6691 has stopped sitting beside a citation, so the "
+        "comparison below has no baseline: this leg reads the paragraph and the paragraph "
+        "no longer cites for its own figure")
+    whole_before = _mention_a_citation_within(_flat(clean))
+    assert whole_before >= 1, (
+        "no mention in the whole file sits beside a citation, so the count below could rise "
+        "only by the tamper and would be measuring the tamper's own text")
+
+    cite = f"`$LLOYD_DATA/_pipeline/reflection/{NEXT_MORNING_REPORT}`"
+    tampered = clean.replace(
+        anchor, f"occupancy 0.6691 (see {cite}) with 174.7 MiB dead")
+    assert tampered != clean, "the reflow labelled out-of-span changed nothing"
+    assert tampered.count(cite) == 2, (
+        "the tampered file no longer carries the 11-21 citation twice — once outside §5 and "
+        "once inside it — so this case would be proving scoping by deletion")
+
+    path = tmp_path / "qmd.md"
+    path.write_text(tampered, encoding="utf-8")
+    monkeypatch.setattr(sys.modules[__name__], "DOC", path)
+
+    assert _swap_event_paragraph() == clean_span, (
+        "a §4 reflow changed the bounded span, so the leg's bounds are not the paragraph's "
+        "own phrases and the citation leg reads the file instead")
+    _assert_swap_citations_made(_swap_event_paragraph())
+    assert _mention_a_citation_within(_flat(_doc())) == whole_before + 1, (
+        f"the whole-file window instrument counted the same {whole_before} cited mentions "
+        "before and after a reflow two sections away from the paragraph, so it is not the "
+        "shifting instrument this leg declines to be — and the comparison that makes the "
+        "scoping a tested claim has gone")

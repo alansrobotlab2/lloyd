@@ -343,16 +343,20 @@ pins both through the door, `tests/test_qmd_query_shape.py` the sanitizing.
   by a failed verification or a busy embed lock, never by the time of day. It has been
   run for real since the route landed, three times, and the third one is the first
   that was not a person: the nightly of **2026-11-20** reached `scheduled_side_copy_swap`
-  at occupancy 0.3419, in band under the 0.35 ceiling, and its own swap report reads
-  `attempted: true, swapped: true, retrieval_ok: true, retrieval_hits: 5`, with the
+  at occupancy 0.3419, in band under the 0.35 ceiling. The report of that run — the
+  nightly's own, which is the only document carrying the scheduled swap's keys — reads
+  `attempted: true, swapped: true, retrieval_ok: true, retrieval_hits: 5` over a `before`
+  snapshot of occupancy 0.3419 and 1,020 MiB allocated
+  (`$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-11-20.json`), with the
   replaced database left in the `.bak` series as the entry this review's date reads back
-  as the series' newest. Its report names are deliberately not cited here: no witness of
-  those bytes is committed under `tests/fixtures/`, and this document's own rail refuses
-  a dated report with no committed copy (#4477 owes the fixture, and then the citation).
-  It halved the allocation (1020 MiB → 528 MiB) while raising occupancy to 0.7511 on the
-  copy and 0.6691 the next morning — reclaiming dead slots shrinks the denominator
-  faster than the live row count, which is the mechanism, not noise. The two hand runs
-  follow. The
+  as the series' newest. The copy that went in the other way occupied 0.7511 of a 464 MiB
+  vec0 and answered a real vsearch with 5 hits
+  (`$LLOYD_DATA/_pipeline/reflection/qmd-side-copy-rebuild-20261108-2026-11-20T050054.json`).
+  The swap halved the allocation (1020 MiB → 528 MiB), and the next morning the live index
+  read occupancy 0.6691 on that smaller 528 MiB footprint
+  (`$LLOYD_DATA/_pipeline/reflection/qmd-index-maintenance-2026-11-21.json`) — reclaiming
+  dead slots shrinks the denominator faster than the live row count, which is the
+  mechanism, not noise. The two hand runs follow. The
   2026-10-04 invocation built a side copy and verified it but stopped short of
   swapping (`$LLOYD_DATA/_pipeline/reflection/qmd-side-copy-rebuild-20261004-2026-10-04T113501.json`);
   the 2026-10-05 one rebuilt and swapped
@@ -654,11 +658,13 @@ the build rather than the setting is what changed.
   window closes at 05:00). Also corrected: the swap gate was given a lower occupancy bound
   it does not have, two retired `path:N-M` line citations (#3292) that had drifted off their
   functions, §8's contention join was still priced on GPU 0, and the first unattended swap's
-  report is **not** cited because its bytes have no committed witness — the doc's own rail
-  refused the citation mid-edit, which is the point of it. Filed: #4473 (the cleanup unit
+  report was **not** cited at that date because its bytes had no committed witness — the
+  doc's own rail refused the citation mid-edit, which is the point of it. Filed: #4473 (the
+  cleanup unit
   still pins `CUDA_VISIBLE_DEVICES=0`), #4474 (`eval/qmd_contention.py` still says GPU 0),
   #4475 (no lower swap bound, and the first threshold night refutes the 0.35 calibration),
-  #4476 (a test pins the literal `04:00` it parses as hour 4), #4478 (the missing fixtures).
+  #4476 (a test pins the literal `04:00` it parses as hour 4), #4478 (the missing fixtures —
+  since landed, so §5 now cites all three of that night's reports by name).
   Verified unchanged: 15 collections' worth of template/live agreement (`drift_count: 0`),
   `qmd cleanup`'s three effects including `llm_cache` (`runCleanup` → `deleteLLMCache`),
   the 04:45 timer, the GPU-4 pin on the daemon and watcher, and task #81's `preferred_hours: [5]`.
