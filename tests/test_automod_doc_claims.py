@@ -3181,3 +3181,33 @@ def test_section_11_names_the_ruling_and_both_reopen_bounds_beside_the_rounds_ro
     assert "825" not in flat and "24 MB" not in flat, (
         f"the retired figure is back in the row, and a retired number loose in a live "
         f"table is a number a skimming reader takes for current: {flat[:200]}...")
+
+
+def test_the_parked_tag_is_described_as_the_triage_fallback_never_a_hold_on_a_person():
+    """`parked` has meant one thing since 2026-09-27: a `worth: low` draft that is
+    `triage_pool`'s fallback, offered when nothing unparked waits. Three published
+    places still called it a hold until a person removed the tag — the §3.2e bullet,
+    the `PARKED_TAG` comment in `scripts/automod/backlog.py`, and the activity line
+    `scripts/automod/sweep.py` writes on every park — and a nightly skill used that
+    sentence to excuse a live item as unowned. All three are pinned here together,
+    since a reader meets any one of them as the definition.
+    """
+    text = DOC.read_text(encoding="utf-8")
+    at = text.index("- *Parked replaces expiry as the exit.*")
+    bullet = " ".join(text[at:text.index("\n- ", at + 1)].split())
+    assert "A person promotes it by removing the tag" not in bullet, bullet
+    assert "last in `triage_pool`" in bullet and "nothing unparked waits" in bullet, bullet
+    assert "out of `select_cluster`" in bullet, bullet
+    assert "holds nothing for a person" in bullet, bullet
+
+    src = (ROOT / "scripts" / "automod" / "backlog.py").read_text(encoding="utf-8")
+    block = src[src.index("# ── The sweep's rank"):src.index('PARKED_TAG = "parked"')]
+    flat = " ".join(ln.lstrip("# ").strip() for ln in block.splitlines())
+    assert "a person promotes it" not in flat and "out of every pool" not in flat, flat
+    assert "`triage_pool`'s fallback" in flat, flat
+    assert "Never a hold on a person" in flat, flat
+    assert "no dispatch effect on an `up_next` item" in flat, flat
+
+    sweep = (ROOT / "scripts" / "automod" / "sweep.py").read_text(encoding="utf-8")
+    assert "until a person removes the tag" not in sweep
+    assert "parked: the triage pool's fallback" in sweep

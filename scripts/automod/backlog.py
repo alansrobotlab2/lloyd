@@ -5198,12 +5198,12 @@ HELD_TAG = "confirmed-held"
 # autotriage's sweep mode) reads a batch of items in one turn and either
 # retires each one or ranks it: `worth` (how much the system gains) and
 # `size` (what a round would cost). The rank is written to front matter and
-# tagged `swept`; a `low` draft is also tagged `parked`. Parked is the
-# replacement for expiry as the exit for an item nobody asked for: still
-# open, visible, out of every pool, never expired, and a person promotes it
-# by removing the tag. `rank_key` orders the triage pool, the implement pool
-# and the held-confirmation release, so the loop works the best item it
-# knows about rather than the oldest.
+# tagged `swept`; a `worth: low` draft is also tagged `parked`, the exit that
+# replaced expiry for an item nobody asked for: open, visible, never expired,
+# and since 2026-09-27 `triage_pool`'s fallback, offered only when no unparked
+# draft waits. Never a hold on a person, and no dispatch effect on an `up_next`
+# item. `rank_key` orders the triage pool, the implement pool and the
+# held-confirmation release, so the loop works the best item it knows about.
 SWEPT_TAG = "swept"
 PARKED_TAG = "parked"
 WORTH_LEVELS = ("high", "medium", "low")

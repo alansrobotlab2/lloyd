@@ -187,7 +187,7 @@ def test_record_retires_closes_duplicates_ranks_and_parks(isolated):
     assert B.SWEPT_TAG in fm3["tags"] and B.PARKED_TAG not in fm3["tags"]
     fm4 = _fm(_path(isolated, 4))
     assert fm4["worth"] == "low" and B.PARKED_TAG in fm4["tags"] and B.SWEPT_TAG in fm4["tags"]
-    assert "parked" in fm4["activity_log"][-1]
+    assert "parked" in fm4["activity_log"][-1] and "person removes" not in fm4["activity_log"][-1]
     fm5 = _fm(_path(isolated, 5))
     assert fm5["status"] == "up_next" and fm5["worth"] == "low" and B.PARKED_TAG not in fm5["tags"], \
         "a confirmed item is ranked, never parked: the implement order sorts it last instead"

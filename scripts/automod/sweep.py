@@ -166,8 +166,8 @@ def record_sweep_verdicts(batch_id: str, members: list[B.Item], verdicts: dict[i
             tags = (B.SWEPT_TAG,) + ((B.PARKED_TAG,) if park else ())
             B.update_frontmatter(item.path, {"worth": worth or None, "size": size or None},
                                activity=(f"swept ({batch_id}): worth={worth or '?'} "
-                                         f"size={size or '?'}" + (" — parked: out of every pool "
-                                         "until a person removes the tag" if park else "")
+                                         f"size={size or '?'}" + (" — parked: the triage pool's fallback, "
+                                         "offered when no unparked draft waits" if park else "")
                                          + (f" — {evidence}" if evidence else ""))[:700],
                                add_tags=tags)
             ranked[str(i)] = f"{worth or '?'}/{size or '?'}"

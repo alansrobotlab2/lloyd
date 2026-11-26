@@ -1125,10 +1125,10 @@ tail waits in the open. Four moves, each with a switch:
   being still unswept — and `abandoned` the second time (`item_ids` on the
   row, read by `sweep_abandoned_ids`), after which those items are left to
   the ordinary passes.
-- *Parked replaces expiry as the exit.* `parked` is out of `triage_pool`,
-  `select_candidate` and `select_cluster`, counted as its own `draft`
-  bucket in `board_health` and on the dashboard, and in `EXPIRY_EXEMPT_TAGS`
-  with `swept`. A person promotes it by removing the tag. Expiry
+- *Parked replaces expiry as the exit.* `parked` is out of `select_cluster`,
+  last in `triage_pool` (its fallback, so `select_candidate` reaches it when
+  nothing unparked waits), its own `draft` bucket in `board_health` and on the
+  dashboard, and in `EXPIRY_EXEMPT_TAGS` with `swept`. It holds nothing for a person. Expiry
   (`expire_spawns_after_days`) went 7 → 30 the same day and reaches only
   what the sweep has not read.
 - *The rank orders every pool — under the human's priority.* `Item` carries
