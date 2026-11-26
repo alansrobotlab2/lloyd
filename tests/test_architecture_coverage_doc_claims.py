@@ -16674,3 +16674,39 @@ def test_the_browser_input_row_says_what_it_serves_who_may_call_it_and_where_the
     import agent_mcp.aggregator_auth as auth
     assert auth.OPEN_PATHS == frozenset({"/health"}), (
         "OPEN_PATHS moved; the row's 'only entry' claim needs re-checking")
+
+
+# ── #4294: the egress posture names the read the arming ruling is taken from ──
+
+def test_the_egress_posture_names_the_bash_inventory_beside_the_separate_decision(tmp_path):
+    """source: architecture/guard-coverage.md §3, the `agent_mcp/egress.py` row.
+
+    The row says arming `enforce` is a separate decision; #4294 requires it to name,
+    right there, the reporter that decision is read from — and the facts the row
+    quotes about that reporter (its script, its accessor, its 14-day gate and the
+    words its insufficient gate prints) are re-derived here, so the sentence cannot
+    outlive the code.
+    """
+    from agent_mcp import egress
+
+    row = [ln for ln in _guard_coverage_lines() if ln.startswith("| `agent_mcp/egress.py` |")]
+    assert len(row) == 1, row
+    flat = " ".join(row[0].split())
+    anchor = 'Arming `enforce` is a separate decision'
+    reporter = "scripts/maintenance/egress_bash_inventory.py"
+    assert anchor in flat, "the row no longer carries the separate-decision sentence"
+    assert reporter in flat and "egress.bash_inventory()" in flat, (
+        "the posture row does not name the reporter the arming ruling is taken from")
+    gap = flat.index(reporter) - (flat.index(anchor) + len(anchor))
+    assert 0 <= gap <= 80, (
+        f"the reporter is named {gap} characters from the separate-decision sentence; "
+        "it has to sit beside it, as the read that decision is taken from")
+    assert (ROOT / reporter).is_file()
+    assert "#4294" in flat
+
+    assert egress.BASH_INVENTORY_REQUIRED_DAYS == 14
+    assert "span 14 days" in flat
+    line = egress.bash_inventory(db=tmp_path / "absent.db")["sufficiency"]["line"]
+    for quoted in ("coverage INSUFFICIENT", "cannot be made from this inventory"):
+        assert quoted in flat, f"the row no longer quotes {quoted!r}"
+        assert quoted in line, f"the reporter no longer prints {quoted!r}: {line!r}"

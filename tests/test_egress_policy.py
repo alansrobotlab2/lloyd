@@ -1480,3 +1480,127 @@ def test_arming_the_recorder_arms_no_gate_and_publishes_the_flag_once(db, monkey
     assert report["policy"]["enforce"] is False, report["policy"]
     assert "per_via" in report, (
         "the recorder's denominator went missing from the payload that publishes it")
+
+
+# ── #4294: the Bash arm's inventory, the read the `enforce` ruling is taken from ──
+
+BASH_UNLISTED = "pypi.mirror.example"
+BASH_CONFIRMED = "api.github.example"
+
+
+def _inv_bash_row(host: str, *, at: dt.datetime, scope: str = WORKER_SCOPE) -> None:
+    egress.record_bash_destination(destination=f"{host}:443", host=host, scope=scope,
+                                   worker_source="domain-research", at=at)
+
+
+def _inv_tool_row(host: str, *, at: dt.datetime, credentials: str = "",
+              scope: str = WORKER_SCOPE) -> None:
+    egress._record(tool="http_fetch", destination=f"https://{host}/", host=host,
+                   decision=egress.DECISION_ALLOW, scope=scope, session_id="s-1",
+                   worker_source="domain-research", task_id="", reason="", at=at,
+                   credentials=credentials)
+
+
+@pytest.fixture
+def seeded_inventory(db, monkeypatch):
+    """Twenty days of Bash rows over four classes of host, plus the tool rows that
+    make one of them a confirmed destination and carry one credential swap."""
+    policy_on(monkeypatch, enforce=False, allow=[LISTED_HOST])
+    monkeypatch.setattr(egress, "_resolve_addrs", lambda host: ())
+    _inv_bash_row(BASH_UNLISTED, at=NOW - dt.timedelta(days=20))
+    _inv_bash_row(BASH_UNLISTED, at=NOW - dt.timedelta(days=2))
+    _inv_bash_row(LISTED_HOST, at=NOW - dt.timedelta(days=5))
+    _inv_bash_row("127.0.0.1", at=NOW - dt.timedelta(days=4))
+    _inv_bash_row(BASH_CONFIRMED, at=NOW - dt.timedelta(days=1))
+    _inv_tool_row(BASH_CONFIRMED, at=NOW - dt.timedelta(days=3))
+    _inv_tool_row(UNKNOWN_HOST, at=NOW - dt.timedelta(days=1),
+              credentials="github_token:bearer")
+    _inv_tool_row(LISTED_HOST, at=NOW - dt.timedelta(days=1))
+    return db
+
+
+def test_bash_inventory_lists_every_bash_destination_classified_by_the_guards_matcher(
+        seeded_inventory, monkeypatch):
+    """Clause 1: count, last_at, and a coverage class from `allow_entries()` /
+    `host_matches()` — a loopback host is `private` and an allow-listed one `covered`,
+    so neither can be read as exposure."""
+    matched: list[tuple[str, str]] = []
+    real = egress.host_matches
+    monkeypatch.setattr(egress, "host_matches",
+                        lambda entry, host: matched.append((entry, host)) or real(entry, host))
+    report = egress.bash_inventory(30, at=NOW)
+    by_host = {d["host"]: d for d in report["destinations"]}
+    assert set(by_host) == {BASH_UNLISTED, LISTED_HOST, "127.0.0.1", BASH_CONFIRMED}
+    assert by_host[BASH_UNLISTED]["count"] == 2
+    assert by_host[BASH_UNLISTED]["last_at"] == egress._iso(NOW - dt.timedelta(days=2))
+    assert by_host[BASH_UNLISTED]["destination"] == f"{BASH_UNLISTED}:443"
+    assert {h: d["coverage"] for h, d in by_host.items()} == {
+        BASH_UNLISTED: egress.COVERAGE_UNCOVERED, BASH_CONFIRMED: egress.COVERAGE_UNCOVERED,
+        LISTED_HOST: egress.COVERAGE_COVERED, "127.0.0.1": egress.COVERAGE_PRIVATE}
+    assert (LISTED_HOST, LISTED_HOST) in matched, "coverage must go through host_matches"
+    assert "127.0.0.1" not in report["new_exposure"]
+    assert LISTED_HOST not in report["new_exposure"]
+
+
+def test_bash_inventory_separates_bash_only_hosts_from_ones_a_tool_row_confirms(
+        seeded_inventory):
+    """Clause 2: a host the guarded lane also reported is confirmed, not new."""
+    report = egress.bash_inventory(30, at=NOW)
+    assert report["also_tool_hosts"] == sorted([BASH_CONFIRMED, LISTED_HOST])
+    assert report["bash_only_hosts"] == sorted([BASH_UNLISTED, "127.0.0.1"])
+    assert report["new_exposure"] == [BASH_UNLISTED], (
+        "uncovered AND bash-only is the only new exposure; the confirmed host is "
+        "uncovered too but the tool lane already reports it")
+    assert {d["host"]: d["also_tool"] for d in report["destinations"]}[BASH_CONFIRMED]
+
+
+def test_bash_inventory_names_every_credential_bearing_row_beside_its_host(seeded_inventory):
+    """Clause 3: across the window, not per session, and only the swap string."""
+    report = egress.bash_inventory(30, at=NOW)
+    assert report["credential_rows"] == [{
+        "at": egress._iso(NOW - dt.timedelta(days=1)), "via": egress.VIA_TOOL,
+        "tool": "http_fetch", "host": UNKNOWN_HOST, "scope": WORKER_SCOPE,
+        "credentials": "github_token:bearer", "coverage": egress.COVERAGE_UNCOVERED}]
+    from scripts.maintenance.egress_bash_inventory import render
+    text = render(report)
+    assert f"{UNKNOWN_HOST} (uncovered)" in text and "credentials=github_token:bearer" in text
+
+
+def test_bash_inventory_gate_passes_only_on_fourteen_days_of_bash_rows(seeded_inventory):
+    """Clause 4, the sufficient arm: 20 days first-to-last reaches the 14 required."""
+    report = egress.bash_inventory(30, at=NOW)
+    gate = report["sufficiency"]
+    assert gate["required_days"] == 14 and gate["sufficient"] is True
+    assert abs(gate["span_days"] - 19.0) < 0.01, gate
+    # The same rows read through a 10-day window span 9 days: insufficient.
+    narrow = egress.bash_inventory(10, at=NOW)["sufficiency"]
+    assert narrow["sufficient"] is False and "cannot be made" in narrow["line"]
+
+
+def test_an_empty_bash_arm_reports_insufficient_coverage_never_a_clean_inventory(
+        db, monkeypatch, capsys):
+    """Clause 4, today's store: tool rows only, zero `bash_proxy` rows. The report says
+    the decision cannot be made, and its empty sections say they are a gap."""
+    policy_on(monkeypatch, enforce=False, allow=[LISTED_HOST])
+    _inv_tool_row(LISTED_HOST, at=NOW - dt.timedelta(days=1))
+    report = egress.bash_inventory(30, at=NOW)
+    gate = report["sufficiency"]
+    assert report["bash_rows"] == 0 and report["destinations"] == []
+    assert gate["sufficient"] is False and gate["span_days"] == 0
+    assert "INSUFFICIENT" in gate["line"]
+    assert "harness.egress_policy.enforce cannot be made" in gate["line"]
+
+    from scripts.maintenance import egress_bash_inventory as cli
+    assert cli.main(["--db", str(db)]) == 0
+    out = capsys.readouterr().out
+    assert out.splitlines()[0].startswith("coverage INSUFFICIENT"), out
+    assert "not a clean inventory" in out
+    assert "(none)\n" not in out, "an empty section under an insufficient gate must say so"
+
+
+def test_bash_inventory_never_creates_a_database(tmp_path):
+    missing = tmp_path / "absent.db"
+    report = egress.bash_inventory(30, db=missing, at=NOW)
+    assert not missing.exists()
+    assert report["database_present"] is False and "error" in report
+    assert report["sufficiency"]["sufficient"] is False

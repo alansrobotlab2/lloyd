@@ -1448,3 +1448,173 @@ def credential_swaps_for_session(session_id: str, *, db: "str | Path | None" = N
     finally:
         if conn is not None:
             conn.close()
+
+
+# ── #4294: the Bash arm's destination inventory, the read `enforce` is decided from ──
+
+#: How many days of `bash_proxy` rows the step-5 report needs before the arming ruling
+#: on `harness.egress_policy.enforce` may be taken from it (#4293/#4294). Below this the
+#: inventory says it is insufficient rather than presenting what it has as a clean list.
+BASH_INVENTORY_REQUIRED_DAYS = 14.0
+
+#: The window `bash_inventory` reads by default: wide enough that the 14-day span the
+#: gate asks for is reachable inside it, inside the table's own 90-day retention.
+BASH_INVENTORY_DEFAULT_DAYS = 30.0
+
+#: A destination's classification against the shipped policy. `private` is the floor's
+#: answer — the host is this machine or its network, refused whatever the list says,
+#: and never an exposure; `covered` means an allow entry covers it for every scope it
+#: was seen under; `uncovered` is the only class that can be new exposure.
+COVERAGE_PRIVATE = "private"
+COVERAGE_COVERED = "covered"
+COVERAGE_UNCOVERED = "uncovered"
+
+
+def _span_days(first: str, last: str) -> float:
+    try:
+        a = datetime.fromisoformat(str(first).replace("Z", "+00:00"))
+        b = datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+    except ValueError:
+        return 0.0
+    return max(0.0, (b - a).total_seconds() / 86400.0)
+
+
+def bash_inventory(days: float = BASH_INVENTORY_DEFAULT_DAYS, *,
+                   db: "str | Path | None" = None,
+                   at: "datetime | None" = None) -> dict:
+    """Every destination the Bash arm saw in the window, classified for the arming ruling.
+
+    #4294. `network_report()` cannot answer the question `enforce` is decided on: its
+    `per_destination` and `would_deny` are tool-only by `_SINCE_TOOL`, its `per_via`
+    rows carry no host list, and the only credentials reader is per session. This is
+    the one reader that does, and it lives beside the schema for the reason
+    `decision_count_for_host` does — the `WHERE` clauses are the measurement.
+
+    * `destinations`: one entry per (destination, host) seen on a `via='bash_proxy'`
+      row, with `count`, `last_at`, the scopes it was seen under, `coverage`
+      (`private` | `covered` | `uncovered`) and `also_tool`. Coverage is decided by
+      `floor_reason` first and then by `_covers` over `allow_entries()` — whose
+      matcher is `host_matches`, the guard's own — per scope, expiry included, at
+      `at`; a destination is `covered` only when every scope it was seen under is.
+    * `bash_only_hosts` / `also_tool_hosts`: the host split. A host that also sits on
+      a `via='tool'` row in the window is one the guarded lane already reports, so the
+      recorder merely confirms it; `new_exposure` is bash-only AND `uncovered`.
+    * `credential_rows`: every window row, either arm, whose `credentials` field is
+      non-empty — the recorded `name:verb` swap string beside its host, scope and
+      coverage, never a value (the table never holds one).
+    * `sufficiency`: the span in days the window's `bash_proxy` rows cover (first to
+      last), whether it reaches `BASH_INVENTORY_REQUIRED_DAYS`, and a `line` saying so
+      — which, when it does not, says outright that the arming decision cannot be made
+      from this inventory. An empty list under an insufficient gate is a gap in
+      coverage, never a clean inventory.
+
+    Read-only: `PRAGMA query_only`, the same opener `credential_swaps_for_session`
+    uses and for its reason (a `mode=ro` URI cannot create the WAL sidecar). An absent
+    file or table, or any read failure, is reported in `error` with the gate
+    insufficient; this function never creates the database.
+    """
+    now = at or _now()
+    since = _iso(now - timedelta(days=float(days)))
+    path = Path(db) if db is not None else db_path()
+    out: dict = {
+        "window_days": float(days), "since": since, "database": str(path),
+        "database_present": path.is_file(), "bash_rows": 0,
+        "destinations": [], "bash_only_hosts": [], "also_tool_hosts": [],
+        "new_exposure": [], "credential_rows": [],
+        "policy": {"enforce": enforce_on(), "bash_record": bash_record_on(),
+                   "allow_entries": len(allow_entries())},
+    }
+
+    def _gate(span: float, rows: int) -> dict:
+        need = BASH_INVENTORY_REQUIRED_DAYS
+        ok = rows > 0 and span >= need
+        if ok:
+            line = (f"coverage SUFFICIENT: {rows} bash_proxy rows span {span:.2f} days "
+                    f"(>= {need:g} required); the arming ruling may be taken from this "
+                    "inventory")
+        else:
+            line = (f"coverage INSUFFICIENT: {rows} bash_proxy rows span {span:.2f} days "
+                    f"of the {need:g} the step-5 report requires; the arming decision for "
+                    "harness.egress_policy.enforce cannot be made from this inventory, "
+                    "and an empty list below is not a clean inventory")
+        return {"span_days": round(span, 3), "required_days": need,
+                "sufficient": ok, "line": line}
+
+    if not out["database_present"]:
+        out["error"] = f"no database at {path}"
+        out["sufficiency"] = _gate(0.0, 0)
+        return out
+    conn = None
+    try:
+        conn = sqlite3.connect(str(path), isolation_level=None, timeout=30.0)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA query_only=ON")
+        conn.execute("PRAGMA busy_timeout=30000")
+        first_last = conn.execute(
+            f"SELECT COUNT(*) AS n, MIN(at) AS first_at, MAX(at) AS last_at FROM {TABLE}"  # noqa: S608
+            " WHERE at>=? AND via=?", (since, VIA_BASH_PROXY)).fetchone()
+        groups = conn.execute(
+            f"SELECT destination, host, scope, COUNT(*) AS n, MAX(at) AS last_at"  # noqa: S608
+            f" FROM {TABLE} WHERE at>=? AND via=?"
+            " GROUP BY destination, host, scope", (since, VIA_BASH_PROXY)).fetchall()
+        tool_hosts = {str(r[0]) for r in conn.execute(
+            f"SELECT DISTINCT host FROM {TABLE} WHERE {_SINCE_TOOL}",  # noqa: S608
+            (since, VIA_TOOL))}
+        creds = conn.execute(
+            f"SELECT at, via, tool, host, scope, credentials FROM {TABLE}"  # noqa: S608
+            " WHERE at>=? AND credentials IS NOT NULL AND credentials <> ''"
+            " ORDER BY at", (since,)).fetchall()
+    except sqlite3.Error as exc:
+        out["error"] = f"{type(exc).__name__}: {exc}"
+        out["sufficiency"] = _gate(0.0, 0)
+        return out
+    finally:
+        if conn is not None:
+            conn.close()
+
+    entries = allow_entries()
+    floored: dict[str, bool] = {}
+
+    def _coverage(host: str, scopes: "list[str]") -> str:
+        if host not in floored:
+            floored[host] = bool(floor_reason(host))
+        if floored[host]:
+            return COVERAGE_PRIVATE
+        if all(any(_covers(e, host=host, scope=s, at=now) for e in entries) for s in scopes):
+            return COVERAGE_COVERED
+        return COVERAGE_UNCOVERED
+
+    merged: dict[tuple[str, str], dict] = {}
+    for r in groups:
+        key = (str(r["destination"]), str(r["host"]))
+        d = merged.setdefault(key, {"destination": key[0], "host": key[1], "count": 0,
+                                    "last_at": "", "scopes": []})
+        d["count"] += int(r["n"])
+        d["last_at"] = max(d["last_at"], str(r["last_at"] or ""))
+        d["scopes"].append(str(r["scope"] or ""))
+    destinations = []
+    for d in merged.values():
+        d["scopes"] = sorted(set(d["scopes"]))
+        d["coverage"] = _coverage(d["host"], d["scopes"])
+        d["also_tool"] = d["host"] in tool_hosts
+        destinations.append(d)
+    destinations.sort(key=lambda d: (-d["count"], d["destination"]))
+
+    bash_hosts = {d["host"] for d in destinations}
+    out["bash_rows"] = int(first_last["n"] or 0)
+    out["destinations"] = destinations
+    out["bash_only_hosts"] = sorted(bash_hosts - tool_hosts)
+    out["also_tool_hosts"] = sorted(bash_hosts & tool_hosts)
+    out["new_exposure"] = sorted({d["host"] for d in destinations
+                                  if not d["also_tool"]
+                                  and d["coverage"] == COVERAGE_UNCOVERED})
+    out["credential_rows"] = [
+        {"at": str(r["at"]), "via": str(r["via"] or ""), "tool": str(r["tool"]),
+         "host": str(r["host"]), "scope": str(r["scope"] or ""),
+         "credentials": str(r["credentials"]),
+         "coverage": _coverage(str(r["host"]), [str(r["scope"] or "")])}
+        for r in creds]
+    span = (_span_days(first_last["first_at"], first_last["last_at"])
+            if out["bash_rows"] else 0.0)
+    out["sufficiency"] = _gate(span, out["bash_rows"])
+    return out
