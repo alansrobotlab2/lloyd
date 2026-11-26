@@ -2,7 +2,7 @@
 
 One node per acceptance clause. Every one exercises the routine through stand-in trees
 under `tmp_path`, because this machine is a running box: manifesting the real
-`~/lloyd-data` (709,991 files measured 2026-11-03) inside a unit test would take minutes
+`~/lloyd-data` (751,326 files by `snapshot_tree` on 2026-11-25) inside a unit test would take minutes
 and would assert on state another process is rewriting.
 
 Four nodes run the whole pipeline rather than a piece of it: `build_fixture` builds a real
@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -139,7 +140,7 @@ def test_trees_resolve_through_app_paths_and_an_empty_tree_is_a_refusal(tmp_path
 
     #3689 as filed names `~/obsidian/facts`, which exists on this box holding **0 files**
     while the real root — `app.paths.VAULT_FACTS_ROOT`, `app/paths.py:309-311`, redirectable
-    by `LLOYD_FACTS_ROOT` — held 75,562 files on 2026-11-03. Manifesting the literal would have "proved" the
+    by `LLOYD_FACTS_ROOT` — held 84,726 files by `snapshot_tree` on 2026-11-25. Manifesting the literal would have "proved" the
     facts tree clean by reading a directory nothing writes to, which is the exact shape of a
     vacuous pass. Hence the clause's second half: a selected tree resolving to zero files is
     a REFUSAL, not a clean diff.
@@ -540,8 +541,8 @@ def test_build_fixture_is_refused_before_it_builds_anything(capsys, monkeypatch,
 def test_a_change_in_only_the_trial_window_fails_and_one_in_both_passes(tmp_path):
     """Background churn is forgiven; a path that moved ONLY during the trial is FAIL.
 
-    42 files under `~/lloyd-data` rewrote themselves in one 120 s window with no trial
-    running at all (triage measurement, 2026-11-01), so `changed == 0` is unreachable on a
+    48 files under `~/lloyd-data` rewrote themselves in the 120 s control window of the
+    2026-11-09 run (`durable-write-proof-20261109.json`), with no trial call in it, so `changed == 0` is unreachable on a
     live box and a check that can only read RED is not a check. PASS is a SUBSET relation
     against a control window of the SAME length — and equality is structural here, not
     hoped for: `run_proof` pads the trial out to `window_seconds` after the calls, because a
@@ -2673,3 +2674,59 @@ def test_a_production_leg_with_an_unexplained_path_fails_and_names_it(tmp_path):
     assert leak not in result["windows"]["unexplained"][:10], (
         "the premise of the node: a plain first-ten slice would have missed the leak")
     assert result["reason"].count("MEMORY.md") >= 1
+
+
+# ── #4127: the docstring's walk figures are dated, sourced and current ──────
+#
+# The module docstring quoted 2026-11-01/11-03 counts as the present (a 120 s churn
+# count, a facts-root size, a `find` triple and a four-leg walk price). Each is now
+# re-measured or re-sourced, dated, and names the instrument that produced it. The
+# superseded literals are ASSEMBLED here, so the clause's own grep over this file
+# finds nothing either.
+_SUPERSEDED = tuple(a + b for a, b in (
+    ("790,", "516"), ("42 ", "files"), ("709,", "991"), ("710,", "000"), ("75,", "562")))
+
+
+def _doc() -> str:
+    return " ".join((proof.__doc__ or "").split())
+
+
+def _sentence_with(doc: str, needle: str) -> str:
+    hits = [s for s in re.split(r"(?<=[.])\s+(?=[A-Z*`])", doc) if needle in s]
+    assert hits, f"no docstring sentence carries {needle!r}"
+    return hits[0]
+
+
+def test_the_docstring_carries_no_superseded_walk_figure():
+    doc = proof.__doc__ or ""
+    assert len(doc) > 1000, "the module docstring is missing, so no hit would be vacuous"
+    hits = [lit for lit in _SUPERSEDED if lit in doc]
+    assert not hits, f"the module docstring still quotes superseded figures: {hits}"
+    # Positive control: the rule would see a literal that is present.
+    assert any(lit in "measured " + _SUPERSEDED[0] + " paths" for lit in _SUPERSEDED)
+    assert "daily-" + "notes" not in doc, "#1887: the docstring must not name that dir"
+
+
+def test_the_churn_sentence_names_the_record_its_numbers_came_from():
+    s = _sentence_with(_doc(), "counts/control")
+    assert "durable-write-proof-20261109.json" in s, s
+    assert "2026-11-09" in s and "120 s" in s, s
+    assert re.search(r"\b48 files under `~/lloyd-data`", s), s
+    assert re.search(r"\b1 under `~/obsidian/backlog`", s), s
+
+
+def test_the_walk_price_is_dated_and_names_snapshot_tree():
+    s = _sentence_with(_doc(), "walk of all four trees")
+    m = re.search(r"([\d,]+) paths in ([\d.]+) s", s)
+    assert m, f"the walk-price sentence states no path count and time: {s}"
+    assert int(m.group(1).replace(",", "")) > 100_000, s
+    assert "`snapshot_tree`" in s and re.search(r"\b2026-\d\d-\d\d\b", s), s
+
+
+def test_the_data_leg_count_names_its_instrument_and_the_find_gap():
+    doc = _doc()
+    count = _sentence_with(doc, "for the `data` leg")
+    assert "`snapshot_tree`" in count and re.search(r"\b2026-\d\d-\d\d\b", count), count
+    gap = _sentence_with(doc, "find ~/lloyd-data")
+    assert "directories" in gap and "not files the snapshot excludes" in gap, gap
+    assert re.search(r"\b2026-\d\d-\d\d\b", gap), gap

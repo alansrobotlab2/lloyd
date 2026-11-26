@@ -19,7 +19,8 @@ assertion mean something on a machine that is running while the trial runs.
 **The trees come from `app.paths`, never from a literal.** #3689 as filed names
 `~/obsidian/facts`, and that directory exists and holds **0 files**: the real facts root is
 `app.paths.VAULT_FACTS_ROOT` (`app/paths.py:310-311`), which is
-`~/lloyd-data/_pipeline/vault-derived/facts` — 75,562 files on 2026-11-03 — and is
+`~/lloyd-data/_pipeline/vault-derived/facts` — 84,726 files by `snapshot_tree` on
+2026-11-25 — and is
 redirectable by `LLOYD_FACTS_ROOT`. Manifesting the literal would have "proved" the
 facts tree clean by reading a directory nothing writes to. A tree that resolves to zero
 files is therefore a REFUSAL (`TREE_EMPTY`), not a clean diff, for the same reason a
@@ -50,11 +51,11 @@ writer resolves `agent_mcp/session.py:58` `MEMORIES_ROOT = vault_root() / 'lloyd
 instrument was built to catch and was not being watched. `memories_root()` reads that symbol
 instead of re-spelling a path, and `store_dirname()` is the same fact on the copy side.
 
-**A zero-diff verdict is unreachable, so the verdict is ATTRIBUTED.** Measured on
-2026-11-01 over one 120 s window with no trial running at all: 42 files under
-`~/lloyd-data` changed (logs, sessions, event logs, `_pipeline`, the `workers.db` and
-`usage.db` WAL/SHM sidecars) and 2 under `~/obsidian/backlog` — the box writes to itself
-continuously. So `changed == 0` could only ever read RED, and a check that can only fail
+**A zero-diff verdict is unreachable, so the verdict is ATTRIBUTED.** In the 120 s control
+window of the 2026-11-09 run, with no trial call in it (`durable-write-proof-20261109.json`,
+`windows/per_tree/*/counts/control`): 48 files under `~/lloyd-data` changed (logs, sessions,
+event logs, `_pipeline`, the `workers.db` and `usage.db` WAL/SHM sidecars) and 1 under
+`~/obsidian/backlog` — the box writes to itself continuously. So `changed == 0` could only ever read RED, and a check that can only fail
 is not a check. PASS instead requires the trial window's changed-path set to be a SUBSET
 of a same-length control window taken with no trial running: a path that moved during the
 trial and also moves by itself is background, and a path that moved ONLY during the trial
@@ -109,11 +110,14 @@ leg left standing was the one that could not tell a refusal from a write. `denie
 the reader, and `copy_side_witness` still forces FAIL when the copy received nothing.
 
 **The manifest keys on `(size, mtime_ns)` and walks with `lstat`.** `~/lloyd-data` holds
-about 710,000 files — `find` returned 709,991, 709,992 and 710,103 within one session on
-2026-11-03, so the figure is an order of magnitude because the tree is being written under
-it — and hashing that twice per trial is not a check anyone would run. One full
-`(size, mtime_ns)` walk of all four trees measured 790,516 paths in 12 seconds on this box,
-which is a price a trial pays twice. Two consequences are accepted out loud: a rewrite that preserves both size and mtime is
+three quarters of a million files — `snapshot_tree` counted 751,326 for the `data` leg on
+2026-11-25. `find ~/lloyd-data | wc -l` prints more (865,289 that evening; 836,232 against
+`snapshot_tree`'s 721,261 on 2026-11-14) because it also counts the directories
+`snapshot_tree` walks but does not record, not files the snapshot excludes. The figure is an
+order of magnitude because the tree is being written under it, and hashing that twice per
+trial is not a check anyone would run. One full `(size, mtime_ns)` walk of all four trees
+through `snapshot_tree` measured 841,242 paths in 17.8 s warm (24.5 s cold) on 2026-11-25 on
+this box, with gate suites running, which is a price a trial pays twice. Two consequences are accepted out loud: a rewrite that preserves both size and mtime is
 not observed (every writer reachable from these three tools rewrites content and so moves
 `mtime_ns`), and `lstat` means a symlinked directory is recorded as a link and NOT
 traversed — which is the point, since following links out of a tree would let the manifest
