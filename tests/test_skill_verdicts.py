@@ -8177,11 +8177,14 @@ def test_a_reanchored_tombstone_stays_out_of_the_input_lost_tally(tmp_path, mirr
 # nodes all run under the gate's `-m "not live_vault and not fault_injection"`), and a marked
 # node here would be a clause with no enforcement.
 
-# Three lifts, a refusal at the fourth: the ceiling as shipped. Whether 3 is the right number is
-# owed-check's to settle after a fortnight of nightly traffic (#4318 owed). These nodes express
-# themselves through the constants, so widening the default reddens them instead of quietly
-# letting the incident become acceptable.
-_BURST_KEYS = ("Bash/bulk-1", "Bash/bulk-2", "Bash/bulk-3")
+# The ceiling's worth of lifts, and a refusal at the one past it. The fixture is DERIVED from
+# `sv.REANCHOR_BURST_MAX` and so is every count in the nodes below — no node hardcodes how many
+# lifts a burst is, because a fixture that spells the ceiling out is a fixture that goes quietly
+# stale, and the whole reason #4500 could raise 3 to 6 without weakening this section is that these
+# nodes expressed themselves through the constant and reddened when it moved. The measurement that
+# moved it (30 true lifts, largest legitimate window four, the bulk 23) is the comment beside the
+# definition, and `test_the_ceiling_comment_records_the_measurement_that_set_it` pins it.
+_BURST_KEYS = tuple(f"Bash/bulk-{i}" for i in range(1, sv.REANCHOR_BURST_MAX + 1))
 
 
 def _raw_row(store: Path, key: str, first: str, decided: str, *,
@@ -8223,8 +8226,9 @@ def _lift(store: Path, key: str, at: str, *, occurrences: int = 14,
     only means something on the real path — they prove the guard does NOT refuse a legal lift, and
     the row being counted has to be the one the mint produces: `first_decided_at == decided_at ==
     at`, with an earlier row for the key already on disk from `_crossed_key`. `decided_at=at` is
-    what lets a node place three lifts inside one window and two a window apart, so the shipped
-    default is graded against stamps the test can move instead of a clock it cannot wait on.
+    what lets a node place the ceiling's worth of lifts inside one window and two a window apart,
+    so the shipped default is graded against stamps the test can move instead of a clock it cannot
+    wait on.
     """
     return sv.record_verdict(
         store=store, pattern_key=key, verdict=verdict,
@@ -8273,25 +8277,56 @@ def test_the_burst_constants_sit_beside_the_leg_they_bound():
     else is the one a later move or fold loses sight of. The values are asserted on the module,
     never on line numbers — a line cite rots inside days.
 
-    A reader may notice 3 is BELOW the largest legitimate window measured in the live ledger, four
-    (`task-58-nightly-consolidation 2026-11-11`). That tension is real, it is the item's own
-    finding, and it is owed-check's to settle after a fortnight of nightly traffic (#4318 owed);
-    changing the number in a round is that ruling, not this change's.
+    A reader may notice 6 is ABOVE the largest legitimate window the ledger has ever recorded,
+    four (`task-58-nightly-consolidation 2026-11-11`). That is the point, and #4500 is the ruling
+    that made it: the 3 shipped as a placeholder whose own comment said the number was owed-check's
+    to settle, and the ledger then showed 3 refusing that nightly's fourth lift — the only non-bulk
+    refusal in the store. Six keeps the incident refused (17 of its 23 lifts still refused, 20 at 3)
+    with headroom for a nightly that names each key it lifts; the measurement is in the comment
+    beside the definition, pinned by `test_the_ceiling_comment_records_the_measurement_that_set_it`.
     """
     src = Path(sv.__file__).read_text(encoding="utf-8", errors="replace")
     anchor = src.index("REOPEN_AFTER_DAYS = ")
-    for name, value in (("REANCHOR_BURST_MAX", 3),
+    for name, value in (("REANCHOR_BURST_MAX", 6),
                         ("REANCHOR_BURST_WINDOW_MINUTES", 10)):
         assert hasattr(sv, name), f"{name} is not a module constant"
         assert getattr(sv, name) == value, (
-            f"{name} is {getattr(sv, name)!r}, not the {value} this item ships — the default is "
-            "owed-check's to raise after a fortnight of nightly traffic, not a round's to drift")
+            f"{name} is {getattr(sv, name)!r}, not the {value} #4500 ships — the ceiling may be "
+            "re-ruled by owed-check after a fortnight of nightly traffic at this value, which is a "
+            "ruling that arrives with this file's counts moved with it, never a silent drift")
         head = src.index(f"{name} = ")
         assert anchor < head < anchor + 2000, (
             f"{name} is no longer beside REOPEN_AFTER_DAYS, which is where a reader looks for the "
             "number that bounds the leg")
         start = src.rindex("\n\n", 0, head)
         assert "#4318" in src[start:head], f"{name} lost its incident cite"
+
+
+def test_the_ceiling_comment_records_the_measurement_that_set_it():
+    """Clause 5: the comment beside the ceiling carries its numbers, the retirement, the non-split.
+
+    A number moved without its basis written down beside it is a number the next reader re-narrows
+    by reflex, which is how a guard ends up refusing a nightly twice for the same reason. So this
+    node reads the comment block immediately above the definition — the same slice the constants
+    node takes — and requires it to state the measurement (30 true lifts over the 854-row ledger as
+    read 2026-11-22, the largest single-`decided_by` ten-minute window FOUR, the 2026-11-12 bulk
+    23), why 3 was retired (it refused `task-58-nightly-consolidation 2026-11-11`'s fourth lift: a
+    legitimate nightly that named its keys), and why there is no per-`decided_by` split (0 of the 30
+    lift windows mix two names). It also refuses the sentence the change retired, which told a
+    reader the number was still unsettled.
+    """
+    src = Path(sv.__file__).read_text(encoding="utf-8", errors="replace")
+    head = src.index("REANCHOR_BURST_MAX = ")
+    start = src.rindex("\n\n", 0, head)
+    block = " ".join(line.lstrip("#").strip() for line in src[start:head].splitlines())
+    for needle in ("30 true lifts", "854-row", "2026-11-22",
+                   "task-58-nightly-consolidation 2026-11-11", "FOUR", "23 lifts",
+                   "Three is retired", "fourth lift", "legitimate nightly",
+                   "NOT split per `decided_by`", "0 of the 30 lift windows mix two names",
+                   "fortnight"):
+        assert needle in block, f"the ceiling's comment no longer states {needle!r}:\n{block}"
+    assert "whether 3 is the right" not in block, (
+        "the deferral this ruling retired is back beside a value that has been ruled on")
 
 
 def test_a_row_that_lifted_the_leg_is_told_from_a_rows_very_first_verdict(store):
@@ -8428,21 +8463,28 @@ def test_a_run_bookkeeping_row_never_counts_as_a_lift(store):
         "per-run ledger rows counted toward the burst budget")
 
 
-def test_the_fourth_lift_in_a_window_is_refused_before_the_row_is_minted(store):
+def test_the_lift_past_the_ceiling_is_refused_before_the_row_is_minted(store):
     """Clauses 2 and 3: the append past the ceiling raises, writes nothing, and says why.
 
-    Three lifts already sit in the window when the fourth arrives. The refusal has to name
-    everything a reader needs without opening the source: the count found, the window in minutes,
-    the keys that made the burst, #4084, and the alternative — one run report naming them —
-    instead of a loop.
+    The ceiling's worth of lifts already sit in the window — six at the shipped ceiling, and every
+    one of them accepted, which is the half `test_the_largest_accepted_burst_takes_its_own_append`
+    grades — when the one past it arrives. Named for what it refuses rather than for a count: this
+    node refused a 4th lift under the old ceiling of 3 and refuses a 7th now, and the number is not
+    in its name because nothing here should have to be edited when the number moves. The refusal
+    has to name everything a reader needs without opening the source: the count found, the window
+    in minutes, the keys that made the burst, #4084, and the alternative — one run report naming
+    them — instead of a loop.
     """
+    assert len(_BURST_KEYS) == sv.REANCHOR_BURST_MAX, (
+        f"the fixture carries {len(_BURST_KEYS)} keys against a ceiling of "
+        f"{sv.REANCHOR_BURST_MAX}, so this node is no longer the lift PAST the ceiling")
     for i, key in enumerate(_BURST_KEYS):
         _crossed_key(store, key)
         _lift(store, key, _days_ago(0, minutes=i + 1))
     before = len(_lines(store))
 
     with pytest.raises(ValueError) as excinfo:
-        _lift(store, "Bash/fourth", _days_ago(0))
+        _lift(store, "Bash/over-ceiling", _days_ago(0))
 
     text = str(excinfo.value)
     assert f"{len(_BURST_KEYS)} date-leg lifts" in text, (
@@ -8456,42 +8498,47 @@ def test_the_fourth_lift_in_a_window_is_refused_before_the_row_is_minted(store):
     for phrase in ("BY NAME", "one run report", "not looped"):
         assert phrase in text, f"the refusal is missing {phrase!r}: {text}"
     assert len(_lines(store)) == before, "the refused lift appended a row"
-    assert "Bash/fourth" not in " ".join(_lines(store)), (
+    assert "Bash/over-ceiling" not in " ".join(_lines(store)), (
         "the refused key reached the ledger even though its append was refused")
 
 
-def test_the_fourth_cli_reanchor_lift_exits_2_writing_neither_tree(store, mirror):
+def test_the_cli_reanchor_lift_past_the_ceiling_exits_2_writing_neither_tree(store, mirror):
     """Clause 2 across the boundary the incident crossed: a separate subcommand, exit 2, both trees inert.
 
     `reanchor --re-anchor-leg` is NOT `record --re-anchor-leg`: it is its own subcommand whose
     handler maps any `ValueError` from `reanchor_verdict` to exit 2, and it is the lane a runbook
     loops. A bound held only on the in-process call would be beaten by the command a real bulk
     uses, so one process is spawned per lift and the assertions are return codes plus the line
-    count of BOTH files — runtime store and durable mirror.
+    count of BOTH files — runtime store and durable mirror. The loop runs the ceiling's worth of
+    iterations plus one, all of them derived from `sv.REANCHOR_BURST_MAX`, because the accepted
+    iterations are what make the refused one a refusal at the ceiling and not a refusal on
+    iteration four regardless of the number.
     """
-    keys = [f"Bash/loop-{i}" for i in range(4)]
-    # All four keys crossed-leg, and only three lifts made: the fourth has to reach the burst
-    # guard, and a key with no earlier row would be refused by `reanchor`'s own rule instead.
+    ceiling = sv.REANCHOR_BURST_MAX
+    keys = [f"Bash/loop-{i}" for i in range(ceiling + 1)]
+    # Every key crossed-leg, and lifts made for all but the last: that last one has to reach the
+    # burst guard, and a key with no earlier row would be refused by `reanchor`'s own rule instead.
     for key in keys:
         _crossed_key(store, key)
     seeded_mirror = len(_lines(mirror))
-    for key in keys[:3]:
+    for key in keys[:ceiling]:
         assert _lift_cli(store, key) == 0, f"the loop's lift of {key} was refused early"
     before_store, before_mirror = len(_lines(store)), len(_lines(mirror))
-    assert before_mirror == seeded_mirror + 3, (
-        f"control: the mirror went from {seeded_mirror} to {before_mirror} lines over three "
-        "accepted CLI lifts, so 'nothing appended to the mirror' has to mean something")
+    assert before_mirror == seeded_mirror + ceiling, (
+        f"control: the mirror went from {seeded_mirror} to {before_mirror} lines over "
+        f"{ceiling} accepted CLI lifts, so 'nothing appended to the mirror' has to mean something")
 
-    refused = _lift_cli_run(store, keys[3])
-    assert refused.returncode == 2, f"the 4th lift of a loop must exit 2, got {refused.returncode}"
+    refused = _lift_cli_run(store, keys[ceiling])
+    assert refused.returncode == 2, (
+        f"the lift past a {ceiling}-lift loop must exit 2, got {refused.returncode}")
     assert len(_lines(store)) == before_store and len(_lines(mirror)) == before_mirror, (
-        "the loop's 4th iteration appended to a tree")
-    # `keys[3]` is in the store already — its crossed-leg first row, which is itself
+        f"the loop's {ceiling + 1}th iteration appended to a tree")
+    # `keys[ceiling]` is in the store already — its crossed-leg first row, which is itself
     # `first_decided_at == decided_at` — so the signature of a lift cannot identify the refused
     # one here. What is checkable is that the key gained NO row: it must still hold exactly the
     # one line `_crossed_key` minted for it.
     assert [r["pattern_key"] for r in (json.loads(l) for l in _lines(store))
-            if r["pattern_key"] == keys[3]] == [keys[3]], (
+            if r["pattern_key"] == keys[ceiling]] == [keys[ceiling]], (
         "the refused lift landed a second row for the key it refused")
     # The refusal has to be LOUD on the child's stderr: an exit code alone tells a looping run
     # nothing about why, which is how a bulk loop becomes a mystery rather than a message.
@@ -8500,14 +8547,18 @@ def test_the_fourth_cli_reanchor_lift_exits_2_writing_neither_tree(store, mirror
         f"a refused lift that prints nothing is indistinguishable from one that succeeded: {err}")
 
 
-def test_three_lifts_inside_one_window_each_take_their_own_append(store):
-    """Clause 5: the ceiling sits AT the constant, not below it — three lifts, three rows.
+def test_the_largest_accepted_burst_takes_its_own_append(store):
+    """Clause 5: the ceiling sits AT the constant, not below it — one accepted row per lift.
 
-    Stamps 1, 2 and 3 minutes back, so each lift is inside the window of the next and none reaches
-    the ceiling; the fourth is what the node above refuses. This is also the first node to go red
-    if the counter starts counting the append in flight instead of the rows already on disk.
+    One key per lift up to and including the ceiling, stamped one minute apart inside a single
+    window, so every lift is inside the window of the next and none of them reaches the count that
+    refuses: the ceiling's worth of lifts all land, and the node above is what refuses the one past
+    them. Both halves of #4500 are graded here — that raising the number to 6 made a real nightly's
+    FOUR lifts acceptable, and that six is a ceiling rather than an open door, because the next
+    append in the same window is still refused. This is also the first node to go red if the counter
+    starts counting the append in flight instead of the rows already on disk.
     """
-    keys = ["Bash/ok-1", "Bash/ok-2", "Bash/ok-3"]
+    keys = [f"Bash/ok-{i}" for i in range(1, sv.REANCHOR_BURST_MAX + 1)]
     assert len(keys) == sv.REANCHOR_BURST_MAX, (
         "this node is no longer the largest accepted burst, so it stopped pinning clause 5")
     for key in keys:
@@ -8516,12 +8567,12 @@ def test_three_lifts_inside_one_window_each_take_their_own_append(store):
         stamp = _days_ago(0, minutes=i + 1)
         assert _lift(store, key, stamp)["first_decided_at"] == stamp, (
             f"{key}: the accepted lift did not restart its own leg")
-    assert len(_lines(store)) == 6, (
-        "three crossed keys plus three lifts is six rows; anything else means a lift was dropped "
-        "or duplicated")
+    assert len(_lines(store)) == 2 * sv.REANCHOR_BURST_MAX, (
+        f"one crossed key plus one lift per key is {2 * sv.REANCHOR_BURST_MAX} rows; anything else "
+        "means a lift was dropped or duplicated")
     assert sv.reanchor_lift_burst(store)[0] == sv.REANCHOR_BURST_MAX, (
-        "the counter stopped agreeing with the three appends it just allowed: all three are "
-        "inside the window of the next reading, which is exactly why the fourth is refused")
+        "the counter stopped agreeing with the appends it just allowed: every one of them is "
+        "inside the window of the next reading, which is exactly why the next one is refused")
 
 
 def test_two_lifts_a_window_apart_are_two_decisions_not_a_burst(store):
@@ -8541,19 +8592,23 @@ def test_two_lifts_a_window_apart_are_two_decisions_not_a_burst(store):
 def test_a_key_with_no_earlier_row_is_never_refused_as_a_burst(store):
     """Clause 4's refusing half, four times over: fresh keys stay writable and keep their anchor.
 
-    Four first-ever verdicts inside one window — the count that refuses a LIFT — each landing with
-    its own stamp as its anchor (#2746 clause 2: a first row's anchor is its own decision, there
-    being nothing earlier to carry). This is the node that fails loudest if the guard is ever
-    widened from the re-anchor path to `record` in general.
+    One more first-ever verdict than the ceiling, all inside one window — the count that refuses a
+    LIFT, written as a count of keys that are not lifts at all — each landing with its own stamp as
+    its anchor (#2746 clause 2: a first row's anchor is its own decision, there being nothing
+    earlier to carry). Derived from `sv.REANCHOR_BURST_MAX` rather than spelled out, so the node
+    keeps one append MORE than the ceiling refuses whatever the ceiling is: four fresh rows proved
+    nothing at a ceiling of 3 and would prove less at 6. This is the node that fails loudest if the
+    guard is ever widened from the re-anchor path to `record` in general.
     """
-    for i in range(4):
+    n = sv.REANCHOR_BURST_MAX + 1
+    for i in range(n):
         sv.record_verdict(
             store=store, pattern_key=f"Tool/fresh-{i}", verdict="reviewed_no_skill",
             reason="first-ever decision", evidence_cmd=PRINTING_CMD, occurrences=2,
             decided_at=_days_ago(0, minutes=i))
-    assert len(_lines(store)) == 4, "a first-ever verdict was refused by the burst guard"
+    assert len(_lines(store)) == n, "a first-ever verdict was refused by the burst guard"
     latest = sv.load_verdicts(store)
-    for i in range(4):
+    for i in range(n):
         assert latest[f"Tool/fresh-{i}"]["first_decided_at"] == _days_ago(0, minutes=i), (
             f"Tool/fresh-{i} lost its own-stamp anchor, which is what #2746 clause 2 promises the "
             "first row for a key")
@@ -8584,13 +8639,20 @@ def test_a_falsified_re_verdict_never_counts_toward_the_burst(store):
         "the re-confirmation lost the earliest anchor the ledger holds for the key (#2746)")
 
 
-def test_the_shipped_default_refuses_the_measured_bulk_at_the_fourth_lift(store, tmp_path):
-    """"Would this have stopped it", asked of the shipped defaults: 23 lifts, 2 through, the rest refused.
+def test_the_shipped_default_refuses_the_measured_bulk_at_the_ceiling(store, tmp_path):
+    """"Would this have stopped it", asked of the shipped defaults: 23 lifts wanted, the ceiling's
+    worth admitted, every one past it refused.
 
     The 2026-11-12 bulk was 23 true lifts over 23 distinct keys inside two seconds. Rebuilt from
-    those stamps — an earlier row per key, three lifts at the bulk's own stamps, then the fourth —
-    the ledger holds the three stamps it can see and refuses the next lift at the ceiling,
-    appending nothing.
+    those stamps — an earlier row per key, then a lift at each of the bulk's own seconds for as
+    many keys as the ceiling admits, then that bulk's next iteration — the ledger holds the
+    ceiling's worth of stamps it can see and refuses the next lift, appending nothing. Raising the
+    ceiling to 6 does not let the loop through, it only moves where in the loop the refusals start:
+    of the real bulk's 23 lifts, 17 are refused at 6 where 20 were at the retired 3, because a
+    counter that refuses at the ceiling refuses every one of the remaining lifts a loop asks for.
+    The stamp tuple is DERIVED from the ceiling and spans the bulk's measured three seconds, so the
+    replay keeps being the bulk rather than becoming a fixture that has to be edited whenever the
+    number moves.
 
     A copy of the LIVE store is deliberately not used: the incident rows are already in it, so a
     replay there would read the bulk as pre-existing traffic and refuse from lift one. The
@@ -8598,8 +8660,16 @@ def test_the_shipped_default_refuses_the_measured_bulk_at_the_fourth_lift(store,
     why the store is over its 1 MiB witness ceiling and must not be ordered whole (#4318 owed).
     """
     bulk = "autonomy-57 2026-11-12"
-    stamps = [f"2026-11-12T21:08:{s:02d}Z" for s in (40, 41, 42)]
-    keys = [f"Tool/bulk-{i:02d}" for i in range(23)]
+    BULK_LIFTS = 23  # the measured size of the incident, off the ledger — not the ceiling
+    ceiling = sv.REANCHOR_BURST_MAX
+    # The bulk's own three seconds (21:08:40Z..42Z, the stamps its rows carry), spread across as
+    # many lifts as the ceiling admits and monotonic in file order, because the counter reads a
+    # tail and a window ending at the last stamp cannot see a row stamped after it.
+    stamps = [f"2026-11-12T21:08:{40 + (i * 3) // ceiling:02d}Z" for i in range(ceiling)]
+    keys = [f"Tool/bulk-{i:02d}" for i in range(BULK_LIFTS)]
+    assert len(stamps) == ceiling < BULK_LIFTS, (
+        f"a ceiling of {ceiling} against a bulk of {BULK_LIFTS} is no longer a replay in which the "
+        "bulk exceeds the ceiling, which is the only thing this node asks")
     rows = [_raw_row(store, k, "2026-09-01T00:00:00Z", "2026-09-01T00:00:00Z", decided_by="triage")
             for k in keys]
     for i, stamp in enumerate(stamps):
@@ -8615,7 +8685,8 @@ def test_the_shipped_default_refuses_the_measured_bulk_at_the_fourth_lift(store,
     # The bulk's own next iteration: refused, and nothing appended.
     with pytest.raises(ValueError, match="re-anchor burst"):
         _lift(store, keys[len(stamps)], stamps[-1])
-    assert len(_lines(store)) == len(rows), "the bulk's 4th lift appended to the ledger"
+    assert len(_lines(store)) == len(rows), (
+        f"the bulk's lift past its {ceiling}-lift ceiling appended to the ledger")
     assert not [r for r in (json.loads(l) for l in _lines(store))
                 if r["pattern_key"] == keys[len(stamps)]
                 and r.get("first_decided_at") == r["decided_at"] == stamps[-1]], (

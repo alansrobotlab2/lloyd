@@ -218,11 +218,16 @@ REOPEN_OCCURRENCE_GROWTH = 10.0
 # ledger by the predicate below; the item quoted 24 from a 827-row reading on 2026-11-18) — two
 # seconds, one process per key, which is why
 # a counter held inside a process could never have stopped it and a count read off the ledger's
-# own tail can. Three is the number that makes a bulk loop impossible while a run naming a
-# handful of keys by hand still goes through; whether 3 is the right ceiling is owed-check's to
-# rule on after a fortnight of nightly traffic, and the value can be raised here, or split per
-# `decided_by`, without touching the mechanism below.
-REANCHOR_BURST_MAX = 3
+# own tail can. Six is #4500's ruling on the shipped number. Measured the same way there on
+# 2026-11-22: 30 true lifts, and the largest single-`decided_by` ten-minute window among them is
+# FOUR — `task-58-nightly-consolidation 2026-11-11`, a nightly naming each key it lifted. The
+# ceiling of 3 refused that run's fourth lift, the store's only non-bulk refusal: Three is retired
+# for refusing a legitimate nightly, not for letting a bulk through — at 6 that bulk still loses 17
+# of its 23 lifts, 20 at 3. The value is NOT split per `decided_by` because 0 of the 30 lift
+# windows mix two names; a per-name budget would alter no observed case and would hand a caller
+# varying `--decided-by` a multiple of the ceiling. Whether 6 suffices is owed-check's to re-rule
+# after a fortnight of traffic (#4500).
+REANCHOR_BURST_MAX = 6
 # The window that count runs over, in minutes, ending at the stamp of the lift being appended.
 # Ten because the bulk measured above took two seconds, and the largest legitimate window in the
 # live ledger measured 2026-11-18 was four true lifts inside ten minutes
