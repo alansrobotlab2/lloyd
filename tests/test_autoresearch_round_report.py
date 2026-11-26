@@ -671,7 +671,17 @@ def test_a_derived_pass_n_figure_carries_its_reduced_n_into_the_report(tmp_path)
         "eight of eight scored names nothing: the arm's N is already in the column header"
 
 
-def _bench_with_one_safety_task(root) -> None:
+#: The four-task spec `_bench_with_one_safety_task` writes by default: each row is a way a
+#: task can LOOK dangerous, and only the first carries the field the gate counts.
+_ONE_SAFETY_TASK_SPECS = {
+    "bench_010_safety_destructive": {"category": "safety", "safety_critical": True},
+    "bench_024_recall_user_fact_incidental": {"category": "recall"},
+    "bench_011_haiku_quantum": {"category": "safety"},
+    "bench_002_recall_user_fact": {"category": "recall", "safety_critical": False},
+}
+
+
+def _bench_with_one_safety_task(root, specs: dict | None = None) -> None:
     """A four-task bench dir holding exactly one task the corpus's own gate counts.
     `is_high_consequence` reads one frontmatter field — `safety_critical`, with the same
     `bool(task.get(...))` `promote.py`, `judge.py` and `bench_lint.py` use — so the fixture sets
@@ -679,16 +689,15 @@ def _bench_with_one_safety_task(root) -> None:
     is in the `safety` CATEGORY without the field, one carries it spelled `false`, one is an
     ordinary recall task. A count of 1 then proves the field is what was counted, where a count
     of everything that merely looks dangerous would not.
+
+    `specs` replaces that spec dict (#3196), so a bench larger than any arm's record set is
+    written by this same frontmatter writer rather than a second one.
     """
     import yaml
     bench = root / "bench"
     bench.mkdir(parents=True, exist_ok=True)
-    specs = {
-        "bench_010_safety_destructive": {"category": "safety", "safety_critical": True},
-        "bench_024_recall_user_fact_incidental": {"category": "recall"},
-        "bench_011_haiku_quantum": {"category": "safety"},
-        "bench_002_recall_user_fact": {"category": "recall", "safety_critical": False},
-    }
+    if specs is None:
+        specs = _ONE_SAFETY_TASK_SPECS
     for task_id, front in specs.items():
         front = {"id": task_id, "eval": "objective", **front}
         (bench / f"{task_id}.md").write_text(
@@ -752,6 +761,55 @@ def test_the_coverage_section_states_the_safety_critical_population_it_governs(t
     assert "unknown" in degraded[0] and "not zero" in degraded[0], degraded[0]
     assert " 0 of " not in degraded[0], \
         f"an unreadable bench must not print a count that reads as an empty class: {degraded[0]}"
+
+
+def test_the_safety_critical_population_counts_a_corpus_larger_than_the_arm(tmp_path):
+    """#3196 (strengthens #3192 clause 5): the denominator is the CORPUS, whatever the arm covers.
+
+    The node above prints `1 of 4` from a four-file bench and an arm holding records for one
+    task, so a record-counting `_safety_class_line` prints `1 of 1` and is caught only because
+    4 != 1 — an arm covering all four files would make the two counts agree and pass it. Here
+    the bench is 28 files written under `tmp_path` (the four that pin the field semantics plus
+    24 ordinary recall tasks, one `safety_critical: true` in all), and the arm carries records
+    for exactly 4 of the 28 ids. The corpus count is `1 of 28`; a count of the arm's records
+    or of its safety-critical records is `1 of 4` or `1 of 1`, and both are refused.
+    """
+    from scripts.autoresearch import coverage_leg as cov
+
+    specs = dict(_ONE_SAFETY_TASK_SPECS)
+    specs.update({f"bench_{100 + i:03d}_recall_filler": {"category": "recall"}
+                  for i in range(24)})
+    assert len(specs) == 28 and sum(1 for s in specs.values() if s.get("safety_critical")) == 1
+    cfg = make_cfg(tmp_path)
+    _bench_with_one_safety_task(tmp_path, specs)
+    assert len(list((tmp_path / "bench").glob("*.md"))) == 28, "the corpus is the files written"
+
+    covered = list(_ONE_SAFETY_TASK_SPECS)            # 4 of the 28 ids, the safety task among them
+    arm = cov.build_coverage(
+        {task_id: [cov.draw_record(task_id=task_id, draw_index=i, objective_score=1.0,
+                                   status="success", trace={"total_tokens": 120})
+                   for i in range(8)]
+         for task_id in covered},
+        n_requested=8,
+        context=cov.measurement_context(model_alias="primary", served_model="lloyd-nova2-9b",
+                                        quantization=None,
+                                        corpus_tasks=cov.corpus_tasks(cfg), n=8,
+                                        route=cov.ROUTE_DIRECT,
+                                        sampling={"temperature": 0.3}),
+        safety_critical_ids={"bench_010_safety_destructive"})
+    assert {r["task_id"] for r in arm["records"]} == set(covered), \
+        "the arm must cover exactly 4 of the 28 ids, or the two counts cannot disagree"
+    cov.write_coverage(cfg, arm)
+
+    lines = cov.report_lines(cfg, baseline_summary={"per_task": []},
+                             model_alias="primary", route=cov.ROUTE_DIRECT, n=8)
+    stated = [ln for ln in lines if ln.startswith("- `safety_critical` population:")]
+    assert len(stated) == 1, stated
+    line = stated[0]
+    assert "1 of 28" in line, line
+    for record_count in ("1 of 4", "1 of 1"):
+        assert record_count not in line, (
+            f"{record_count!r} is a count over the arm's records, not over the corpus: {line}")
 
 
 # ── #3959: a shrink that drops a writes-scoped card says so, and says both why ────
