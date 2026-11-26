@@ -6227,14 +6227,46 @@ FILELESS_KEY = "seq-2-bash-fs-read"
 NON_TERMINAL_KEY = "Edit/indent_drift"
 BACKED_KEY = "Bash/logic"
 
+#: `ledger_row`'s default stamp, and the clock every `read_back` below runs `check` on. The
+#: stamp is a literal, so the clock it is weighed against has to be one too: read off the
+#: wall, the 60-day leg crossed it at 2026-11-26T08:59:13Z and four nodes here went red on a
+#: date rather than a change (#4590) — the default row started printing `REOPEN Bash/logic`
+#: and stopped counting as a suppression. Pinned to 2026-10-13, the day #2644 measured, which
+#: is 16 days into the row's window; a node that needs an older or younger row says so with
+#: `_ledger_days_ago`, which is measured back from this same instant.
+LEDGER_DECIDED_AT = "2026-09-27T08:59:13+00:00"
+LEDGER_NOW = datetime.fromisoformat(LEDGER_DECIDED_AT) + timedelta(days=16)
 
-def ledger_row(key: str, verdict: str, *, decided_at: str = "2026-09-27T08:59:13+00:00",
+
+def _ledger_days_ago(days: int) -> str:
+    """A `decided_at` stamp `days` days before `LEDGER_NOW`, ledger format."""
+    return (LEDGER_NOW - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _pinned_clock(now: datetime):
+    """`skill_verdicts`' clock held at `now` for the duration of a `with` block.
+
+    Every `datetime.now(...)` the module makes — `reopen_reason`, `date_leg_crossed`, the
+    stamps it writes — reads `sv.datetime`, so swapping that one name is the whole pin; the
+    rest of the class (`fromisoformat`, `strptime`) is inherited unchanged.
+    """
+    from unittest import mock
+
+    class _Pinned(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    return mock.patch.object(sv, "datetime", _Pinned)
+
+
+def ledger_row(key: str, verdict: str, *, decided_at: str = LEDGER_DECIDED_AT,
                evidence_cmd: str = AUDIT_CMDS[AUDIT_SEES],
                source_candidate: str = "") -> dict:
     """One latest-wins row, hand-written for the same reason `write_ledger` is.
 
-    `decided_at` is well inside the 60-day reopen window, so a terminal row here binds
-    unless the test says otherwise — a fixture that hopped the expiry would make the
+    `decided_at` is well inside the 60-day reopen window *at `LEDGER_NOW`*, the clock
+    `read_back` runs on, so a terminal row here binds unless the test says otherwise — a fixture that hopped the expiry would make the
     reported set empty for the wrong reason and every assertion below would pass on it.
     """
     return {"logged_at": decided_at, "decided_at": decided_at,
@@ -6244,12 +6276,14 @@ def ledger_row(key: str, verdict: str, *, decided_at: str = "2026-09-27T08:59:13
             "source": "trajectory-mining", "source_candidate": source_candidate}
 
 
-def read_back(store: Path, candidates: Path, capsys) -> tuple[int, str]:
-    """Run `check`'s own command and hand back its exit code and stdout."""
+def read_back(store: Path, candidates: Path, capsys, *,
+              now: datetime = LEDGER_NOW) -> tuple[int, str]:
+    """Run `check`'s own command on a clock pinned at `now` and hand back its exit code and
+    stdout."""
     import contextlib
     import io
     buf = io.StringIO()
-    with contextlib.redirect_stdout(buf):
+    with _pinned_clock(now), contextlib.redirect_stdout(buf):
         rc = sv.main(["check", "--store", str(store), "--candidates", str(candidates)])
     capsys.readouterr()
     return rc, buf.getvalue()
@@ -6376,7 +6410,7 @@ def test_a_fileless_key_the_sixty_day_expiry_lifts_is_not_reported(tmp_path, cap
     cands = tmp_path / "candidates"
     hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
     store = tmp_path / "verdicts.jsonl"
-    stale = (datetime.now(tz=timezone.utc) - timedelta(days=61)).isoformat()
+    stale = _ledger_days_ago(61)
     write_rows(store, [ledger_row(BACKED_KEY, "rejected_false_positive"),
                         ledger_row(FILELESS_KEY, "reviewed_no_skill", decided_at=stale)])
 
@@ -7039,8 +7073,8 @@ def test_check_names_only_the_fileless_key_whose_date_leg_has_passed(tmp_path, c
         ledger_row(BACKED_KEY, "rejected_false_positive"),
         ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill",
                    source_candidate="candidate-seq-2-bash-other-bash-fs-20260927.md",
-                   decided_at=_days_ago(61)),
-        ledger_row(YOUNG_FILELESS_KEY, "reviewed_no_skill", decided_at=_days_ago(30)),
+                   decided_at=_ledger_days_ago(61)),
+        ledger_row(YOUNG_FILELESS_KEY, "reviewed_no_skill", decided_at=_ledger_days_ago(30)),
     ])
 
     rc, out = read_back(store, cands, capsys)
@@ -7071,7 +7105,7 @@ def test_the_reopened_line_prints_its_zero_form_in_the_same_grammar(tmp_path, ca
     store = tmp_path / "verdicts.jsonl"
     write_rows(store, [ledger_row(BACKED_KEY, "rejected_false_positive"),
                        ledger_row(YOUNG_FILELESS_KEY, "reviewed_no_skill",
-                                  decided_at=_days_ago(30))])
+                                  decided_at=_ledger_days_ago(30))])
 
     rc, out = read_back(store, cands, capsys)
 
@@ -7105,7 +7139,7 @@ def test_the_reopened_line_sits_directly_above_the_totals_and_moves_no_count(tmp
     without_key = tmp_path / "without.jsonl"
     write_rows(with_key, [ledger_row(BACKED_KEY, "rejected_false_positive"),
                           ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill",
-                                     decided_at=_days_ago(61))])
+                                     decided_at=_ledger_days_ago(61))])
     write_rows(without_key, [ledger_row(BACKED_KEY, "rejected_false_positive")])
 
     rc_with, out_with = read_back(with_key, cands, capsys)
@@ -7145,8 +7179,8 @@ def test_a_released_key_with_a_candidate_file_keeps_only_its_per_file_reopen_lin
     hand_candidate(cands, "candidate-read-timeout-20261012.md", EXPIRED_BACKED_KEY, 12)
     store = tmp_path / "verdicts.jsonl"
     write_rows(store, [
-        ledger_row(EXPIRED_BACKED_KEY, "reviewed_no_skill", decided_at=_days_ago(61)),
-        ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill", decided_at=_days_ago(61)),
+        ledger_row(EXPIRED_BACKED_KEY, "reviewed_no_skill", decided_at=_ledger_days_ago(61)),
+        ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill", decided_at=_ledger_days_ago(61)),
     ])
 
     rc, out = read_back(store, cands, capsys)
@@ -7177,20 +7211,22 @@ def test_the_reopened_names_are_reopen_reasons_and_not_a_second_sixty_day_count(
     hand_candidate(cands, "candidate-bash-logic-20261012.md", BACKED_KEY, 1)
     store = tmp_path / "verdicts.jsonl"
     anchored = ledger_row(EXPIRED_FILELESS_KEY, "reviewed_no_skill",
-                          decided_at=_days_ago(5))
-    anchored["first_decided_at"] = _days_ago(90)
+                          decided_at=_ledger_days_ago(5))
+    anchored["first_decided_at"] = _ledger_days_ago(90)
     write_rows(store, [ledger_row(BACKED_KEY, "rejected_false_positive"), anchored])
 
     rc, out = read_back(store, cands, capsys)
 
     row = sv.load_verdicts(store)[EXPIRED_FILELESS_KEY]
-    assert sv.reopen_reason(row, occurrences=0) == f"expired after {sv.REOPEN_AFTER_DAYS}d", (
+    assert sv.reopen_reason(row, occurrences=0, now=LEDGER_NOW) == (
+        f"expired after {sv.REOPEN_AFTER_DAYS}d"), (
         "fixture: the row must be released by the shipped rule, and only by it")
     assert ledger_reopened(out) == [f"{sv.LEDGER_REOPENED_LABEL}: 1 :: {EXPIRED_FILELESS_KEY}"], out
     assert ledger_only(out) == [f"{sv.LEDGER_ONLY_LABEL}: 0 :: none"], out
 
     table = sv.load_verdicts(store)
-    rows = sv.scan_candidates(cands, table=table)
+    with _pinned_clock(LEDGER_NOW):
+        rows = sv.scan_candidates(cands, table=table)
     assert sv.ledger_reopened_terminal_keys(table, rows) == [EXPIRED_FILELESS_KEY]
     assert sv.ledger_only_terminal_keys(table, rows) == []
     binding, released = sv.fileless_terminal_split(table, rows)
