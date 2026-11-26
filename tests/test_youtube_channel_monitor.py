@@ -1514,3 +1514,286 @@ def test_a_refusing_hook_costs_the_commit_but_not_the_bundle(vault_repo, monkeyp
     assert "vault is frozen" in failures[0]["error"]
     assert _git_vault(vault_repo, "log", "--format=%s").splitlines() == ["base"], (
         "a refused commit must leave the vault where it was")
+
+
+# ---------------------------------------------------------------------------
+# #4202: the frame sweep — scene vs uniform × 720/1280/1920, off one download
+# ---------------------------------------------------------------------------
+#
+# Every seam is stubbed: no yt-dlp, no ffprobe, no ffmpeg, no vision engine. What
+# is pinned is the sweep's contract — the arms come from the EXISTING
+# sample_frame_timestamps (real probe vs a no-cut probe) and extract_frames (per
+# `resolution_cap`), the media is fetched once and unlinked, the bundle is read
+# and never written, the module constants are never rebound, and each arm's
+# literals are read off the `onscreen.jsonl` run_onscreen_pass wrote for it.
+
+import re as _re
+
+
+def _bundle_snapshot(bdir):
+    """{relative path: (bytes, mtime_ns)} for every file under a bundle dir."""
+    out = {}
+    for p in sorted(Path(bdir).rglob("*")):
+        if p.is_file():
+            out[str(p.relative_to(bdir))] = (p.read_bytes(), p.stat().st_mtime_ns)
+    return out
+
+
+def _sweep_stubs(monkeypatch, tmp_path, vid, *, cuts=(10.0, 40.0, 70.0),
+                 duration=95.0):
+    """Stub the media seams; returns a dict of what the stubs observed."""
+    seen = {"fetch": 0, "probe": 0, "extract": [], "media": None,
+            "constants_during": []}
+    media = tmp_path / "media" / f"{vid}.mp4"
+
+    def fake_fetch(video_id, url, log=print):
+        seen["fetch"] += 1
+        media.parent.mkdir(parents=True, exist_ok=True)
+        media.write_bytes(b"video-bytes")
+        seen["media"] = str(media)
+        return str(media), None
+
+    def fake_probe(path, threshold=M.SCENE_THRESHOLD, log=print):
+        seen["probe"] += 1
+        return list(cuts)
+
+    def fake_extract(media_path, stamps, frames_dir, cap=M.MAX_FRAMES_PER_VIDEO,
+                     resolution_cap=M.FRAME_RESOLUTION_CAP, log=print):
+        assert Path(media_path).is_file(), "an arm ran after the media was unlinked"
+        seen["extract"].append({"media": media_path, "stamps": list(stamps),
+                                "resolution_cap": resolution_cap,
+                                "frames_dir": frames_dir})
+        seen["constants_during"].append(
+            (M.FRAME_RESOLUTION_CAP, M.FRAME_SAMPLE_SECONDS, M.SCENE_THRESHOLD))
+        Path(frames_dir).mkdir(parents=True, exist_ok=True)
+        rows = []
+        for i, ts in enumerate(list(stamps)[:cap]):
+            Path(frames_dir, f"{i:03d}.jpg").write_bytes(b"\xff\xd8\xff" + bytes([i]))
+            rows.append({"path": f"frames/{i:03d}.jpg", "ts": ts})
+        return rows
+
+    monkeypatch.setattr(M, "MEDIA_DIR", str(tmp_path / "media"))
+    monkeypatch.setattr(M, "fetch_media", fake_fetch)
+    monkeypatch.setattr(M, "probe_duration", lambda p, log=print: duration)
+    monkeypatch.setattr(M, "probe_scene_changes", fake_probe)
+    monkeypatch.setattr(M, "ffmpeg_version", lambda log=print: "7.1.1")
+    monkeypatch.setattr(M, "extract_frames", fake_extract)
+    return seen
+
+
+def _vision_stub(calls):
+    """A vision seam: one named literal, one general-vocab phrase, one per-frame name."""
+    def vision(prompt, urls):
+        indices = [int(i) for i in _re.findall(r"frame (\d+):", prompt)]
+        assert len(indices) == len(urls), "one image per listed frame"
+        calls.append(len(urls))
+        frames = [{"index": i, "literals": [
+            {"text": "KernelBench", "kind": "title"},
+            {"text": "the model is better", "kind": "body"},
+            {"text": f"Slide{i}Net", "kind": "body"}]} for i in indices]
+        return json.dumps({"frames": frames}), {"prompt_tokens": 100 * len(urls)}
+    return vision
+
+
+def test_frame_sweep_runs_six_arms_from_the_existing_sampler_and_extractor(
+        tmp_path, monkeypatch):
+    """Clauses 1-2: scene + uniform, each × 720/1280/1920, through the real helpers.
+
+    Both strategies come out of sample_frame_timestamps: the scene arm with the real
+    probe (here the stubbed probe_scene_changes, called through it), the uniform arm
+    with a probe that reports no cuts. Each cap reaches extract_frames as its
+    `resolution_cap`, and every row records what a later reader needs.
+    """
+    bdir = _frame_bundle("vidS")
+    seen = _sweep_stubs(monkeypatch, tmp_path, "vidS")
+    real_sampler, sampler_calls = M.sample_frame_timestamps, []
+
+    def spy(media_path, **kw):
+        probe = kw["probe"]
+        sampler_calls.append(probe(media_path, kw["threshold"], kw["log"]))
+        return real_sampler(media_path, **kw)
+
+    monkeypatch.setattr(M, "sample_frame_timestamps", spy)
+    res, why = M.run_frame_sweep("vidS", str(tmp_path / "sweep"), onscreen=False,
+                                 log=lambda s: None)
+    assert why is None
+    assert sampler_calls == [[10.0, 40.0, 70.0], []], \
+        "one call with the real probe, one with a probe returning no cuts"
+    arms = {r["arm"]: r for r in res["arms"]}
+    assert sorted(arms) == ["scene-1280", "scene-1920", "scene-720",
+                            "uniform-1280", "uniform-1920", "uniform-720"]
+    assert sorted(c["resolution_cap"] for c in seen["extract"]) == \
+        [720, 720, 1280, 1280, 1920, 1920]
+    for name, row in arms.items():
+        for key in ("video_id", "strategy", "resolution_cap_px", "frames",
+                    "sampling", "ffmpeg_version"):
+            assert key in row, f"{name} has no {key}"
+        assert row["video_id"] == "vidS" and row["ffmpeg_version"] == "7.1.1"
+    assert arms["scene-720"]["sampling"] == "scene-changes"
+    assert arms["scene-720"]["frames"] == 3
+    assert arms["uniform-1920"]["sampling"] == "uniform-30s"
+    assert arms["uniform-1920"]["frames"] == 4, "0/30/60/90 over 95 s"
+    assert res["scene_arms_skipped"] is None
+
+
+def test_frame_sweep_with_fewer_than_two_cuts_runs_only_the_uniform_arms(
+        tmp_path, monkeypatch):
+    """One cut is the uniform regime by sample_frame_timestamps' own rule: no duplicate arms."""
+    _frame_bundle("vidU")
+    _sweep_stubs(monkeypatch, tmp_path, "vidU", cuts=(12.0,))
+    res, why = M.run_frame_sweep("vidU", str(tmp_path / "sweep"), onscreen=False,
+                                 log=lambda s: None)
+    assert why is None
+    assert [r["arm"] for r in res["arms"]] == ["uniform-720", "uniform-1280",
+                                               "uniform-1920"]
+    assert "1 cut(s)" in res["scene_arms_skipped"]
+
+
+def test_frame_sweep_downloads_once_unlinks_and_never_writes_the_bundle(
+        tmp_path, monkeypatch):
+    """Clause 3: one fetch_media, the same file for all six arms, gone afterwards.
+
+    The bundle dir is byte- and mtime-identical, and every file the sweep made is
+    under the scratch root — none in the bundle tree.
+    """
+    bdir = _frame_bundle("vidM")
+    before = _bundle_snapshot(bdir)
+    seen = _sweep_stubs(monkeypatch, tmp_path, "vidM")
+    out = tmp_path / "sweep"
+    calls = []
+    res, why = M.run_frame_sweep("vidM", str(out), vision=_vision_stub(calls),
+                                 log=lambda s: None)
+    assert why is None and len(res["arms"]) == 6
+    assert seen["fetch"] == 1, "media downloaded once for six arms"
+    assert {c["media"] for c in seen["extract"]} == {seen["media"]}, \
+        "every arm read the one downloaded file"
+    assert not Path(seen["media"]).exists(), "the media is unlinked at the end"
+    assert _bundle_snapshot(bdir) == before, "the bundle dir was written"
+    assert not (bdir / "frames").exists() and not (bdir / "onscreen.jsonl").exists()
+    for c in seen["extract"]:
+        assert Path(c["frames_dir"]).is_relative_to(out)
+    for row in res["arms"]:
+        assert Path(row["arm_dir"]).is_relative_to(out)
+        assert (Path(row["arm_dir"]) / "frames.jsonl").is_file()
+        assert (Path(row["arm_dir"]) / "onscreen.jsonl").is_file()
+
+
+def test_frame_sweep_unlinks_the_media_even_when_an_arm_raises(tmp_path, monkeypatch):
+    """The unlink is in a finally: a crashed arm does not leave 60 MB in MEDIA_DIR."""
+    _frame_bundle("vidX")
+    seen = _sweep_stubs(monkeypatch, tmp_path, "vidX")
+    monkeypatch.setattr(M, "extract_frames",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    with pytest.raises(RuntimeError):
+        M.run_frame_sweep("vidX", str(tmp_path / "sweep"), onscreen=False,
+                          log=lambda s: None)
+    assert seen["fetch"] == 1 and not Path(seen["media"]).exists()
+
+
+def test_frame_sweep_passes_caps_and_cadence_and_leaves_the_constants_alone(
+        tmp_path, monkeypatch):
+    """Clause 4: arguments, not rebinding — checked during every arm and after.
+
+    A sweep at a 20 s cadence gets a 20 s grid while FRAME_SAMPLE_SECONDS reads 30
+    the whole time; FRAME_RESOLUTION_CAP reads 1280 while extract_frames is handed
+    720 and 1920.
+    """
+    _frame_bundle("vidK")
+    seen = _sweep_stubs(monkeypatch, tmp_path, "vidK")
+    module_values = (M.FRAME_RESOLUTION_CAP, M.FRAME_SAMPLE_SECONDS, M.SCENE_THRESHOLD)
+    assert module_values == (1280, 30.0, 0.30)
+    res, why = M.run_frame_sweep("vidK", str(tmp_path / "sweep"), sample_seconds=20.0,
+                                 resolution_caps=(720, 1920), onscreen=False,
+                                 log=lambda s: None)
+    assert why is None
+    assert set(seen["constants_during"]) == {module_values}, \
+        "a module constant was rebound while an arm ran"
+    assert (M.FRAME_RESOLUTION_CAP, M.FRAME_SAMPLE_SECONDS, M.SCENE_THRESHOLD) == \
+        module_values
+    uniform = [c for c in seen["extract"] if c["stamps"][:2] == [0.0, 20.0]]
+    assert len(uniform) == 2 and uniform[0]["stamps"] == [0.0, 20.0, 40.0, 60.0, 80.0]
+    assert sorted(c["resolution_cap"] for c in seen["extract"]) == [720, 720, 1920, 1920]
+    assert {r["sampling"] for r in res["arms"] if r["strategy"] == "uniform"} == \
+        {"uniform-20s"}
+
+
+def test_frame_sweep_artifact_reads_literals_from_the_legs_own_sidecar(
+        tmp_path, monkeypatch):
+    """Clause 5: per video per arm, frames emitted + the literals the leg recovered.
+
+    The vision seam answers three literals per frame; the leg's filter drops the
+    general-vocabulary one. The artifact's count is the sidecar's count — so it
+    is the leg's filtered output, not a second extraction — and the dropped phrase
+    appears nowhere in it.
+    """
+    _frame_bundle("vidL", title="Dense Deck Talk")
+    _sweep_stubs(monkeypatch, tmp_path, "vidL")
+    out = tmp_path / "sweep"
+    calls = []
+    res, why = M.run_frame_sweep("vidL", str(out), vision=_vision_stub(calls),
+                                 log=lambda s: None)
+    assert why is None
+    for row in res["arms"]:
+        side = [json.loads(l) for l in
+                (Path(row["arm_dir"]) / "onscreen.jsonl").read_text().splitlines()]
+        assert row["literals"] == sum(len(s["literals"]) for s in side)
+        assert row["literals"] == 2 * row["frames"], "KernelBench + SlideNNet per frame"
+        assert "the model is better" not in row["literal_texts"]
+        assert row["vision_requests"] == 1
+    assert calls == [3, 3, 3, 4, 4, 4], "one vision request per arm, one image per frame"
+    md = Path(M.write_sweep_artifact([res], str(out), day="2026-11-26"))
+    assert md.name == "2026-11-26-youtube-frame-sweep.md"
+    text = md.read_text()
+    assert "| vidL | scene-720 | scene-changes | 720 | 3 | 6 | 1 | 7.1.1 |" in text
+    assert "| vidL | uniform-1920 | uniform-30s | 1920 | 4 | 8 | 1 | 7.1.1 |" in text
+    assert "the model is better" not in text and "Slide0Net" in text
+    rows = [json.loads(l) for l in
+            md.with_suffix(".jsonl").read_text().splitlines()]
+    assert len(rows) == 6 and {r["video_id"] for r in rows} == {"vidL"}
+    again = Path(M.write_sweep_artifact([res], str(out), day="2026-11-26"))
+    assert again.name == "2026-11-26-youtube-frame-sweep-2.md", \
+        "a second sweep the same day does not overwrite the first"
+
+
+def test_frame_sweep_refuses_a_scratch_root_inside_the_bundle_tree(tmp_path,
+                                                                  monkeypatch):
+    """The scratch root is outside the bundles: refused before anything is fetched."""
+    bdir = _frame_bundle("vidR")
+    seen = _sweep_stubs(monkeypatch, tmp_path, "vidR")
+    res, why = M.run_frame_sweep("vidR", str(bdir / "sweep"), log=lambda s: None)
+    assert res is None and "inside the bundle tree" in why
+    assert seen["fetch"] == 0 and not (bdir / "sweep").exists()
+
+
+def test_frames_sweep_cli_exits_zero_writes_the_artifact_and_leaves_seen_json(
+        tmp_path, monkeypatch):
+    """`--frames-sweep=a,b`: one fetchable deck, one with no media — exit 0, one artifact.
+
+    The no-media video is a row saying why, not a failed command, and seen.json is
+    byte-identical before and after.
+    """
+    M.configure(M.DEFAULT_CHANNEL)
+    bdir = _frame_bundle("vidC1")
+    _frame_bundle("vidC2")
+    M.save_state(_state(vidC1={"status": "completed", "title": "A Talk"}))
+    seen_before = Path(M.STATE_FILE).read_bytes()
+    seen = _sweep_stubs(monkeypatch, tmp_path, "vidC1")
+    real_fetch = M.fetch_media
+    monkeypatch.setattr(M, "fetch_media", lambda vid, url, log=print: (
+        real_fetch(vid, url, log) if vid == "vidC1" else ("", "yt-dlp exited 1: gone")))
+    before = _bundle_snapshot(bdir)
+    out = tmp_path / "sweep"
+    stdout, exc = _run_frames_cli(["--frames-sweep=vidC1,vidC2", f"--sweep-out={out}",
+                                   "--frames-only", "--json"])
+    assert exc is None, f"the sweep exited nonzero: {exc} / {stdout}"
+    assert Path(M.STATE_FILE).read_bytes() == seen_before
+    assert _bundle_snapshot(bdir) == before
+    payload = json.loads([l for l in stdout.splitlines()
+                          if l.startswith(M.JSON_MARK)][0][len(M.JSON_MARK):])
+    assert payload["seen_json_unchanged"] is True
+    art = Path(payload["artifact"])
+    assert art.parent == out and art.is_file()
+    text = art.read_text()
+    assert "media unavailable: yt-dlp exited 1: gone" in text
+    assert text.count("| vidC1 |") == 6
+    assert seen["fetch"] == 1

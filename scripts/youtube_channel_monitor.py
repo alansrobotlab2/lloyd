@@ -1780,7 +1780,7 @@ def probe_scene_changes(media_path, threshold=SCENE_THRESHOLD, log=print):
 
 def sample_frame_timestamps(media_path, duration=0.0, cap=MAX_FRAMES_PER_VIDEO,
                             threshold=SCENE_THRESHOLD, probe=probe_scene_changes,
-                            log=print):
+                            log=print, sample_seconds=None):
     """Where to look: one timestamp per scene change, else a uniform 30-second grid.
 
     Two regimes, from the shape this vault's research note settled
@@ -1801,7 +1801,9 @@ def sample_frame_timestamps(media_path, duration=0.0, cap=MAX_FRAMES_PER_VIDEO,
     token budget, not a preference — see MAX_FRAMES_PER_VIDEO.
 
     `probe` is the scene probe, injectable so a test can hand this function two
-    cuts, one cut or none without a media file on disk.
+    cuts, one cut or none without a media file on disk. `sample_seconds` is the
+    grid's cadence, FRAME_SAMPLE_SECONDS when not given: the `--frames-sweep`
+    driver passes its cadence here rather than rebinding the module constant.
     """
     changes = [t for t in (probe(media_path, threshold, log) or [])
                if isinstance(t, (int, float)) and not isinstance(t, bool) and t >= 0]
@@ -1821,10 +1823,11 @@ def sample_frame_timestamps(media_path, duration=0.0, cap=MAX_FRAMES_PER_VIDEO,
         log(f"  {len(changes)} scene change(s) and no known duration: sampling "
             f"frame 0 only")
         return [0.0][:cap]
-    count = max(1, min(cap, int(duration // FRAME_SAMPLE_SECONDS) + 1))
-    stamps = [round(n * FRAME_SAMPLE_SECONDS, 3) for n in range(count)]
+    step = FRAME_SAMPLE_SECONDS if sample_seconds is None else float(sample_seconds)
+    count = max(1, min(cap, int(duration // step) + 1))
+    stamps = [round(n * step, 3) for n in range(count)]
     log(f"  {len(changes)} scene change(s) (< 2), uniform "
-        f"{FRAME_SAMPLE_SECONDS:g}s grid over {duration:g}s → {len(stamps)} "
+        f"{step:g}s grid over {duration:g}s → {len(stamps)} "
         f"frame(s) (cap {cap})")
     return stamps
 
@@ -2077,6 +2080,244 @@ def list_bundles():
         return []
     return sorted(name for name in os.listdir(root)
                   if os.path.isfile(os.path.join(root, name, "meta.json")))
+
+
+# ── Frame sweep: sampling strategy × resolution cap, off one download (#4202) ─
+#
+# `--frames=<id>` is one arm per run and it is destructive by design: it writes
+# the bundle's frames/ and meta.json and unlinks the media, so comparing the
+# scene-change strategy with the uniform grid, or one resolution cap with
+# another, would mean a re-download and a bundle rewrite per arm, each clobbering
+# the last. The sweep is the read-only driver for that comparison: one download,
+# every arm into its own directory under a scratch root OUTSIDE the bundle tree,
+# and the arm's literals read back from the `onscreen.jsonl` the existing leg
+# writes into that arm directory. Nothing here re-implements sampling, scaling or
+# literal extraction — it calls sample_frame_timestamps (with the real scene
+# probe, and with a probe that reports no cuts), extract_frames (with each
+# `resolution_cap`) and run_onscreen_pass (through its `vision` seam), and it
+# passes caps and cadence as arguments: FRAME_RESOLUTION_CAP,
+# FRAME_SAMPLE_SECONDS and SCENE_THRESHOLD are never rebound.
+#
+# Offline and inert like the rest of the leg: only `--frames-sweep` reaches it.
+SWEEP_RESOLUTION_CAPS = (720, 1280, 1920)
+SWEEP_STRATEGIES = ("scene", "uniform")
+SWEEP_ARTIFACT_STEM = "youtube-frame-sweep"
+
+
+def _probe_no_cuts(media_path, threshold, log):
+    """The uniform arm's probe: no scene change, so the grid is what comes back."""
+    return []
+
+
+def frame_sweep_root():
+    """The default scratch root: `<data root>/eval/youtube-frame-sweep`, never a bundle."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    from app.paths import DATA_ROOT
+    return str(DATA_ROOT / "eval" / SWEEP_ARTIFACT_STEM)
+
+
+def _sidecar_literals(path):
+    """(count, texts) from an arm's `onscreen.jsonl` as the leg wrote it.
+
+    A reader, not an extractor: the rows are the leg's filtered output
+    (`{"ts", "frame", "frame_index", "literals": [{"text", "kind"}], "dropped"}`),
+    so the count is the leg's count. (None, []) when the leg wrote no sidecar.
+    """
+    if not os.path.isfile(path):
+        return None, []
+    texts = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            for lit in row.get("literals") or []:
+                if isinstance(lit, dict) and lit.get("text"):
+                    texts.append(str(lit["text"]))
+    return len(texts), texts
+
+
+def run_frame_sweep(video_id, out_root, *, resolution_caps=SWEEP_RESOLUTION_CAPS,
+                    sample_seconds=30.0, threshold=SCENE_THRESHOLD,
+                    frame_cap=MAX_FRAMES_PER_VIDEO, onscreen=True, vision=None,
+                    log=print):
+    """Every strategy × cap arm for one bundle. Returns (result, None) or (None, reason).
+
+    The bundle is read, never written: meta.json is opened for its url and title
+    only, and every frame, manifest and sidecar goes to `<out_root>/<id>/<arm>/`,
+    where `<arm>` is `scene-<cap>` or `uniform-<cap>`. The media is fetched once,
+    reused for every arm and unlinked at the end (MEDIA_KEEP). A probe that finds
+    fewer than 2 cuts makes the scene strategy the uniform grid by
+    sample_frame_timestamps' own rule, so those arms are skipped and the reason
+    recorded rather than run as duplicates. `vision` is run_onscreen_pass's
+    request seam (None = its default, the live vision route).
+    """
+    bdir = bundle_dir(video_id)
+    meta_path = os.path.join(bdir, "meta.json")
+    if not os.path.isfile(meta_path):
+        return None, "no meta.json in the bundle (run --fetch first)"
+    try:
+        with open(meta_path) as fh:
+            meta = json.load(fh)
+    except (OSError, json.JSONDecodeError) as exc:
+        return None, f"meta.json unreadable: {type(exc).__name__}"
+    out_root = os.path.abspath(out_root)
+    bundles_root = os.path.abspath(os.path.join(STATE_DIR, "bundles"))
+    if os.path.commonpath([out_root, bundles_root]) == bundles_root:
+        return None, f"scratch root {out_root} is inside the bundle tree"
+    vdir = os.path.join(out_root, video_id)
+    if os.path.exists(vdir):
+        # Refused, not cleared: a sweep never deletes a directory it did not
+        # create in this call, and stale arm frames would mix with fresh ones.
+        return None, f"{vdir} already exists: give --sweep-out a fresh directory"
+    url = meta.get("url") or f"https://www.youtube.com/watch?v={video_id}"
+    media_path, reason = fetch_media(video_id, url, log=log)
+    if not media_path:
+        return None, f"media unavailable: {reason}"
+    try:
+        duration = probe_duration(media_path, log=log)
+        ffmpeg_ver = ffmpeg_version(log=log)
+        reported = []
+
+        def real_probe(path, thr, lg):
+            got = probe_scene_changes(path, thr, lg)
+            reported.extend(got or [])
+            return got
+
+        plans, scene_skipped = [], None
+        for strategy in SWEEP_STRATEGIES:
+            probe = real_probe if strategy == "scene" else _probe_no_cuts
+            stamps = sample_frame_timestamps(
+                media_path, duration=duration, cap=frame_cap, threshold=threshold,
+                probe=probe, log=log, sample_seconds=sample_seconds)
+            if strategy == "scene":
+                cuts = [t for t in reported if isinstance(t, (int, float))
+                        and not isinstance(t, bool) and t >= 0]
+                if len(cuts) < 2:
+                    scene_skipped = (
+                        f"scene probe found {len(cuts)} cut(s) at threshold "
+                        f"{threshold}: fewer than 2 is the uniform grid, so the "
+                        f"scene arms would duplicate the uniform ones")
+                    log(f"  {scene_skipped}")
+                    continue
+                plans.append((strategy, "scene-changes", stamps))
+            else:
+                plans.append((strategy, f"uniform-{float(sample_seconds):g}s", stamps))
+        arms = []
+        for strategy, sampling, stamps in plans:
+            for rcap in resolution_caps:
+                arm = f"{strategy}-{int(rcap)}"
+                adir = os.path.join(vdir, arm)
+                os.makedirs(adir)
+                frows = extract_frames(media_path, stamps,
+                                       os.path.join(adir, FRAME_DIRNAME),
+                                       cap=frame_cap, resolution_cap=int(rcap),
+                                       log=log)
+                write_frame_manifest(adir, frows)
+                row = {"video_id": video_id, "title": meta.get("title", ""),
+                       "arm": arm, "strategy": strategy, "sampling": sampling,
+                       "resolution_cap_px": int(rcap), "timestamps": len(stamps),
+                       "frames": len(frows), "ffmpeg_version": ffmpeg_ver,
+                       "sample_seconds": float(sample_seconds),
+                       "scene_threshold": threshold, "duration_s": duration,
+                       "arm_dir": adir, "literals": None, "literal_texts": [],
+                       "vision_requests": None, "vision_prompt_tokens": None,
+                       "onscreen_reason": None}
+                if not onscreen:
+                    row["onscreen_reason"] = "--frames-only: on-screen leg not requested"
+                elif not frows:
+                    row["onscreen_reason"] = "no frame extracted for this arm"
+                else:
+                    from workers.sources.youtube_digest import (
+                        ONSCREEN_FILENAME, run_onscreen_pass)
+                    seam = {} if vision is None else {"vision": vision}
+                    summary, why = run_onscreen_pass(
+                        {"bundle_dir": adir, "video_id": video_id}, log=log, **seam)
+                    row["onscreen_reason"] = why
+                    if summary:
+                        row["vision_requests"] = summary["requests"]
+                        row["vision_prompt_tokens"] = summary["prompt_tokens"]
+                    row["literals"], row["literal_texts"] = _sidecar_literals(
+                        os.path.join(adir, ONSCREEN_FILENAME))
+                log(f"  arm {arm}: {row['frames']} frame(s), "
+                    f"{row['literals']} literal(s)")
+                arms.append(row)
+        return {"video_id": video_id, "title": meta.get("title", ""),
+                "duration_s": duration, "ffmpeg_version": ffmpeg_ver,
+                "scene_arms_skipped": scene_skipped, "arms": arms}, None
+    finally:
+        if not MEDIA_KEEP:
+            try:
+                os.unlink(media_path)
+            except OSError:
+                pass
+
+
+def write_sweep_artifact(results, out_root, *, day=None, params=None):
+    """The dated sweep artifact: `<out_root>/<YYYY-MM-DD>-youtube-frame-sweep.{md,jsonl}`.
+
+    One row per video per arm, in both files; never averaged. A second sweep on
+    the same day into the same root takes the next free `-2`, `-3`, … stem rather
+    than overwriting the first. Returns the markdown path.
+    """
+    day = day or datetime.now().astimezone().strftime("%Y-%m-%d")
+    os.makedirs(out_root, exist_ok=True)
+    stem, n = f"{day}-{SWEEP_ARTIFACT_STEM}", 1
+    while (os.path.exists(os.path.join(out_root, stem + ".md"))
+           or os.path.exists(os.path.join(out_root, stem + ".jsonl"))):
+        n += 1
+        stem = f"{day}-{SWEEP_ARTIFACT_STEM}-{n}"
+    md_path = os.path.join(out_root, stem + ".md")
+    rows = [arm for res in results if res.get("arms") for arm in res["arms"]]
+    with open(os.path.join(out_root, stem + ".jsonl"), "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+    lines = [f"# YouTube frame sweep — {day}", "",
+             "Sampling strategy × resolution cap, one download per video "
+             "(`youtube_channel_monitor.py --frames-sweep`, #4202). One row per "
+             "video per arm; literals are the count in that arm's `onscreen.jsonl`.",
+             ""]
+    for key, value in (params or {}).items():
+        lines.append(f"- {key}: `{value}`")
+    lines += ["", "| video_id | arm | sampling | cap px | frames | literals | "
+              "vision requests | ffmpeg |", "|---|---|---|---|---|---|---|---|"]
+    for row in rows:
+        lit = "—" if row["literals"] is None else row["literals"]
+        req = "—" if row["vision_requests"] is None else row["vision_requests"]
+        lines.append(f"| {row['video_id']} | {row['arm']} | {row['sampling']} | "
+                     f"{row['resolution_cap_px']} | {row['frames']} | {lit} | "
+                     f"{req} | {row['ffmpeg_version']} |")
+    lines.append("")
+    for res in results:
+        lines.append(f"## {res.get('video_id')} — {res.get('title') or ''}".rstrip())
+        lines.append("")
+        if res.get("reason"):
+            lines += [f"- not swept: {res['reason']}", ""]
+            continue
+        if res.get("scene_arms_skipped"):
+            lines.append(f"- scene arms skipped: {res['scene_arms_skipped']}")
+        for row in res.get("arms") or []:
+            texts = "; ".join(row["literal_texts"]) or "(none)"
+            note = f" ({row['onscreen_reason']})" if row["onscreen_reason"] else ""
+            lines.append(f"- {row['arm']}{note}: {texts}")
+        lines.append("")
+    with open(md_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines))
+    return md_path
+
+
+def _state_file_bytes():
+    """seen.json's bytes, or None; the before/after witness for an offline pass."""
+    if not os.path.isfile(STATE_FILE):
+        return None
+    with open(STATE_FILE, "rb") as fh:
+        return fh.read()
 
 
 # ── Papers ─────────────────────────────────────────────────────────────
@@ -3134,6 +3375,19 @@ def main():
     keyframes.add_argument("--frames-only", action="store_true",
                            help="With --frames: skip the on-screen-text (vision) "
                                 "leg and keep only the sampled frames")
+    keyframes.add_argument("--frames-sweep", metavar="VIDEO_ID[,VIDEO_ID...]",
+                           help="Scene vs uniform sampling x resolution caps for "
+                                "bundles on disk, one download each, every arm into "
+                                "a scratch dir (--sweep-out); the bundle is read, "
+                                "never written (#4202)")
+    keyframes.add_argument("--sweep-out", metavar="DIR",
+                           help="With --frames-sweep: scratch root for arms and the "
+                                "dated artifact (default <data root>/eval/"
+                                "youtube-frame-sweep)")
+    keyframes.add_argument("--sweep-caps", metavar="PX[,PX...]", default="720,1280,1920",
+                           help="With --frames-sweep: resolution caps (default 720,1280,1920)")
+    keyframes.add_argument("--sweep-seconds", type=float, default=30.0, metavar="S",
+                           help="With --frames-sweep: the uniform grid's cadence (default 30)")
 
     papers = parser.add_argument_group("papers (one registry for every channel)")
     papers.add_argument("--papers-pending", action="store_true", help="List the papers the worker may read")
@@ -3275,6 +3529,39 @@ def main():
         print(f"\n✓ Fetched: {meta['title']} → {meta['bundle_dir']}")
         if args.json:
             emit_json({"ok": True, "meta": meta})
+        return
+
+    if args.frames_sweep:
+        try:
+            caps = [int(c) for c in args.sweep_caps.split(",") if c.strip()]
+        except ValueError:
+            parser.error("--sweep-caps is a comma list of integers")
+        if not caps or min(caps) <= 0 or args.sweep_seconds <= 0:
+            parser.error("--sweep-caps and --sweep-seconds must be positive")
+        out_root = os.path.abspath(args.sweep_out or frame_sweep_root())
+        before = _state_file_bytes()
+        results = []
+        for vid in [v.strip() for v in args.frames_sweep.split(",") if v.strip()]:
+            res, why = run_frame_sweep(vid, out_root, resolution_caps=caps,
+                                       sample_seconds=args.sweep_seconds,
+                                       onscreen=not args.frames_only, log=print)
+            results.append(res if res else {"video_id": vid, "reason": why, "arms": []})
+            print(f"\n✓ Frame sweep: {vid} — "
+                  f"{why or str(len(res['arms'])) + ' arm(s)'}")
+        artifact = write_sweep_artifact(
+            results, out_root,
+            params={"caps": ",".join(map(str, caps)),
+                    "sample_seconds": args.sweep_seconds,
+                    "scene_threshold": SCENE_THRESHOLD,
+                    "frame_cap": MAX_FRAMES_PER_VIDEO,
+                    "onscreen": not args.frames_only})
+        print(f"Artifact: {artifact}")
+        payload = {"ok": True, "artifact": artifact, "results": results,
+                   "seen_json_unchanged": _state_file_bytes() == before}
+        if not payload["seen_json_unchanged"]:
+            print("✗ seen.json CHANGED during a frame sweep — that is a bug")
+        if args.json:
+            emit_json(payload)
         return
 
     if args.frames:
