@@ -1797,3 +1797,35 @@ def test_frames_sweep_cli_exits_zero_writes_the_artifact_and_leaves_seen_json(
     assert "media unavailable: yt-dlp exited 1: gone" in text
     assert text.count("| vidC1 |") == 6
     assert seen["fetch"] == 1
+
+
+def test_fetch_media_stages_the_download_inside_media_dir(tmp_path, monkeypatch):
+    """#4534 prerequisite: the staging dir shares MEDIA_DIR's filesystem.
+
+    `/tmp` is a tmpfs and `~/lloyd-data` its own mount on this box, so staging in the
+    default temp dir made the final `os.replace` an EXDEV OSError — raised outside the
+    try, after a full download — on the first real `--frames` pass. Staging under
+    MEDIA_DIR keeps the rename a same-mount rename and the partial download out of RAM.
+    """
+    media_dir = tmp_path / "media"
+    monkeypatch.setattr(M, "MEDIA_DIR", str(media_dir))
+    monkeypatch.setattr(M.shutil, "which", lambda name: "/usr/bin/yt-dlp")
+    staged_in = []
+
+    class R:
+        returncode, stderr = 0, ""
+
+    def fake_run(cmd, **kw):
+        out = Path(cmd[cmd.index("-o") + 1].replace("%(ext)s", "mp4"))
+        staged_in.append(out.parent)
+        out.write_bytes(b"video-bytes")
+        return R()
+
+    monkeypatch.setattr(M.subprocess, "run", fake_run)
+    path, why = M.fetch_media("vidT", "https://www.youtube.com/watch?v=vidT",
+                              log=lambda s: None)
+    assert why is None and path == str(media_dir / "vidT.mp4")
+    assert Path(path).read_bytes() == b"video-bytes"
+    assert staged_in[0].parent == media_dir, "staged outside MEDIA_DIR's mount"
+    assert sorted(p.name for p in media_dir.iterdir()) == ["vidT.mp4"], \
+        "the staging dir is gone afterwards"

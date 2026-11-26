@@ -2124,3 +2124,69 @@ def _video_block(prompt: str) -> str:
     m = re.search(r"<video>\n(.*?)\n</video>", prompt, re.S)
     assert m, "the prompt lost its <video> block"
     return m.group(1)
+
+
+# ---------------------------------------------------------------------------
+# The on-screen leg's vision request reaches the engine it names (#4534 prerequisite)
+# ---------------------------------------------------------------------------
+#
+# `post_vision_batch` had never been sent to a real engine: the leg is inert and every
+# test injects its own `vision`. Three defects were waiting for the first live pass —
+# a route vLLM does not serve (`/chat/completions`, where the engine routes only
+# `/v1/chat/completions`, the path `app/harness/tool_images.describe_image` uses), a
+# thinking-on request that can spend `VISION_MAX_NEW_TOKENS` on reasoning, and a reply
+# whose `content` is null being stringified to `"None"` and counted as a read: every
+# frame then gets an empty literal list and the sidecar asserts a blank screen.
+
+
+class _VisionResp:
+    def __init__(self, content, status=200):
+        self.status_code, self.text = status, ""
+        self._body = {"choices": [{"message": {"content": content}}],
+                      "usage": {"prompt_tokens": 2600, "completion_tokens": 2200}}
+
+    def json(self):
+        return self._body
+
+
+def _vision_route(monkeypatch, content):
+    import httpx
+    from app.harness import tool_images
+    import app.config as cfg
+
+    sent = []
+    monkeypatch.setattr(tool_images, "model_supports_vision", lambda alias: True)
+    monkeypatch.setattr(cfg, "_get_model_cfg",
+                        lambda alias: {"base_url": "http://127.0.0.1:8096/",
+                                       "alias": "primary"})
+    monkeypatch.setattr(httpx, "post", lambda url, json=None, timeout=None: (
+        sent.append((url, json)) or _VisionResp(content)))
+    return sent
+
+
+def test_the_vision_batch_posts_to_the_v1_route_with_thinking_off(monkeypatch):
+    sent = _vision_route(monkeypatch, '{"frames": []}')
+    text, extra = Y.post_vision_batch("read the frames", ["data:image/jpeg;base64,AA"])
+    assert text == '{"frames": []}' and extra["prompt_tokens"] == 2600
+    url, payload = sent[0]
+    assert url == "http://127.0.0.1:8096/v1/chat/completions", \
+        "vLLM routes only /v1/chat/completions; /chat/completions is a 404 on every batch"
+    assert payload["chat_template_kwargs"] == {"enable_thinking": False}
+    assert payload["model"] == "primary"
+
+
+@pytest.mark.parametrize("content", [None, "", "   \n"], ids=["null", "empty", "blank"])
+def test_a_vision_reply_with_no_content_is_a_failed_batch_not_a_blank_screen(
+        monkeypatch, tmp_path, content):
+    """A null `content` (the token budget spent on reasoning) writes no sidecar."""
+    _vision_route(monkeypatch, content)
+    text, _extra = Y.post_vision_batch("read the frames", ["data:image/jpeg;base64,AA"])
+    assert text == "", f"{content!r} must not reach the parser as an answer"
+    bundle = tmp_path / "b"
+    (bundle / "frames").mkdir(parents=True)
+    (bundle / "frames" / "000.jpg").write_bytes(b"\xff\xd8\xff")
+    (bundle / "frames.jsonl").write_text('{"path": "frames/000.jpg", "ts": 0.0}\n')
+    summary, why = Y.run_onscreen_pass({"bundle_dir": str(bundle)}, log=lambda s: None)
+    assert summary is None and why.startswith("every vision request failed")
+    assert not (bundle / Y.ONSCREEN_FILENAME).exists(), \
+        "a sidecar of empty rows would assert the screen said nothing"

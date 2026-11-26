@@ -1868,7 +1868,7 @@ def fetch_media(video_id, url, log=print):
         return "", "yt-dlp is not on PATH"
     target = media_target(video_id)
     os.makedirs(MEDIA_DIR, exist_ok=True)
-    with tempfile.TemporaryDirectory(prefix=f"ytmedia-{video_id[:12]}-") as tmp:
+    with tempfile.TemporaryDirectory(prefix=f".ytmedia-{video_id[:12]}-", dir=MEDIA_DIR) as tmp:
         staged = os.path.join(tmp, "source.%(ext)s")
         cmd = ["yt-dlp", "--no-playlist", "--no-part", "--no-warnings",
                "-f", "bv*[height<=1080]+ba/b[height<=1080]/b",

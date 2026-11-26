@@ -459,11 +459,11 @@ def post_vision_batch(prompt, data_urls, *, alias=VISION_MODEL_ALIAS,
               for url in data_urls],
         ]}],
         "max_tokens": VISION_MAX_NEW_TOKENS,
-        "temperature": 0.1,
-        "stream": False,
+        "temperature": 0.1, "stream": False,
+        "chat_template_kwargs": {"enable_thinking": False},
     }
     try:
-        resp = httpx.post(f"{base_url}/chat/completions", json=payload,
+        resp = httpx.post(f"{base_url}/v1/chat/completions", json=payload,
                           timeout=timeout)
     except Exception as exc:                       # noqa: BLE001 — any transport
         return "", f"vision request failed: {type(exc).__name__}: {str(exc)[:180]}"
@@ -476,9 +476,9 @@ def post_vision_batch(prompt, data_urls, *, alias=VISION_MODEL_ALIAS,
     except (ValueError, KeyError, IndexError, TypeError):
         return "", "vision reply had no message content"
     usage = body.get("usage") or {}
-    return (str(content), {"prompt_tokens": int(usage.get("prompt_tokens") or 0),
-                           "completion_tokens": int(
-                               usage.get("completion_tokens") or 0)})
+    text = content if isinstance(content, str) and content.strip() else ""
+    return (text, {"prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                   "completion_tokens": int(usage.get("completion_tokens") or 0)})
 
 
 def run_onscreen_pass(meta, *, log=print, vision=post_vision_batch,
