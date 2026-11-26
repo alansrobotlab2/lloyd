@@ -1121,3 +1121,117 @@ def test_the_report_run_writes_carries_the_shape_block_capped_at_five(world, mon
         assert f"- {row['round_id']}: contract" not in report, row["round_id"]
     assert len(printed) == 5, printed
     assert "- ceilings: gate stack 50%, prohibitions 25%" in report
+
+
+# ── #4281 clause 5: the automod `promoted` row carries the cause class a round names ──
+#
+# The rest of this file is the autoresearch post-promotion check; this block is the
+# automod one. A review-area round names the cause class it fixes and cites the
+# `eval/review_calibration/cause_corpus.jsonl` row it came from in its spec
+# (`run_spec.yaml`, whose `objective` is the goal it was started with). The landing then
+# hands `state.append_event` a `promoted` row with a `cause_class` KEY — the field the
+# falsifier counts by parsing each row, never by grepping prose. Every assertion below is
+# on the dict handed to `append_event`.
+
+import subprocess as _sp
+
+from scripts.automod import promote as AP, review_cause as ARC, state as AS
+
+_CORPUS_ROW = "cite-SM_20260913_233404-c1-path_outside_graded_tree"   # graded_wrong_input
+
+
+def _g(repo, *args):
+    return _sp.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=False)
+
+
+@pytest.fixture
+def landing(tmp_path, monkeypatch):
+    """A live repo, an isolated automod state dir, and a merge-only landing with every
+    side effect stubbed; `rows` collects what `append_event` was handed."""
+    state = tmp_path / "state"
+    state.mkdir()
+    for name in ("STATE_DIR", "BROKEN_DIR", "ROUNDS_DIR"):
+        monkeypatch.setattr(AS, name, state)
+    for name, fn in (("CURRENT_PATH", "current.json"), ("LEDGER_PATH", "promotions.jsonl"),
+                     ("LKG_PATH", "last_known_good.json"), ("HALTED_PATH", "halted"),
+                     ("BROKEN_PATH", "BROKEN"), ("DENIED_PATH", "denied.json"),
+                     ("PAUSE_PATH", "pause"), ("LOCK_PATH", "lock"),
+                     ("PENDING_PATH", "pending_restart.json"),
+                     ("FLUSH_MARKER_PATH", "flush.running"),
+                     ("ROLLBACK_REQUEST_PATH", "rollback_request.json")):
+        monkeypatch.setattr(AS, name, state / fn)
+    live = tmp_path / "live"
+    (live / "app").mkdir(parents=True)
+    _g(tmp_path, "init", "-q", "-b", "main", str(live))
+    _g(live, "config", "user.email", "t@e.com")
+    _g(live, "config", "user.name", "t")
+    (live / "app" / "base.py").write_text("BASE = 1\n", encoding="utf-8")
+    _g(live, "add", "-A")
+    _g(live, "commit", "-q", "-m", "base")
+    monkeypatch.setattr(AP, "LIVE_ROOT", live)
+    for name, fn in (("vault_commits_for", lambda rid: []), ("count_kg_rows", lambda: 1),
+                     ("count_vault_files", lambda: 1), ("announce", lambda h, b: None),
+                     ("_start_regression_runner", lambda: "stubbed"),
+                     ("squash_enabled", lambda: False),
+                     ("settle_attribution", lambda rid, wt, base: (None, "kept")),
+                     ("restart_needed", lambda changed, **k: (True, "loaded")),
+                     ("_get", lambda url, timeout=5.0: (200, {"boot_id": "b"}))):
+        monkeypatch.setattr(AP, name, fn)
+    rows: list[dict] = []
+    real = AS.append_event
+
+    def capture(event, **kw):
+        rows.append(dict(event))
+        return real(event, **kw)
+    monkeypatch.setattr(AS, "append_event", capture)
+
+    def land(rid: str, objective: str | None) -> dict:
+        base = _g(live, "rev-parse", "HEAD").stdout.strip()
+        wt = tmp_path / f"wt_{rid}"
+        _g(live, "worktree", "add", "-q", "-b", f"automod/{rid}", str(wt), base)
+        (wt / "app" / f"{rid.lower()}.py").write_text(f"X = {rid!r}\n", encoding="utf-8")
+        _g(wt, "add", "-A")
+        _g(wt, "commit", "-q", "-m", f"round {rid}")
+        if objective is not None:
+            (state / rid).mkdir()
+            (state / rid / "run_spec.yaml").write_text(
+                f"objective: {json.dumps(objective)}\nitem:\n  id: 4281\n", encoding="utf-8")
+        AP.merge_round(rid, wt, base)
+        promoted = [r for r in rows if r.get("event") == "promoted" and r["round_id"] == rid]
+        assert len(promoted) == 1, rows
+        return promoted[0]
+    return land
+
+
+def test_4281_a_round_naming_a_cause_class_and_a_corpus_row_lands_a_keyed_row(landing):
+    assert ARC.CORPUS_PATH.exists() and _CORPUS_ROW in ARC.CORPUS_PATH.read_text(encoding="utf-8")
+    row = landing("SM_CAUSE", f"Fix the citation rail (cause class graded_wrong_input, "
+                              f"corpus row {_CORPUS_ROW}).")
+    assert row["cause_class"] == "graded_wrong_input", row
+    assert row["cause_rows"] == [_CORPUS_ROW], row
+
+
+def test_4281_a_round_naming_no_class_appends_no_such_key(landing):
+    for rid, objective in (
+            ("SM_NOSPEC", None),
+            ("SM_PLAIN", "Make the dashboard poll every 2 s."),
+            ("SM_CLASSONLY", "A graded_wrong_input fix that cites no corpus row."),
+            ("SM_ROWONLY", f"Re-read {_CORPUS_ROW} without naming a class."),
+            ("SM_PROSE", f"The cause is unknown; see {_CORPUS_ROW}.")):
+        row = landing(rid, objective)
+        assert "cause_class" not in row and "cause_rows" not in row, (rid, row)
+
+
+def test_4281_round_cause_picks_the_class_a_cited_row_carries():
+    """Two classes named, one cited row: the class that row carries wins over the first
+    named; a quoted `unknown` counts, a bare English one does not."""
+    rows = {json.loads(ln)["case_id"]: json.loads(ln)
+            for ln in ARC.CORPUS_PATH.read_text(encoding="utf-8").splitlines() if ln.strip()}
+    defect = next(cid for cid, r in rows.items() if r["cause_class"] == "grader_defect")
+    unknown = next(cid for cid, r in rows.items() if r["cause_class"] == "unknown")
+    assert AP.round_cause("x", f"not graded_wrong_input but grader_defect: {defect}") == {
+        "cause_class": "grader_defect", "cause_rows": [defect]}
+    assert AP.round_cause("x", f"cause `unknown`, row {unknown}") == {
+        "cause_class": "unknown", "cause_rows": [unknown]}
+    assert AP.round_cause("x", f"cause unknown, row {unknown}") == {}
+    assert AP.round_cause("x", f"grader_defect {defect}x") == {}, "a case id is whole-token"

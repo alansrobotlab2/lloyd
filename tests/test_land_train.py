@@ -773,3 +773,24 @@ def test_only_a_landing_record_is_ever_released(world, monkeypatch, state):
         S.write_verified(S.CURRENT_PATH, {"commit": "c", "state": state})
     assert P.release_stranded_landing(by="test") is None
     assert (S.read_current() or {}).get("state") == state
+
+
+def test_4281_an_eager_landing_carries_the_cause_class_its_round_names(world, monkeypatch):
+    """#4281 clause 5 on the restarting path (the merge-only path is pinned in
+    tests/test_post_promotion.py): a spec naming a class and citing a corpus row puts
+    `cause_class` on the `promoted` row; the next round, naming none, gets no key."""
+    _train(monkeypatch, aware=False)
+    rd = _round(world, "SM_A")
+    (S.ROUNDS_DIR / "SM_A").mkdir()
+    (S.ROUNDS_DIR / "SM_A" / "run_spec.yaml").write_text(
+        'objective: "Close the grader_defect of cite-SM_20260912_045638-c5-missing_node_file"\n',
+        encoding="utf-8")
+    _land(rd)
+    row = _rows("promoted")[-1]
+    assert row["round_id"] == "SM_A" and row["cause_class"] == "grader_defect", row
+    assert row["cause_rows"] == ["cite-SM_20260912_045638-c5-missing_node_file"]
+    S.clear_current()
+    rd = _round(world, "SM_B", rel="app/other.py")
+    _land(rd)
+    row = _rows("promoted")[-1]
+    assert row["round_id"] == "SM_B" and "cause_class" not in row, row

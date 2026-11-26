@@ -1859,7 +1859,7 @@ def promote(round_id: str, worktree: Path, base: str, *,
                         # False: the merge was the landing, nothing was drained
                         # or restarted (`restart_needed`).
                         "restarted": restart, "restart_why": result.get("restart_why", ""),
-                        **({"flushed_pending": [e["commit"] for e in batch]} if batch else {})})
+                        **({"flushed_pending": [e["commit"] for e in batch]} if batch else {}), **round_cause(round_id)})
         if batch:
             _record_flushed(batch + [{"commit": head, "round_id": round_id,
                                       "restart": restart}],
@@ -2806,7 +2806,7 @@ def merge_round(round_id: str, worktree: Path, base: str, *,
                     # when nothing it changed is loaded, as before.
                     "restarted": None if restart else False, "restart_why": restart_why,
                     "deferred": True, "restart_pending": restart,
-                    "pending": len(pending)})
+                    "pending": len(pending), **round_cause(round_id)})
     head_line, body_line = merge_announcement(
         title, len(changed), sum(1 for e in pending if e.get("restart")), restart)
     announce(head_line, body_line)
@@ -3207,3 +3207,45 @@ def _flush_locked(live: Path, reason: str, *, kill_turns: bool, by: str,
         set_drain(False)
         release_pool_pause()
         S.clear_pause()
+
+
+# ── #4281: a round that names its cause class says so on its `promoted` row ──────────
+
+#: The five named classes match as bare tokens (each carries an underscore, so prose does
+#: not produce one by accident); `unknown` is an English word, so it counts only quoted.
+_CAUSE_TOKEN = re.compile(r"(?<![\w-])(grader_defect|graded_wrong_input|spec_ambiguity|"
+                          r"real_unmet_work|grader_wrong_on_approved_work|`unknown`)(?![\w-])")
+
+
+def round_cause(round_id: str, spec_text: str | None = None) -> dict:
+    """The `cause_class` / `cause_rows` keys for this round's `promoted` row, or `{}`.
+
+    A review-area change is supposed to name the cause class it fixes and cite the
+    `eval/review_calibration/cause_corpus.jsonl` rows that class came from, so the ledger
+    can count which classes the loop actually routed work to (#4026, #4281). The round's
+    spec — `run_spec.yaml`, whose `objective` is the goal the round was started with — is
+    where that is written before a landing; the round's own report is the implement turn's
+    finished row, which is appended after `promoted`, so it cannot feed this one.
+
+    Both halves are required: a class from `review_cause.FIXED_CAUSES` named in the spec
+    AND at least one corpus `case_id` cited in it. A class with no cited row, or a row with
+    no class, adds nothing, and so does a round with no spec. When several classes are
+    named, the first one that is also the class of a cited row wins, else the first named.
+    Never raises: a landing is not refused over a bookkeeping key.
+    """
+    try:
+        from scripts.automod import review_cause as RC
+        if spec_text is None:
+            spec_text = (S.ROUNDS_DIR / round_id / "run_spec.yaml").read_text(encoding="utf-8")
+        rows = [json.loads(ln) for ln in RC.CORPUS_PATH.read_text(encoding="utf-8").splitlines()
+                if ln.strip()]
+    except Exception:  # noqa: BLE001 — no spec or no corpus: nothing is declared
+        return {}
+    named = [m.group(1).strip("`") for m in _CAUSE_TOKEN.finditer(spec_text)]
+    cited = {r["case_id"]: r.get("cause_class") for r in rows if r.get("case_id") and re.search(
+        r"(?<![\w-])" + re.escape(r["case_id"]) + r"(?![\w-])", spec_text)}
+    named = [c for c in named if c in RC.FIXED_CAUSES]
+    if not named or not cited:
+        return {}
+    cause = next((c for c in named if c in cited.values()), named[0])
+    return {"cause_class": cause, "cause_rows": sorted(cited)[:20]}
