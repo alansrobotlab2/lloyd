@@ -182,9 +182,9 @@ PS_9_APPLY_INSTANT = "2026-11-19T01:03:06Z"
 # `status: done`, as is #4257, and a closed item is not an owner.
 #
 # Which makes it the rule rather than a one-off: a by-hand apply that ran and whose edges are live
-# takes a `RULED` key in the skill AND an entry in `APPLY_INSTANTS` in the same pass — PS-11 (#4503)
-# is the next one due. A settled set the record cannot see stays invisible until one of its edges
-# expires, and edges expire rather than delete.
+# takes a `RULED` key in the skill AND an entry in `APPLY_INSTANTS` in the same pass — `PS-11` and
+# `PS-12`, below, are the first pair of keys added under it. A settled set the record cannot see stays
+# invisible until one of its edges expires, and edges expire rather than delete.
 PS_10_APPLY_INSTANT = "2026-11-19T15:46:35Z"
 
 #: PS-10's whole set, from carrier #4257 — the pair the three runs of 2026-11-19 between `PS-9`'s
@@ -194,6 +194,26 @@ PS_10_RULING_PAIR = frozenset({("agent-supervisord.service", "supervisord")})
 
 #: Derived from the instant, never spelled out — the same rule as `PS_9_BACKUP`.
 PS_10_BACKUP = f"kg-stranded-{PS_10_APPLY_INSTANT.replace('-', '').replace(':', '')}.sqlite"
+
+# The fifth ruled apply, and the rule above applied to two keys at once: carrier #4560's set `PS-12`
+# (`Dual pulley servo wheel -> Servo`, `Kimchi by Cast AI -> Cast AI`) went in by an attended by-hand
+# `--apply` at 2026-11-26T17:35:28Z, and its subset `PS-11` — carrier #4503, the Kimchi pair alone,
+# filed three days earlier — was written by that same apply, never on its own. So both keys carry this
+# one instant, as `PS-2` and `PS-3` share `APPLY_INSTANT`, and `PS-11` ⊂ `PS-12` is the shape
+# `PS-1` ⊂ `PS-2` ⊂ `PS-3` already has. The witness is on disk:
+# `store-backups/kg-stranded-20261126T173528Z.sqlite`, `stat -c %Y` 1795714528, the instant to the
+# second; the receipt read `ACTIVE_NAME_EMBEDDING=28 PAIRS_LIVE=2/2 MISSING=0`, exit 0; and the vault
+# carries the before/after proposals at commit `54246a2ad`. Both carriers are `status: done`.
+PS_12_APPLY_INSTANT = "2026-11-26T17:35:28Z"
+
+#: PS-12's whole set, from carrier #4560, and PS-11's, from carrier #4503 — closed facts about one
+#: write, like `PS_10_RULING_PAIR`.
+PS_12_WRITTEN_PAIRS = frozenset({("Dual pulley servo wheel", "Servo"),
+                                 ("Kimchi by Cast AI", "Cast AI")})
+PS_11_RULING_PAIR = frozenset({("Kimchi by Cast AI", "Cast AI")})
+
+#: Derived from the instant, never spelled out — the same rule as `PS_9_BACKUP`.
+PS_12_BACKUP = f"kg-stranded-{PS_12_APPLY_INSTANT.replace('-', '').replace(':', '')}.sqlite"
 
 #: The four pairs that apply wrote, from carrier #3704. A closed historical fact about one write,
 #: unlike a store count that moves with the next apply, so it is legitimate to write down: the
@@ -215,7 +235,8 @@ PS_9_BACKUP = f"kg-stranded-{PS_9_APPLY_INSTANT.replace('-', '').replace(':', ''
 #: in the skill therefore reds that node until its own apply's artefact is named here.
 APPLY_INSTANTS = {"PS-2": APPLY_INSTANT, "PS-3": APPLY_INSTANT,
                   "PS-4": PS_4_APPLY_INSTANT, "PS-9": PS_9_APPLY_INSTANT,
-                  "PS-10": PS_10_APPLY_INSTANT}
+                  "PS-10": PS_10_APPLY_INSTANT,
+                  "PS-11": PS_12_APPLY_INSTANT, "PS-12": PS_12_APPLY_INSTANT}
 
 
 def _missing(path: Path) -> str:
@@ -1328,11 +1349,13 @@ def _without_key(script: str, key: str) -> str:
     The mutated text must still parse and still hold every OTHER key, or a "refusal" printed by a
     snippet that crashed on the mutation would be scored as the key having been load-bearing.
     """
-    tail = '"write tool", "Write")},'
-    close = tail[:-1] + "}"
-    out, n = re.subn(re.escape(tail) + r"(?:\n[ ]*#[^\n]*)*\n[ ]*\"" + re.escape(key)
-                     + r"\": \{[^}]*\}\}", close, script, count=1)
-    assert n == 1, (f"the mutation removed no `{key}` entry: the RULED literal no longer ends "
+    entry = r"(?:\n[ ]*#[^\n]*)*\n[ ]*\"" + re.escape(key) + r"\": \{[^}]*\}"
+    # A key with a neighbour after it takes its own trailing comma with it; the LAST key hands
+    # its closing brace back to the entry before it. Never both: the literal has one last key.
+    out, n = re.subn(entry + r",", "", script, count=1)
+    if n == 0:
+        out, n = re.subn(r"\}," + entry + r"\}", "}}", script, count=1)
+    assert n == 1, (f"the mutation removed no `{key}` entry: the RULED literal no longer has "
                     f"the shape this expects, so the mutant proves nothing")
     return out
 
@@ -1428,24 +1451,25 @@ def test_ps_10_is_a_ruled_key_whose_pair_the_set_check_covers_by_name(tmp_path):
 
     # Clause 2: the figure, derived, attributed per apply, and unchanged where it counts the store.
     n_pairs = _ruled_pair_total(text)
-    assert n_pairs == 14 == len(set().union(*ruled.values())), (
+    assert n_pairs == 16 == len(set().union(*ruled.values())), (
         f"the distinct pairs `RULED` enumerates is {len(set().union(*ruled.values()))} while the "
-        f"figure checkers derive {n_pairs}: PS-1..PS-3 are nested and contribute nothing new, so "
-        "the sum is the size of the union")
+        f"figure checkers derive {n_pairs}: PS-1..PS-3 are nested and PS-11 sits inside PS-12, so "
+        "they contribute nothing new and the sum is the size of the union — 14 through PS-10, "
+        "plus PS-12's two")
     assert _wrong_ruled_pair_figures(text, n_pairs) == [], (
         f"a site still states a ruled-pair figure other than {n_pairs}")
     assert len(re.findall(RULED_PAIR_FIGURE_RE, " ".join(text.split()))) == 2, (
         "the enumerated figure must be stated at exactly two sites — the ledger and the rule — "
         "and a third copy is the one that will not be updated")
     flat = " ".join(text.split())
-    for key in ("PS-3", "PS-4", "PS-9", "PS-10"):
+    for key in ("PS-3", "PS-4", "PS-9", "PS-10", "PS-12"):
         want = _number_word(len(ruled[key]))
         assert f"`{key}`'s {want} " in flat, (
             f"the per-apply attribution does not name `{key}`'s {want} pair(s): a total with no "
             "denominator is how this record reached nineteen")
     assert _stale_store_readings(flat, len(live)) == [], (
-        "the store-count sites moved with the ruled-pair figure: 26 is what `name-embedding:` "
-        "edges are live, and PS-10's is one of them, not a fifteenth")
+        "the store-count sites moved with the ruled-pair figure: they count the `name-embedding:` "
+        "edges that are live, and PS-10's is one of them, not an extra")
 
     # Clause 3: the module's own half — nothing in here may still call this set unruled. Each
     # phrase is JOINED AT RUNTIME for the reason this module's own bans are spelled
@@ -1465,6 +1489,90 @@ def test_ps_10_is_a_ruled_key_whose_pair_the_set_check_covers_by_name(tmp_path):
     assert "#4519" in here, (
         "the new comment cites no open carrier: #4480 and #4257 are both `status: done`, and a "
         "closed item is not an owner")
+
+
+def _pair_payload(pairs) -> str:
+    """Proposal rows for `pairs` in the shape `link_stranded_entities.py` writes, one per pair.
+
+    Built off the committed PS-2 witness's row shape for the reason on `_ps4_pair_payload`."""
+    base = json.loads(next(l for l in _committed_ps2_bytes().decode().splitlines() if l.strip()))
+    out = []
+    for source, target in sorted(pairs):
+        r = dict(base)
+        r.update({"source": source, "target": target,
+                  "evidence": f"name-embedding: '{target.lower()}' is a registered entity name "
+                              f"inside '{source}'"})
+        out.append(json.dumps(r) + "\n")
+    return "".join(out)
+
+
+def test_ps_11_and_ps_12_are_ruled_keys_the_one_apply_of_2026_11_26_wrote(tmp_path):
+    """The PS-10 rule applied to a nested pair: one attended apply, two carriers, two keys.
+
+    Carrier #4503 held `Kimchi by Cast AI -> Cast AI` alone (`PS-11`); #4560's run printed that pair
+    plus `Dual pulley servo wheel -> Servo` (`PS-12`), and the apply of 2026-11-26T17:35:28Z wrote
+    the superset. So both keys are in `RULED`, each holding EXACTLY its carrier's set, nested the way
+    `PS-1` ⊂ `PS-2` ⊂ `PS-3` are, both weighed against the one instant, and the instant is read off
+    the backup's `stat`, never off the comment that states it. The removal mutants prove the keys
+    are what makes a reprint covered: without `PS-12` the servo pair is novel again, and without
+    both the Kimchi pair is too.
+    """
+    text = _skill_text()
+    section = _step_2_5_section(text)
+    script = _setcheck_script(section)
+    ruled = _ruled_dict(script)
+
+    assert ruled.get("PS-11") == PS_11_RULING_PAIR and ruled.get("PS-12") == PS_12_WRITTEN_PAIRS, (
+        f"`RULED` holds PS-11={sorted(ruled.get('PS-11', ()))} PS-12={sorted(ruled.get('PS-12', ()))}"
+        f"; carriers #4503 and #4560 ruled {sorted(PS_11_RULING_PAIR)} and "
+        f"{sorted(PS_12_WRITTEN_PAIRS)} — a subset re-proposes the rest, a superset authorises "
+        "proposals no carrier held")
+    assert ruled["PS-11"] < ruled["PS-12"], "PS-11 is not inside PS-12"
+    keys = list(ruled)
+    assert keys[-3:] == ["PS-10", "PS-11", "PS-12"], (
+        f"`RULED` is in dict order, and the smallest covering set is named first only if the "
+        f"subset precedes its superset: {keys}")
+
+    _count, live = _live_name_embedding_pairs()
+    for key in ("PS-11", "PS-12"):
+        assert _execution_claim(section, key, live) == ("executed", PS_12_APPLY_INSTANT), (
+            f"`{key}` must declare `EXECUTED {PS_12_APPLY_INSTANT}` on its marker line — both "
+            "keys were written by that one apply")
+
+    comment = _ruled_comment(section, "PS-12")
+    assert PS_12_BACKUP in comment and "stat -c %Y" in comment, (
+        f"`PS-12`'s entry does not name both the artefact and the command that reads it: "
+        f"{comment!r}")
+    backup = LIVE_STORE.parent / "store-backups" / PS_12_BACKUP
+    assert backup.is_file(), (
+        f"{backup} is absent, so the instant `PS-12` declares has no witness that is not the "
+        "claim itself")
+    actual_epoch = int(backup.stat().st_mtime)
+    assert actual_epoch == 1795714528 and datetime.fromtimestamp(
+        actual_epoch, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ") == PS_12_APPLY_INSTANT, (
+        f"{PS_12_BACKUP} reports {actual_epoch}, not the epoch of the 2026-11-26T17:35:28Z apply")
+    assert _epoch_claims(comment) == {str(actual_epoch)}, (
+        f"`PS-12`'s entry claims epoch(s) {sorted(_epoch_claims(comment))} where the file says "
+        f"{actual_epoch}")
+
+    both = _pair_payload(PS_12_WRITTEN_PAIRS)
+    kimchi = _pair_payload(PS_11_RULING_PAIR)
+    assert _run_setcheck(script, "ps12-covered", both, tmp_path).endswith(
+        "pairs=2 novel=none covered_by=['PS-12']")
+    assert _run_setcheck(script, "ps11-covered", kimchi, tmp_path).endswith(
+        "pairs=1 novel=none covered_by=['PS-11', 'PS-12']"), (
+        "a reprint of PS-11's one pair must name both covering sets, smallest first")
+
+    no_12 = _without_key(script, "PS-12")
+    assert sorted(_ruled_dict(no_12)) == sorted(set(ruled) - {"PS-12"})
+    assert _run_setcheck(no_12, "ps12-removed", both, tmp_path).endswith(
+        "pairs=2 novel=['Dual pulley servo wheel -> Servo'] covered_by=none")
+    no_both = _without_key(no_12, "PS-11")
+    assert sorted(_ruled_dict(no_both)) == sorted(set(ruled) - {"PS-11", "PS-12"})
+    assert _run_setcheck(no_both, "ps11-removed", kimchi, tmp_path).endswith(
+        "pairs=1 novel=['Kimchi by Cast AI -> Cast AI'] covered_by=none"), (
+        "with both keys removed the Kimchi pair must read novel again — the reading #4503 was "
+        "filed on")
 
 
 def _ps4_pair_payload() -> str:
@@ -1695,15 +1803,16 @@ def test_no_present_tense_reading_claims_nineteen_active_edges_and_the_pasts_sta
     purpose paragraph) and "today's N live `name-embedding:` edges" (the pilot bullet). N was 19
     until the apply of 2026-10-20T09:15:39Z and 21
     until the two applies of 2026-11-19 — `PS-9`'s four pairs at 01:03:06Z and `PS-10`'s one at
-    15:46:35Z — after which the store measures 26. This node asserted 21 as a literal, #4352
+    15:46:35Z — after which the store measured 26, and 28 after `PS-12`'s apply of
+    2026-11-26T17:35:28Z. This node asserted 21 as a literal, #4352
     moved the vault to 26, and no vault landing can reach this file: that is #4480, and it is
     why the expected figure is now read through `_live_name_embedding_pairs()` instead of
     written down. A present-tense count in prose and a present-tense count pinned here are one
     claim with two owners.
 
-    The arithmetic is attributed per set, and the enumerated ruled pairs are FOURTEEN — `PS-3`'s
-    seven, `PS-4`'s two, `PS-9`'s four and `PS-10`'s one — because `PS-1` ⊂ `PS-2` ⊂ `PS-3`
-    contributes no pair of its own. `PS-10`'s one is in that sum only because the key is in
+    The arithmetic is attributed per set, and the enumerated ruled pairs are SIXTEEN — `PS-3`'s
+    seven, `PS-4`'s two, `PS-9`'s four, `PS-10`'s one and `PS-12`'s two — because `PS-1` ⊂ `PS-2`
+    ⊂ `PS-3` and `PS-11` ⊂ `PS-12` contribute no pair of their own. `PS-10`'s one is in that sum only because the key is in
     `RULED`: #4519 added it, and until then the record enumerated thirteen while its own prose
     named a fourteenth pair that had been ruled and applied — the figure and the dict moved
     together in one landing, which is why neither could be corrected on its own. That figure is derived from the
