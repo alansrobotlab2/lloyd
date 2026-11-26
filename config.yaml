@@ -2143,9 +2143,34 @@ workers:
     # steward had moved AGAIN before the machine's row (#4240 to `in_progress`, #4244 to
     # `draft`), and the pairing judged the superseded row against it, so the leg now pairs
     # an item's LATEST applied move and ignores the
-    # machine's own abstention echo (`reverted_moves`). Whether `apply` may be flipped
-    # again, and on what bar, is owed-check's to rule on 2 genuine mis-moves in 4
-    # days; no round decides it here. With `apply: false` the one status writer is
+    # machine's own abstention echo (`reverted_moves`).
+    # THE RE-FLIP BAR, RULED BY OWED-CHECK (#4409's owed entry, filed as #4513).
+    # The ruling is dated 2026-11-22 and it is a refusal, not a proposal:
+    # `apply` stays false, the flip stands closed as 'tried, didn't work out',
+    # and no round may re-flip it on its own. A future flip needs three things,
+    # in order. (a) A code-side rail, test-pinned, refusing the steward's move
+    # for the two classes the ledger proves — an item whose store already
+    # carries a round row before the move (item 4172, mis-bound: its
+    # `round_start` 2026-11-16T07:05:06Z predates the move by 1m54s, so the
+    # guard reads rows, not the model's 'no round live' note), and an item whose
+    # latest `status_moved` reason says attempts are spent / owed-check decides
+    # (item 4151, moved `draft -> up_next` 2026-11-17T00:59:08Z, parked again
+    # 2026-11-17T03:47:29Z). Neither rail exists in the tree today: this is a
+    # bar a flip has to clear, not a protection that stands. (b) Pre-flip evidence,
+    # and `judgement.rate` is INADMISSIBLE for a re-flip — it is pre-flip-only
+    # because `agreement()` never re-scores an applied status, so the
+    # cleared judged 140 / rate 0.9714 at 2026-11-16T00:06Z still produced
+    # 2 put-backs inside the first 3 applied moves of 129. What is admissible
+    # is a replay of the steward's persisted proposals (`runs.response_json`,
+    # persisted only since #4381 landed 2026-11-19) against the machine's rows
+    # through the fixed `reverted_moves`: >= 46 proposals with 0 pairs. That
+    # 46 accumulates forward from 2026-11-19 and no earlier: proposals before
+    # #4381 were never persisted, so the 2026-11-16 -> 2026-11-20 flip window
+    # itself supplies none of them. (c) The flip lands as its own round,
+    # carrying this same 7-day stop condition beside the flag plus a
+    # live-window `reverted_moves` replay. Nothing is owed toward a re-flip;
+    # the dry-run costs nothing today.
+    # With `apply: false` the one status writer is
     # never reached, and `select_confirmed` is left as the only mover that takes
     # its pick. It may never set `done`: closing is
     # gated on a settled promotion that said `met`, and stays mechanical.

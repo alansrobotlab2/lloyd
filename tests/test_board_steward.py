@@ -2456,6 +2456,300 @@ def test_the_applied_move_caveat_pin_reddens_on_its_own_deletion():
         "the byte pin cannot fail, so it pins nothing")
 
 
+#: owed-check's re-flip bar, ruled 2026-11-22 on #4409's owed entry, as committed to
+#: `config.yaml`'s board-steward block. The two boundary strings are that paragraph's own
+#: first and last words, and the slice runs between them rather than over a fixed window
+#: of lines: the comment run above `board-steward:` is ~140 contiguous lines belonging to
+#: six other rounds, every one of them pinned elsewhere, so a window would drift into
+#: their prose and let THEIR words satisfy a node about this ruling.
+REFLIP_BAR_ANCHOR = "THE RE-FLIP BAR"
+REFLIP_BAR_TAIL = "the dry-run costs nothing today."
+#: The false gloss the item carried: `>= 46 proposals` was attributed to the flip window's
+#: own volume ("the 11-16 -> 11-20 volume"). It cannot come from that window — proposals
+#: were persisted only once #4381 landed on 2026-11-19 — so a sentence tying the 46 to a
+#: flip-window volume is a claim about rows that were never written down. Bounded by
+#: characters rather than by sentence because the spelling uses `..` and `->`, both of
+#: which a `[^.]` class would refuse to cross.
+REFLIP_WINDOW_GLOSS = re.compile(r"(?:11-16|2026-11-20)[^\n]{0,45}?\bvolume\b")
+
+
+def _reflip_bar_problems(block: str) -> list[str]:
+    """Which pins on owed-check's re-flip bar FAIL, each labelled. Empty == all hold.
+
+    The same shape as `_flip_block_problems` and `_caveat_4443_problems`, for the same
+    reason: `test_the_ruled_reflip_bar_pin_reddens_on_its_own_deletion` has to run THIS
+    predicate over a mutated block, and a predicate re-implemented there would prove
+    nothing about the node it imitates. Pins run on the comment-wrap-collapsed form
+    because the bar is prose a later round may legitimately re-wrap; the two boundary
+    markers are the exception, and are matched per line because bounding the paragraph is
+    exactly what a re-wrap must not disturb.
+    """
+    lines = block.splitlines()
+    heads = [i for i, ln in enumerate(lines) if REFLIP_BAR_ANCHOR in ln]
+    tails = [i for i, ln in enumerate(lines) if REFLIP_BAR_TAIL in ln]
+    if len(heads) != 1 or len(tails) != 1 or tails[0] < heads[0]:
+        return [f"[bar present] the block holds {len(heads)} anchor line(s) and "
+                f"{len(tails)} tail line(s), not exactly one of each in order — the "
+                f"ruling was deleted, typed twice, or its closing sentence moved, and a "
+                f"reader who cannot bound the paragraph cannot tell the ruled bar from "
+                f"the question it replaced"]
+    flat = " ".join(" ".join(ln.lstrip().lstrip("#").rstrip()
+                             for ln in lines[heads[0]:tails[0] + 1]).split())
+    low = flat.lower()
+    whole = " ".join(" ".join(ln.lstrip().lstrip("#").rstrip() for ln in lines).split())
+    problems: list[str] = []
+
+    # Ruled, dated, and attributed to the one party that may rule it. #4409's block said
+    # "Whether `apply` may be flipped again, and on what bar, is owed-check's to rule";
+    # owed-check answered on 2026-11-22, and a bar with no date and no author is a
+    # proposal again the moment its author is forgotten.
+    if "ruled by owed-check" not in low:
+        problems.append("[bar attributed] the block does not name the ruling's author — "
+                        "owed-check rules this flag, and no round rules it")
+    if "dated 2026-11-22" not in low:
+        problems.append("[bar dated] the ruling has no date, so a later reader cannot "
+                        "tell it from the pre-flip rulings of 2026-10-25 and 2026-11-16")
+    if "`apply` stays false" not in flat:
+        problems.append("[bar keeps the flag off] the ruling's first clause is that "
+                        "`apply` stays false; a bar that does not say so reads as "
+                        "permission")
+    if "no round may re-flip it on its own" not in low:
+        problems.append("[bar closes self-service] the ruling says no round may re-flip "
+                        "it on its own — the sentence this one replaced existed precisely "
+                        "so a round could not grant itself the flip")
+
+    # Three parts, present and IN ORDER: the order is the ruling's (a) rail, (b) measure,
+    # (c) process, and a re-labelled or reordered bar is a different bar.
+    marks = {p: flat.find(p) for p in ("(a)", "(b)", "(c)")}
+    if min(marks.values()) < 0:
+        problems.append(f"[bar has three parts] the ruling's parts are (a), (b) and (c) "
+                        f"and the block carries {sorted(marks)} — one part gone is one "
+                        f"precondition gone")
+    elif not marks["(a)"] < marks["(b)"] < marks["(c)"]:
+        problems.append("[bar parts in order] the ruling numbered its parts for a reason: "
+                        "the rail comes before the measure and the measure before the "
+                        "round that may spend them")
+
+    # Part (a): BOTH rail classes the ledger proves, by their mechanism and by the item
+    # that proved each. Naming only one is a rail against one of the two real mis-moves.
+    if "whose store already carries a round row before the move" not in low:
+        problems.append("[rail: round row] the first rail is the #4172 class — the store "
+                        "already had a round row when the steward moved, so the guard "
+                        "reads rows and not the model's 'no round live' note")
+    if "reason says attempts are spent / owed-check decides" not in low:
+        problems.append("[rail: spent reasons] the second rail is the #4151 class — the "
+                        "latest `status_moved` reason says the loop is done trying, which "
+                        "is the judgment error the first rail cannot catch")
+    # Cited WITHOUT the `#`: the trip record's own bytes are pinned elsewhere by a
+    # mutation that deletes its single `#4172`, and a second `#4172` anywhere in the
+    # block would make that pin unreddenable. The phrases below are unique to this bar.
+    for who in ("item 4172", "item 4151"):
+        if who not in flat:
+            problems.append(f"[rail names {who}] the ruling proves each rail from a real "
+                            f"mis-move, so {who} has to be in the bar beside its class")
+    # And the bar says plainly that neither rail is built. A precondition written as an
+    # indicative reads as a protection that stands, which is the false absence this loop
+    # wrote its class rule about after exactly that failure.
+    if "neither rail exists in the tree today" not in low:
+        problems.append("[rail unbuilt stated] the bar must say the rails are not in the "
+                        "tree: the ruling filed only #4513 and #4514, and neither builds "
+                        "a guard, so a reader must not find the flip already fenced")
+
+    # Part (b): the inadmissible measure WITH ITS REASON and the figures that proved the
+    # reason, then the admissible one. A ban with no mechanism is re-litigated by the next
+    # reader who has a rate to quote.
+    if "`judgement.rate` is inadmissible for a re-flip" not in low:
+        problems.append("[rate inadmissible] the bar has to say the agree-rate cannot "
+                        "decide a RE-flip, not merely that it decided the first one")
+    if "`agreement()` never re-scores an applied status" not in low:
+        problems.append("[rate mechanism] why the rate is inadmissible: an applied wrong "
+                        "status is never re-proposed, so it scores no fresh disagreement")
+    if "cleared judged 140 / rate 0.9714" not in low:
+        problems.append("[rate failure evidence] the figures the first flip was cleared "
+                        "on are the counter-example: they read 140 and 0.9714")
+    if "2 put-backs inside the first 3 applied moves" not in low:
+        problems.append("[rate failure counted] and what those cleared figures bought: 2 "
+                        "reverts inside the first 3 applied moves of 129")
+    if "`runs.response_json`" not in flat or "#4381" not in flat:
+        problems.append("[replay source] the admissible measure has to name what is "
+                        "replayed (`runs.response_json`) and since when it exists (#4381)")
+    if "through the fixed `reverted_moves`" not in low:
+        problems.append("[replay reader named] the replay is said to run through the "
+                        "FIXED `reverted_moves`, the same reader the stop condition runs "
+                        "on — the unfixed pairing is what manufactured 4 of the 6 firings "
+                        "this block counts, so naming the reader names the fix")
+    if ">= 46 proposals with 0 pairs" not in flat:
+        problems.append("[replay bar stated] the measure is a number: >= 46 proposals "
+                        "replayed with 0 reverted pairs")
+    if "accumulates forward from" not in low:
+        problems.append("[replay accumulates] 46 cannot be met yet — proposals are "
+                        "persisted only since #4381, so the floor accumulates forward")
+    if REFLIP_WINDOW_GLOSS.search(flat):
+        problems.append("[no flip-window gloss] the block attributes the 46 to the "
+                        "11-16 flip window's volume, and nothing before #4381 was ever "
+                        "persisted — the figure is forward-looking, not a volume the flip "
+                        "supplied")
+
+    # Part (c): the flip is its own round carrying the SAME stop condition plus the
+    # live-window replay — the two things that made the first flip unreviewable if it had
+    # gone quietly.
+    if "carrying this same 7-day stop condition" not in low:
+        problems.append("[re-flip carries the stop condition] a future flip has to carry "
+                        "the same 7-day stop condition, or the alarm that closed this one "
+                        "watches a flag no longer bounded by it")
+    if "live-window `reverted_moves` replay" not in low:
+        problems.append("[re-flip carries the replay] and the live-window replay #4409's "
+                        "owed entry settled as unobservable while `apply` is false — a "
+                        "zero there today is not evidence")
+
+    # The question the ruling answered must be gone, everywhere in the block: two
+    # sentences, one asking and one answering, is one reading too many.
+    if "is owed-check's to rule" in whole:
+        problems.append("[question replaced] the block still poses the question the "
+                        "2026-11-22 ruling answered — a later round reads the open "
+                        "question, not the ruling beneath it")
+    return problems
+
+
+def test_the_config_records_the_ruled_reflip_bar_beside_the_flip_it_governs():
+    """#4513: owed-check ruled the re-flip bar on 2026-11-22, and the ruling now sits in
+    `config.yaml`'s board-steward block instead of only in an owed record.
+
+    The block used to end its trip record with 'Whether `apply` may be flipped again, and
+    on what bar, is owed-check's to rule on 2 genuine mis-moves in 4 days; no round
+    decides it here.' owed-check then answered it — `apply` stays false, and a future flip
+    needs (a) a code-side rail against the two mis-move classes the ledger proves, (b) a
+    proposal-replay measure instead of `judgement.rate`, and (c) the flip as its own round
+    carrying the same 7-day stop condition. A ruling that lives only in a ledger row is
+    invisible to the next reader of the flag it governs, which is this loop's own class
+    rule about a verdict that is only printed. So the answer replaces the question, in the
+    same comment run, in the ruling's own three parts.
+
+    What this node does NOT do is touch the flip's own record: `apply` still parses False,
+    the STOP CONDITION sentence is still the bytes #4443 pinned, the #4443 caveat anchor
+    still appears exactly once, and both neighbouring predicates still report no problem —
+    the item forbade bundling the re-flip with recording the bar, and forbade re-writing
+    the 6-firing trip record while recording it.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    import yaml
+    assert yaml.safe_load(text)["workers"]["sources"]["board-steward"]["apply"] is False, (
+        "the ruling this node pins is that `apply` STAYS false; a tree reading True here "
+        "has a round that re-flipped the flag while recording the bar it was told not to "
+        "spend, and these pins would be guarding the wrong half")
+    block = _board_steward_block(text)
+    problems = _reflip_bar_problems(block)
+    assert problems == [], problems
+
+    # The instrument proves itself before it grades the file: a gloss pattern that cannot
+    # match the sentence it was written for would green any wording.
+    assert REFLIP_WINDOW_GLOSS.search(">= 46 proposals (the 11-16..11-20 volume)")
+    assert REFLIP_WINDOW_GLOSS.search("the 11-16 -> 11-20 volume of the flip window")
+    assert not REFLIP_WINDOW_GLOSS.search("that 46 accumulates forward from 2026-11-19, "
+                                          "the date #4381 landed the persistence")
+    # The neighbours this round was told not to disturb, checked from here so the diff
+    # cannot pass its own node while quietly editing them.
+    assert STOP_CONDITION_VERBATIM in block, (
+        "the STOP CONDITION sentence is no longer the bytes #4443 pinned — recording the "
+        "ruling was a comment edit beside it, never a re-write of it")
+    assert sum(1 for ln in block.splitlines() if CAVEAT_4443_ANCHOR in ln) == 1, (
+        "the #4443 caveat anchor is no longer unique: the re-flip bar was typed inside "
+        "it, which puts this paragraph inside the caveat's own slice")
+    assert _flip_block_problems(block, apply_value=False) == [], (
+        "the new paragraph broke a pin on the flip and its trip record")
+    assert _caveat_4443_problems(block) == [], (
+        "the new paragraph broke the #4443 applied-move caveat")
+
+
+def test_the_ruled_reflip_bar_pin_reddens_on_its_own_deletion():
+    """A pin that cannot fail is not a pin: delete the recorded bar, or thin any single
+    part of it, and the label that guards that part has to fire.
+
+    The first mutation is the one the item asked for as the acceptance proof — the whole
+    paragraph gone — and must redden a node that is green with it present. The rest are
+    the ways a later round quietly reopens the question without editing the flag: drop the
+    date, re-order the parts, keep one rail and lose the other, describe the rails as
+    built, soften `judgement.rate` from inadmissible to merely old, un-number the replay
+    floor, attribute that floor to the flip window's volume, or type the old open question
+    back in beside the answer.
+    """
+    text = (Path(__file__).resolve().parents[1] / "config.yaml").read_text(encoding="utf-8")
+    block = _board_steward_block(text)
+    assert _reflip_bar_problems(block) == [], "the committed bar does not pass its own pins"
+
+    lines = block.splitlines()
+    head = next(i for i, ln in enumerate(lines) if REFLIP_BAR_ANCHOR in ln)
+    tail = next(i for i, ln in enumerate(lines) if REFLIP_BAR_TAIL in ln)
+    deleted = "\n".join(lines[:head] + lines[tail + 1:])
+    assert deleted != block, "the bar's own markers bound nothing, so nothing was deleted"
+    gone = " ".join(_reflip_bar_problems(deleted))
+    assert "[bar present]" in gone, gone
+
+    def labels(mutated: str) -> str:
+        return " ".join(_reflip_bar_problems(mutated))
+
+    # The date and the author, thinned into an undated standing rule.
+    assert "[bar dated]" in labels(block.replace("dated 2026-11-22", "dated recently"))
+    assert "[bar attributed]" in labels(
+        block.replace("THE RE-FLIP BAR, RULED BY OWED-CHECK", "THE RE-FLIP BAR"))
+    # The ruling read as permission rather than as a refusal.
+    assert "[bar keeps the flag off]" in labels(
+        block.replace("`apply` stays false", "`apply` may return to true"))
+    assert "[bar closes self-service]" in labels(
+        block.replace("no round may re-flip it on its own", "a round may re-flip it"))
+    # The three parts, reordered: the rail moved behind the measure it is supposed to
+    # gate. (`(b)` and `(a)` swap in one pass through a placeholder, so neither marker is
+    # ever absent and only the ORDER is what the mutation changes.)
+    swapped = block.replace("(a) A code-side rail", "(z) A code-side rail")
+    swapped = swapped.replace("(b) Pre-flip evidence", "(a) Pre-flip evidence")
+    swapped = swapped.replace("(z) A code-side rail", "(b) A code-side rail")
+    assert swapped != block and "[bar parts in order]" in labels(swapped), labels(swapped)
+    # The (c) marker dropped: the process half survives as prose and stops being a part.
+    assert "[bar has three parts]" in labels(re.sub(r"\(c\) The flip lands", "The flip lands", block))
+    # One rail kept, the other deleted: each class is a different mis-move.
+    assert "[rail: round row]" in labels(
+        block.replace("carries a round row", "carries a note"))
+    assert "[rail: spent reasons]" in labels(
+        block.replace("attempts are spent / owed-check decides", "attempts are mentioned"))
+    assert "[rail names item 4172]" in labels(
+        block.replace("item 4172, mis-bound", "one item, mis-bound"))
+    assert "[rail names item 4151]" in labels(
+        block.replace("(item 4151, moved", "(one item, moved"))
+    # The rails described as though they were already built.
+    assert "[rail unbuilt stated]" in labels(
+        block.replace("Neither rail exists in the tree today", "Both rails are in place"))
+    # The inadmissible measure softened, its mechanism dropped, its figures dropped.
+    assert "[rate inadmissible]" in labels(
+        block.replace("`judgement.rate` is INADMISSIBLE for a re-flip",
+                      "`judgement.rate` is one input to a re-flip"))
+    assert "[rate mechanism]" in labels(
+        block.replace("`agreement()` never re-scores an applied status",
+                      "the rate is a noisy signal"))
+    assert "[rate failure evidence]" in labels(
+        block.replace("cleared judged 140 / rate 0.9714", "earlier cleared readings"))
+    assert "[rate failure counted]" in labels(
+        block.replace("2 put-backs inside the first 3 applied moves", "some put-backs"))
+    # The replay: its source, its reader, its number, its direction, and the false gloss.
+    assert "[replay source]" in labels(block.replace("`runs.response_json`", "the ledger"))
+    assert "[replay reader named]" in labels(
+        block.replace("through the fixed `reverted_moves`", "through the alarm"))
+    assert "[replay bar stated]" in labels(
+        block.replace(">= 46 proposals with 0 pairs", ">= 46 proposals with a few pairs"))
+    both = labels(block.replace("accumulates forward from 2026-11-19",
+                               "is the 11-16 -> 11-20 volume"))
+    assert "[replay accumulates]" in both, both
+    assert "[no flip-window gloss]" in both, both
+    # Part (c)'s two halves.
+    assert "[re-flip carries the stop condition]" in labels(
+        block.replace("carrying this same 7-day stop condition", "carrying a stop condition"))
+    assert "[re-flip carries the replay]" in labels(
+        block.replace("live-window `reverted_moves` replay", "later review"))
+    # The old open question, typed back in beside the answer that replaced it.
+    asked = block + "\n    # Whether `apply` may be flipped again, and on what bar, is\n" \
+                   "    # owed-check's to rule; no round decides it here.\n"
+    assert "[question replaced]" in labels(asked), labels(asked)
+
+
 #: The three ways the tree actually writes the retired floor. #3089's own absence
 #: grep was `>= 100`, which saw one of them: `config.yaml` and the architecture doc
 #: put the backtick AFTER `judged` (one of them with a Unicode `≥`), and
