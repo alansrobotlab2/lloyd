@@ -1323,6 +1323,22 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
   'pending-research/domain-research/':
    ('generated: the vault staging directory the research worker'
     'fills while a domain sweep is in flight, empty between runs'),
+  # Keyed to the span the page writes in backticks, character for character and
+  # including the filename — NOT to `~/lloyd-data/secrets/`. The sweep's lookup is
+  # `span not in exempt` (`unexplained_citations`), so a container key excuses
+  # nothing the page cites, and the `generated:` class rail below
+  # `test_the_generated_class_rail_...` then refuses it as excusing no citation at
+  # all. `test_the_credential_registry_exemption_is_keyed_to_its_own_citation`
+  # drives both spellings through the real sweep.
+  '~/lloyd-data/secrets/credentials.json':
+   ('generated: the credential registry `store_path()` builds from'
+    "`STORE_TEMPLATE` in `app/harness/credential_store.py`, which"
+    'creates the directory when the first secret is enrolled. `ls -d'
+    '~/lloyd-data/secrets` reported `No such file or directory` on'
+    '2026-11-27, so the deny-list entry `#3846` added to'
+    '`PROTECTED_READ_ROOTS` points at a store this box has not written'
+    'yet. Delete this entry the day the file appears — an entry beside a'
+    'citation that resolves excuses nothing (#4182)'),
  },
  'workers.md': {
   'pending-research/':
@@ -1440,6 +1456,19 @@ PATH_CITATION_EXEMPTIONS: dict[str, dict[str, str]] = {
 #: every remaining `generated:` entry, so the next exemption whose path appears is caught by a
 #: node instead of by a survey. The list is 107 exemptions across 28 docs — other-tree 44,
 #: generated 30, historical 33 — and NONE of them is `stale:`.
+#: Re-measured 2026-11-27, the day the list gained its second `generated:` entry since
+#: #3297. The span is the credential registry `~/lloyd-data/secrets/credentials.json`,
+#: which `workers-jobs.md` names as one of the five `PROTECTED_READ_ROOTS` entries #3846
+#: added; `store_path()` in `app/harness/credential_store.py` builds it from
+#: `STORE_TEMPLATE` and makes the directory only when the first secret is enrolled, and
+#: `ls -d ~/lloyd-data/secrets` reported `No such file or directory` on 2026-11-27. The
+#: list is 108 exemptions across 28 docs — other-tree 44, generated 31, historical 33 —
+#: and NONE of them is `stale:`. What that entry had to get right, and what the round
+#: that first proposed it got wrong: the key is the span the page cites, not
+#: `~/lloyd-data/secrets/`. `unexplained_citations` grants a pass with `span not in
+#: exempt`, so a parent-directory key excuses no citation on the page and leaves the
+#: sweep red anyway, while the `generated:` class rail above refuses such an entry as
+#: excusing a citation the doc does not make. One red node became two.
 #: The ruling, from that owed-check: `stale` STAYS an admitted kind, and this ceiling — not
 #: the kind list — is the rail. Deleting the kind was refused for a reason worth keeping
 #: beside the number, because it is the rail's own text: the failure message of
@@ -9967,6 +9996,103 @@ def test_the_ceiling_s_ruling_is_recorded_in_its_own_comment():
         "the block must name the ruling as settled, which is what replaces the pointer")
     for refused in ("leave the admitted kinds", "drop `stale`", "drop the kind"):
         assert refused not in block, f"the block proposes {refused!r}, which was refused"
+
+
+# ── #4645 — the credential-registry exemption is keyed to its own citation ──
+
+#: The span `workers-jobs.md` writes in backticks when it names the credential registry
+#: among the five `PROTECTED_READ_ROOTS` entries #3846 added. Spelled once so the entry
+#: it excuses, the node below, and every failure message quote the same bytes the page
+#: writes — an exemption keyed to anything but these bytes excuses nothing.
+CREDENTIAL_REGISTRY_SPAN = "~/lloyd-data/secrets/credentials.json"
+
+#: The spelling round `SM_20261127_174014` admitted for the same sentence: the registry's
+#: parent directory, `~/lloyd-data/secrets/`. Kept as DATA, not as a sentence, because
+#: this node drives it through the real sweep as the arm that must stay red. A container
+#: key is what an author reaches for when the cited file looks awkward to admit, and it
+#: cost that round two red nodes instead of one: the sweep went on naming the citation,
+#: and the `generated:` class rail refused the entry as excusing no citation at all.
+CREDENTIAL_REGISTRY_PARENT_SPAN = "~/lloyd-data/secrets/"
+
+
+def test_the_credential_registry_exemption_is_keyed_to_its_own_citation():
+    """#4645 clause 1: a `generated:` excuse travels with the citation, never its folder.
+
+    `test_every_path_an_architecture_doc_cites_resolves_in_the_working_tree[workers-jobs.md]`
+    went red naming `~/lloyd-data/secrets/credentials.json`, and took
+    `test_the_gate_selection_drops_nothing_and_the_named_node_passes` down with it — that
+    node re-runs this whole file under the gate's mark expression and demands exit 0, so
+    one unexcused citation is two red nodes, which is the same arithmetic #4450 records
+    above. The path is absent because it is lazily created: `store_path()` in
+    `app/harness/credential_store.py` builds it from `STORE_TEMPLATE` and makes the
+    directory when the first secret is enrolled, and `ls -d ~/lloyd-data/secrets`
+    reported `No such file or directory` on 2026-11-27. So a `generated:` entry is the
+    remedy the #4335 ruling names — but keyed the way that ruling requires, which is what
+    the first round got wrong.
+
+    Every arm below goes through `unexplained_citations`, the function the corpus node
+    itself is graded by, so this cannot pass on a re-implementation of the lookup:
+
+      (a) the entry is present, is `generated:`, and carries the date it was measured;
+      (b) its key is a citation the page actually makes — the predicate
+          `test_the_generated_class_rail_...` uses, so a key that node refuses cannot be
+          green here;
+      (c) the path is still absent on this box, so the entry is still EARNED; the day the
+          store is written this arm reddens and names the deletion;
+      (d) it is LOAD-BEARING: drop the entry and the sweep names exactly this one span,
+          which also proves the page's other three exemptions carry their own weight;
+      (e) substituting the parent-directory key leaves the span named anyway — a
+          container excuses nothing, because the lookup is `span not in exempt`.
+    """
+    slug = "workers-jobs.md"
+    exempt = PATH_CITATION_EXEMPTIONS[slug]
+    text = _text(slug)
+
+    reason = exempt.get(CREDENTIAL_REGISTRY_SPAN)
+    assert reason is not None, (
+        f"{slug} has no exemption keyed to the exact span the page cites "
+        f"({CREDENTIAL_REGISTRY_SPAN!r}); the sweep's lookup is `span not in exempt`, so "
+        "anything else in the dict is a pass for a citation nobody writes")
+    assert reason.startswith("generated:"), (
+        f"the registry entry reads {reason[:40]!r}; the store is created by the first "
+        "enrolled secret, so the kind is `generated:`, not a history claim")
+    assert "2026-11-27" in reason, (
+        "the entry lost the date its absence was measured on; a `generated:` reason "
+        "without a date cannot be re-checked, only believed")
+
+    cited = _cited_path_of(slug, CREDENTIAL_REGISTRY_SPAN)
+    assert cited is not None, (
+        f"the key {CREDENTIAL_REGISTRY_SPAN!r} excuses no citation the page makes — the "
+        "same predicate the `generated:` class rail applies, and the failure "
+        "`SM_20261127_174014` met with its parent-directory spelling")
+
+    assert _span_outlived_its_absence(CREDENTIAL_REGISTRY_SPAN) is None, (
+        f"`{CREDENTIAL_REGISTRY_SPAN}` now exists on this box, so the entry excuses a "
+        "citation that resolves and hides it from the sweep. Delete the entry (and this "
+        "node's arms (c) and (d)) the day the store is written — #4182's ruling")
+
+    stripped = {k: v for k, v in exempt.items()
+                if k != CREDENTIAL_REGISTRY_SPAN}
+    missing = sorted({span for span, _p in unexplained_citations(text, stripped)})
+    assert missing == [CREDENTIAL_REGISTRY_SPAN], (
+        f"without the entry the sweep names {missing}, not exactly "
+        f"{[CREDENTIAL_REGISTRY_SPAN]} — so either the entry excuses more than the one "
+        "citation it is keyed to, or the doc acquired a second unexcused path and the "
+        "corpus node is red for a reason this node just found first")
+
+    parented = dict(stripped)
+    parented[CREDENTIAL_REGISTRY_PARENT_SPAN] = reason
+    still = sorted({span for span, _p in unexplained_citations(text, parented)})
+    assert still == [CREDENTIAL_REGISTRY_SPAN], (
+        f"the parent-directory key {CREDENTIAL_REGISTRY_PARENT_SPAN!r} excused the "
+        f"citation (sweep named {still}). `unexplained_citations` matches with `span not "
+        "in exempt`, so this arm is the proof that a container key is not a substitute "
+        "for the citation's own key — if it ever passes, the lookup grew prefix matching "
+        "and the class rail's exactness rule has to be renegotiated with it, not worked "
+        "around here")
+    assert _cited_path_of(slug, CREDENTIAL_REGISTRY_PARENT_SPAN) is None, (
+        f"{slug} now cites {CREDENTIAL_REGISTRY_PARENT_SPAN!r} as a span of its own, so "
+        "the arm above is no longer testing a key the page never wrote")
 
 
 # ── #4450 — a correction that cites a second upstream module needs its own entry ──

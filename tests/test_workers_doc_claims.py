@@ -5140,21 +5140,67 @@ def _health_of_a_kinded_source(tmp_path, runs=_KINDED_RUNS, name="doc-claims.db"
     return block, NO_KIND
 
 
-def _health_keys_block():
+def _health_keys_block(doc: str | None = None):
     """The §5 sentence introducing `by_kind` and its three worked figures.
 
     Bounded by two phrases the passage itself owns: the clause that opens the `by_kind`
     sentence after #3527's `last_failure`/`consecutive_failures` lines, and the failure-date
     enumeration that follows the passage. Named phrases rather than line numbers, because a
     doc line number here is a claim the next re-freeze moves.
+
+    The closing landmark is `Where the 51` and stops short of the verb, for the same reason
+    it stops short of a line number. `1e0f4690` (`arch-review: group:workers-jobs:Intake —
+    stale`) re-freezed this passage and rewrote `Where the 51 sit:` as `Where the 51 sat:` —
+    a true change of tense, the burst having moved out of the window — and that single word
+    reddened `test_the_health_keys_block_documents_the_by_kind_partition_the_rollup_emits`
+    with the graded passage untouched, which is one of the eight failures #4645 reproduced at
+    base with no diff present. A landmark carrying a tense is a landmark the next re-freeze
+    moves, so the cut is on the phrase the tenses share. The optional `doc` argument is the
+    seam that lets
+    `test_the_health_keys_landmark_survives_a_re_tensed_prose` hand both spellings in; the
+    default reads the live file, which is what every other reader here passes.
     """
-    doc = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+    if doc is None:
+        doc = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
     start = doc.find("same per-source block also carries `by_kind`")
-    end = doc.find("Where the 51 sit", start)
+    end = doc.find("Where the 51", start)
     assert start != -1 and end > start, (
         "the §5 health-keys passage is not findable between its two named landmarks, so "
         "everything below reads a window chosen by nothing")
     return doc[start:end]
+
+
+def test_the_health_keys_landmark_survives_a_re_tensed_prose():
+    """The closing landmark may not carry a verb, because a re-freeze re-tenses the prose.
+
+    `1e0f4690` rewrote `Where the 51 sit:` to `Where the 51 sat:` while refreshing the
+    window, and the reader below died on its landmark: the passage it grades did not move,
+    and #4645 reproduced all eight of this failure set at base `1e0f46903234` with no
+    round's diff present. So the cut now falls on `Where the 51`, which both tenses share.
+    This node feeds the live passage rewritten to each spelling in turn. Both must yield a
+    non-empty block that still documents `by_kind` and still stops before the date
+    enumeration — so a re-freeze that re-tenses the sentence again cannot redden the reader,
+    and a landmark that grew its verb back would leave exactly one of the two arms failing
+    to find the passage at all.
+    """
+    live = _health_keys_block()
+    assert live and "by_kind" in live, (
+        "the live passage itself does not carry `by_kind`, so the two arms below would be "
+        "grading a fixture nobody cites")
+    for spelled in ("Where the 51 sit", "Where the 51 sat"):
+        doc = (ARCH / "workers-jobs.md").read_text(encoding="utf-8")
+        swapped = (doc.replace("Where the 51 sat", spelled)
+                      .replace("Where the 51 sit", spelled))
+        assert swapped.count(spelled) == 1, (
+            f"the fixture could not be rewritten to exactly one {spelled!r}: "
+            f"{swapped.count(spelled)}")
+        block = _health_keys_block(swapped)
+        assert block and "by_kind" in block, (
+            f"the landmark stopped finding the passage under the {spelled!r} tense — "
+            "the verb is back in the cut")
+        assert "9 on 2026-10-21" not in block, (
+            f"{spelled}: the block ran past the failure-date enumeration it is meant to "
+            "stop before, so the worked figures below are no longer one window")
 
 
 def test_the_health_keys_block_documents_the_by_kind_partition_the_rollup_emits(tmp_path):
