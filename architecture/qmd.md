@@ -555,7 +555,7 @@ the build rather than the setting is what changed.
 - `agent-services/conf/qmd-index.yml` (template), `~/.config/qmd/index.yml`, `~/.config/qmd/evalpin.yml`
 - `scripts/maintenance/qmd_index_maintenance.py`, `scripts/qmd_fork_landing.py`, `scripts/automod/evalpin.py`
 - `app/qmd_health.py`, `agent_mcp/vault.py`
-- `eval/qmd_contention.py` — the join that prices contention on qmd's own card by parsing the daemon's own `/query` lines (§2's log) against the regression runner's windows. The card is whatever `agent-qmd-daemon.conf` pins — GPU 4 since 2026-11-10, GPU 0 before that — and since `evalpin.production_daemon` takes that conf's environment the pin sits on the same card, so the join still measures a real contention; only the card's number moved, and the script's own docstring still names GPU 0 (#4474). Read §7's measurement trap before quoting its figure.
+- `eval/qmd_contention.py` — the join that prices contention on qmd's own card by parsing the daemon's own `/query` lines (§2's log) against the regression runner's windows. The card is whatever `agent-qmd-daemon.conf` pins — GPU 4 since 2026-11-10 — and since `evalpin.production_daemon` takes that conf's environment the pin sits on the same card, so the join measures a real contention; only the card's number moved when the stack did, and the docstring named the card it left until `3c64711c` (2026-11-24) said otherwise (#4474). Two tenants are co-resident with production qmd on that card, not one: the eval pin, and `agent-qmd-watcher`, which sets the same `CUDA_VISIBLE_DEVICES` in its own conf and re-embeds there — the join puts that load in both arms and cannot separate it, which `eval/measurements/qmd-contention-gpu4-2026-11-27.md` §8 states as a caveat (#4631). Read §7's measurement trap before quoting its figure.
 - tests: `test_qmd_single_build.py`, `test_qmd_index_template.py`, `test_qmd_index_maintenance.py`, `test_qmd_fork_landing.py`, `test_qmd_query_shape.py`, `test_qmd_health.py`, `test_qmd_maintenance_health.py`, `test_service_health_check_qmd.py`, `test_qmd_doc_claims.py`, `test_qmd_contention.py`
 
 ## Review log
@@ -661,7 +661,8 @@ the build rather than the setting is what changed.
   report was **not** cited at that date because its bytes had no committed witness — the
   doc's own rail refused the citation mid-edit, which is the point of it. Filed: #4473 (the
   cleanup unit
-  still pins `CUDA_VISIBLE_DEVICES=0`), #4474 (`eval/qmd_contention.py` still says GPU 0),
+  still pins `CUDA_VISIBLE_DEVICES=0`), #4474 (`eval/qmd_contention.py` still said GPU 0,
+  which `3c64711c` fixed on 2026-11-24),
   #4475 (no lower swap bound, and the first threshold night refutes the 0.35 calibration),
   #4476 (a test pins the literal `04:00` it parses as hour 4), #4478 (the missing fixtures —
   since landed, so §5 now cites all three of that night's reports by name).
