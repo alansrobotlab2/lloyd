@@ -3175,7 +3175,8 @@ def live_rounds_by_item(item_ids) -> dict[int, str]:
 
 
 def items_with_unfinished_rounds(ledger: Path, *,
-                                 history: dict[int, list[dict]] | None = None) -> set[int]:
+                                 history: dict[int, list[dict]] | None = None,
+                                 count_kept_promotions: bool = True) -> set[int]:
     """Items whose attempt is not over, whatever `implement_outcomes` reads.
 
     `implement_outcomes` answers "is another attempt owed"; it reads `spent`
@@ -3195,10 +3196,27 @@ def items_with_unfinished_rounds(ledger: Path, *,
     and no `current.json` round naming it, a round-less `finished` row releases
     the item exactly as it always did, so a turn that never opened a round never
     freezes its item in this predicate.
+
+    `count_kept_promotions=False` (#4629) is the same predicate with ONE arm taken
+    out, for the reader that asks "is a round of this item still RUNNING". The arm is
+    the promotion whose commit no rollback took off `main`, and a kept landing
+    satisfies it forever: #4616, `in_progress` with nothing running on 2026-11-27
+    because the round that landed it as `c077eead` is an ancestor of HEAD and will be
+    one for the rest of the store's life, which is the state Alan's 2026-09-13 ruling
+    at the head of `desired_statuses` forbids ("`in_progress` means a round is running
+    and nothing else"). Everything else answers identically under both readings — the
+    latest `started` row, `current.json`, the standing worktree, the live gate and land
+    markers, and `live_rounds_by_item`. The promotion arm's other half moves neither
+    way either: a commit a rollback DID name has already left `_live_promoted_rounds`,
+    so this parameter changes nothing for a rolled-back round, and `implement_outcomes`
+    stays the only thing that decides one (`rolled_back` while its retry budget is
+    left, never a park). The default stays ON: the reaper and the re-triage pass ask
+    "is this attempt still open", and for them a promoted change the sweep has not
+    filed is not.
     """
     from scripts.automod import state as S, worktree as W
     history = implement_history(ledger) if history is None else history
-    live_promoted = _live_promoted_rounds(ledger)
+    live_promoted = _live_promoted_rounds(ledger) if count_kept_promotions else set()
     try:
         current_rid = str((S.read_current() or {}).get("round_id") or "")
     except Exception:  # noqa: BLE001
@@ -5767,14 +5785,15 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
     # answers two, because a RE-OFFER issued while the round is still live is the same
     # contradiction the spend guard exists to avoid (see `_unfinished_rounds`, and the
     # branch that reads it below). Computed once per pass either way.
-    unfinished: set[int] | None = None
+    unfinished: dict[bool, set[int]] = {}
+    rows_read = False
     retriages: dict[int, int] = {}
     history: dict[int, list[dict]] = {}
     open_ids: set[int] = set()
 
-    def _unfinished_rounds() -> set[int]:
-        """#3546's predicate, asked once per pass: which items are mid-round whatever
-        their latest `backlog_implement` row says.
+    def _unfinished_rounds(*, count_kept_promotions: bool = True) -> set[int]:
+        """#3546's predicate, asked once per arm set per pass: which items are
+        mid-round whatever their latest `backlog_implement` row says.
 
         The ONE liveness answer. `items_with_unfinished_rounds` is what reads the
         worktree, the gate and landing markers, `current.json` and the unsettled
@@ -5782,14 +5801,24 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
         the re-triage pass consult; restating any of it here would be a second answer
         to `is this round over`, and those two commits both name the drift between two
         such answers as the failure mode. Nothing in this function tests liveness.
+
+        #4629 adds an ARM SET to that one answer, not a second answer beside it: the
+        keyword goes straight through to the shared predicate, so the reader that asks
+        whether a round is still RUNNING gets the same function with the kept-promotion
+        arm off (`items_with_unfinished_rounds`), and this function still holds no
+        liveness rule of its own. Each arm set is walked at most once per pass, and the
+        rows beneath both are read once.
         """
-        nonlocal unfinished, history, retriages, open_ids
-        if unfinished is None:
-            history = implement_history(ledger)
-            unfinished = items_with_unfinished_rounds(ledger, history=history)
-            retriages = retriage_counts(ledger)
-            open_ids = {i.id for i in open_items(None)}
-        return unfinished
+        nonlocal history, retriages, open_ids, rows_read
+        if count_kept_promotions not in unfinished:
+            if not rows_read:
+                history = implement_history(ledger)
+                retriages = retriage_counts(ledger)
+                open_ids = {i.id for i in open_items(None)}
+                rows_read = True
+            unfinished[count_kept_promotions] = items_with_unfinished_rounds(
+                ledger, history=history, count_kept_promotions=count_kept_promotions)
+        return unfinished[count_kept_promotions]
 
     def _pool_or_carrier(fm: dict, why: str) -> tuple[str, str]:
         """The implement-pool status, unless dispatch cannot act on this item.
@@ -5875,8 +5904,8 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             # still owed (`up_next`) or spent (`draft`, needs-human). This
             # branch used to park it `in_progress` and contradict the rule.
             verdict, detail = outcomes.get(iid, ("", ""))
-            if verdict == "spent" and iid in _unfinished_rounds():
-                # #4621: not while this store still counts a round of it unfinished. The
+            if verdict == "spent" and iid in _unfinished_rounds(count_kept_promotions=False):
+                # #4621, narrowed by #4629: not while a round of it is still RUNNING. The
                 # park fired on #4616 at 06:21:05Z on 2026-11-27 with that round's worktree
                 # and gate process alive — the state the board steward grounded as
                 # `round_state=worktree+gate` and answered `in_progress` to 66 seconds
@@ -5890,6 +5919,18 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
                 # the one shared predicate through the same lazy closure — and asked HERE,
                 # where a pass only arrives for an item that reached this park, because
                 # the predicate probes a worktree and two markers per item it holds.
+                #
+                # #4629 takes the kept-promotion arm out of the question THIS park asks,
+                # because asking it with that arm on made the hold permanent and reversed
+                # the ruling it was written to protect: #4616's landing (`c077eead`, an
+                # ancestor of HEAD for the rest of this store's life) kept an OPEN, spent,
+                # `not_met` item `in_progress` with no worktree, no `current.json` round,
+                # no gate and no land marker — the state the 2026-09-13 ruling at the head
+                # of this function forbids, and the answer the board steward called
+                # `draft` while the machine said `in_progress`. The arm is ON for every
+                # other reader of the same predicate, including the two branches below:
+                # the reaper and the re-triage pass ask "is this attempt still open", and
+                # a promoted change the sweep has not filed is not over for them.
                 out[iid] = ("in_progress", "an automod round is in flight for it")
             elif verdict == "spent":
                 out[iid] = ("draft", "landed with a clause not met and its one unattended attempt "

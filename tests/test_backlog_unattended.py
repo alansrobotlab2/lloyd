@@ -6763,13 +6763,21 @@ def test_the_re_offer_hold_is_the_shared_predicate_s_decision_and_no_liveness_ru
     _turn_ran_out_of_clock(3508, "SM_20261101_182616")
     _round_state(monkeypatch, tmp_path, gate_live=True)
 
-    monkeypatch.setattr(BL, "items_with_unfinished_rounds",
-                        lambda ledger, *, history=None: {3508})
+    asked: list[bool] = []
+
+    def held(ledger, *, history=None, count_kept_promotions=True):
+        asked.append(count_kept_promotions)
+        return {3508}
+
+    monkeypatch.setattr(BL, "items_with_unfinished_rounds", held)
     assert B.desired_statuses(S.LEDGER_PATH)[3508][0] == "in_progress", \
         "the predicate is not what decides the hold"
+    assert set(asked) == {True}, (
+        f"the re-offer hold stopped asking the shared predicate with the promotion arm on "
+        f"(#4629 gave it an arm set; only the spent park may narrow it): {asked}")
 
     monkeypatch.setattr(BL, "items_with_unfinished_rounds",
-                        lambda ledger, *, history=None: set())
+                        lambda ledger, *, history=None, count_kept_promotions=True: set())
     want = B.desired_statuses(S.LEDGER_PATH)[3508]
     assert want[0] == "up_next" and want[1].startswith("offered again — incomplete"), \
         f"the stub is holding by something besides itself: {want}"
