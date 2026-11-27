@@ -1486,20 +1486,22 @@ pipes the result into `scripts/iv_metrics_record.py`, which appends **one row pe
 run** to `_pipeline/reflection/iv-metrics.jsonl`; it has run nightly since
 2026-09-15 (measured 2026-11-27: 71 rows over 67 dated nights, newest `recorded_at`
 2026-11-26T09:01:12Z). One row per *run* and not per night is the distinction that
-reaches the bound: 2026-11-19 and -24 each carry two rows, because a run that was
-killed had already written one and the retry wrote another, and the breach median
-counts `DEFAULT_WINDOW_ROWS` (7) **rows** with no per-night key of the kind #90 puts on
-its own diff base. Four of its 27 runs since 2026-10-28 recorded `failed`, and three of
-them — 2026-11-19, -24, -25 — were killed at the 300 s ceiling (300.2–300.3 s) with
-their row already written 3–6 s in. That wedge was the run calling
+reaches the bound: 2026-11-19 and -24 each carry two rows, because a second run on a
+night that already had one appended another, and until backlog **#4623** the breach
+median counted `DEFAULT_WINDOW_ROWS` (7) **rows** with no per-night key of the kind
+#90 puts on its own diff base — one doubled night therefore held two of the basis's
+eight slots. It counts **nights** now: one rate per UTC `recorded_at` date, the later
+run for a night winning, so the window can no longer be weighted twice by whichever
+run happened to land last. Four of its 27 runs since 2026-10-28 recorded `failed`, and
+three of them — 2026-11-19, -24, -25 — were killed at the 300 s ceiling (300.2–300.3 s)
+with their row already written 3–6 s in. That wedge was the run calling
 `automod_vault_land` to commit its own mirror — a synchronous multi-minute call that
 outlasts a 300 s ceiling every time — and #4563 removed it from the skill on
 2026-11-25 (`9f185e42`), naming the nightly vault-commit sweep as committer instead; a
-second hang class on this task after #2704's, closed the same way, by taking the
-slow step out of the run rather than by raising the ceiling. The series had kept those
-nights while the runs reported failure, which is
-the mirror image of the alarm-night #2619 publishes. What it watches is whether the observer's verdicts arrive at all:
-`dropped_rate` is dropped verdicts over `llm_calls`, the share of the observer's
+second hang class on this task after #2704's, closed the same way, by taking the slow
+step out of the run rather than by raising the ceiling. The series had kept those
+nights while the runs reported failure, which is the mirror image of the alarm-night
+#2619 publishes. What it watches is whether the observer's verdicts arrive at all:`dropped_rate` is dropped verdicts over `llm_calls`, the share of the observer's
 judgment calls that returned nothing because the deadline expired or the call
 errored, so it turns "the observer seems quiet today" into a trend with a bound
 on it. Since #4345 the same row also carries the per-call latency percentiles
@@ -1511,8 +1513,9 @@ whether they arrive — and a percentile stays `None` on an empty sample rather 
 being written as 0. Where that bound sits is a ruling and not an implementation detail, so it
 lives in `DEFAULT_THRESHOLD` in the recorder and is deliberately not copied here.
 This is the group's rarest shape — a report that has a consumer, and the consumer
-is its own recorder: the median over the last `DEFAULT_WINDOW_ROWS` (7) rows
-decides a sustained breach once at least `MIN_BREACH_ROWS` (3) exist, and
+is its own recorder: the median over the last `DEFAULT_WINDOW_ROWS` (7) UTC
+nights — nights, not rows, one rate each, per #4623 — decides a sustained breach
+once at least `MIN_BREACH_ROWS` (3) exist, and
 `announce(level="warning")` fires it once per breach, so the series is read back by
 the thing that alerts on it. There is a second consumer since #2121: the run also
 mirrors the file into `~/obsidian/knowledge/inner-voice/iv-metrics.jsonl` through

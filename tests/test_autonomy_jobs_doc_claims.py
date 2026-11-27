@@ -146,7 +146,15 @@ TIERS_HEADER = jm.TIERS_HEADER
 #: That is why the membership lives here and not in the sentences — dropping the id
 #: from this set is what forces the three counts in the doc to be edited in the
 #: same commit, and why a doc that quietly kept "three of the seven" is red.
-NO_CONSUMER = {"#36", "#70"}
+#: #70 LEFT this set on 2026-11-27. `42b056b0` (arch-review, #3453) recorded that the skill-lint
+#: inventory has a consumer now and rewrote the sentence to "One of the six has no consumer"
+#: — but did not move this set, which left both nodes below RED AT THAT COMMIT with no round's
+#: diff present. They are repaired here rather than left because the `tests` rung charges a red
+#: to any round that edits the file it lives in (`new_failures` names it, and the base probe
+#: reports "no failures outside the round's own files"), and because the counts they grade are
+#: in the same Measure section this round edits for #4623. A job joins this set only when the
+#: DOCUMENT says it has no consumer — never from a run.
+NO_CONSUMER = {"#36"}
 
 _WORDS = {
     "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -465,8 +473,15 @@ def test_the_measure_group_lists_the_live_iv_metrics_series():
 
 def test_the_86_entry_states_its_frequency_its_subject_and_its_two_prohibitions():
     """Clause 1, content: its frequency, what it watches, that it appends one row
-    per night to `_pipeline/reflection/iv-metrics.jsonl`, and that it must not
-    write `usage.db` or hand-write a row.
+    per run to `_pipeline/reflection/iv-metrics.jsonl` with the median window keyed
+    per UTC night, and that it must not write `usage.db` or hand-write a row.
+
+    The first probe used to read `one row per night`, and #4623 is why it does not:
+    that sentence was false on the live file the day it was written (71 rows over 67
+    UTC dates), and the append-per-*run* invariant is what the `why` gloss below has
+    always named. The night is the unit of the median window, not of the append, so
+    the second probe is what now pins that distinction — a doc that drifted back to
+    "per night" as an append guarantee would satisfy the first probe and fail this one.
     """
     section = _text().split("## Measure:", 1)[1].split("\n## ", 1)[0]
     row = next((ln for ln in section.splitlines() if re.match(r"\|\s*#86\s*\|", ln)), None)
@@ -479,7 +494,8 @@ def test_the_86_entry_states_its_frequency_its_subject_and_its_two_prohibitions(
     assert "**#86" in section, "#86 has no prose entry in the Measure section"
     body = _flat(section.split("**#86", 1)[1].split("\n### ", 1)[0])
     for probe, why in (
-        (r"one row per night", "one append per run is the invariant, not a style"),
+        (r"one row per run", "one append per run is the invariant, not a style"),
+        (r"one rate per UTC", "the median window is keyed per UTC night (#4623)"),
         (r"_pipeline/reflection/iv-metrics\.jsonl", "where the series lands"),
         (r"nightly|daily", "how often it runs"),
         (r"dropped_rate", "the number it watches"),
@@ -707,30 +723,58 @@ def test_every_count_of_the_measure_group_matches_its_membership():
         "their consumer by filing a backlog item (#3449), so a cross-reference that "
         "reads as a membership is a false claim, not a comparison")
 
-    n, d, said = _count(flat, r"(\w+) of the (\w+) have no consumer",
+    # `ha(?:s|ve)` because the sentence went SINGULAR when #3453 moved #70 out of
+    # `NO_CONSUMER`: "One of the six has no consumer". A probe pinned to the PLURAL could
+    # not be satisfied by any true statement about a one-member set, which would make it a
+    # check on grammar rather than on the count.
+    n, d, said = _count(flat, r"(\w+) of the (\w+) ha(?:s|ve) no consumer",
                         "the no-consumer claim is no longer a count of the group")
     assert d == len(ids), f"'{said}': denominator {d}, group is {len(ids)} — {ids}"
     assert n == len(NO_CONSUMER), f"'{said}' counts {n}; the consumerless set is {sorted(NO_CONSUMER)}"
 
-    n, d, said = _count(flat, r"they are (\w+) of (\w+), which is a pattern",
-                        "the no-consumer paragraph no longer restates its own count")
-    assert d == len(ids), f"'{said}': denominator {d}, group is {len(ids)} — {ids}"
-    assert n == len(NO_CONSUMER), f"'{said}' counts {n}; the consumerless set is {sorted(NO_CONSUMER)}"
+    # The doc restated the same figure a second time, as "they are two of six, which is a
+    # pattern"; `42b056b0` retired that clause with the sentence carrying it. The double-count
+    # check stays live in BOTH shapes instead of turning into a probe no diff can satisfy
+    # (skill-lint's `dead` bucket): a set of two or more must still be restated in agreeing
+    # words, and a one-member set must not leave the plural wording standing beside it.
+    if len(NO_CONSUMER) >= 2:
+        n2, d2, said2 = _count(flat, r"they are (\w+) of (\w+), which is a pattern",
+                               "the no-consumer paragraph no longer restates its own count")
+        assert d2 == len(ids), f"'{said2}': denominator {d2}, group is {len(ids)} — {ids}"
+        assert n2 == len(NO_CONSUMER), (
+            f"'{said2}' counts {n2}; the consumerless set is {sorted(NO_CONSUMER)}")
+    else:
+        assert "which is a pattern" not in flat, (
+            "the plural restatement `they are … of …, which is a pattern` is still "
+            "standing while `NO_CONSUMER` holds one job — prose and set are one cloth")
 
 
 def test_the_no_consumer_paragraph_names_exactly_the_jobs_its_counts_claim():
     """The set `NO_CONSUMER` is an assertion about prose, so the prose is checked
-    against it: the paragraph must name those ids and no other member. This is
-    what stops a fifth sentence quietly making #86 the fourth one.
+    against it: the sentence that MAKES the count names those ids and no other member.
+    This is what stops a fifth sentence quietly making #86 the fourth one.
+
+    The window is the claim sentence, not the whole paragraph, and #3453 is why. That
+    item gave the skill-lint inventory a consumer, and the paragraph kept #70's id while
+    saying so — "#70, has a consumer now, and #3453 is what gave the inventory its
+    consumer" — alongside #83, which is named as the mechanism of a retired double count.
+    Whole-paragraph id equality would have to call those two an error, so it would be
+    satisfied only by deleting the explanation of why a member is NOT consumerless: a
+    check you can pass only by removing the truth is a check on the length of prose. The
+    claim sentence is where a job becomes consumerless, so that is where membership is
+    graded; a member named further down has to survive on its own sentence.
     """
-    blocks = [b for b in _text().split("\n\n") if "have no consumer" in b]
+    blocks = [b for b in _text().split("\n\n")
+              if re.search(r"of the \w+ ha(?:s|ve) no consumer", _flat(b))]
     assert len(blocks) == 1, f"expected one no-consumer paragraph, found {len(blocks)}"
     ids = _measure_ids()
-    after = blocks[0].split("have no consumer.**", 1)[1]
-    named = {i for i in _ids(after) if i in ids}
+    claim = _flat(blocks[0])
+    claim = claim[claim.index("no consumer"):claim.index("no consumer") + 240]
+    named = {i for i in _ids(claim) if i in ids}
     assert named == NO_CONSUMER, (
-        f"the paragraph names {sorted(named)} as the jobs with no consumer, but "
-        f"the group's three counting sentences all say {sorted(NO_CONSUMER)}")
+        f"the counting sentence names {sorted(named)} as the job with no consumer, but the "
+        f"group\'s counting sentences all say {sorted(NO_CONSUMER)}; measured window: "
+        f"{claim!r}")
 
 
 #: What §Bound entropy has to say about #78 and #80 now that their reports have a

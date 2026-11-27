@@ -1725,15 +1725,52 @@ def _announcing_env(home: Path, repo: Path) -> dict:
     }
 
 
+def _stamp_the_night(out: Path, night: str) -> None:
+    """Re-stamp the series' newest row with the UTC `night` the scenario says it is.
+
+    A fixture editing the file it is supposed to be letting the recorder write is not
+    decoration, so the boundary is stated exactly: **only `recorded_at`, only the last
+    line, only after that line's own run finished.** Every other byte of every row is the
+    recorder's output, `dropped_rate` and `breach` included, so the chain's verdicts stay
+    evidence rather than input — what the fixture supplies is the date the run cannot
+    travel to, because `recorded_at` comes from `datetime.now(timezone.utc)` inside a
+    subprocess (`iv_metrics_record.py:_row`) and this suite has no clock to freeze and no
+    flag to hand one to. Without it `#4623`'s key would make every chain test below assert
+    about a single night, which is the failure mode the eight nodes had on the first run of
+    the changed recorder — and `_night_stamps_are_distinct_and_never_tonight` is the guard
+    that keeps this helper from silently becoming a way to forge a night into the window.
+
+    Rewriting happens in place over the file's own lines, and the count must not move: a
+    helper that dropped or duplicated a line would turn a weighting test into a data-loss
+    test.
+    """
+    lines = out.read_text(encoding="utf-8").splitlines(keepends=True)
+    assert lines, "no row to re-stamp: the nightly appended nothing"
+    row = json.loads(lines[-1])
+    assert isinstance(row, dict), f"the newest series line is not an object: {lines[-1][:80]!r}"
+    before = len(lines)
+    row["recorded_at"] = f"{night}T00:00:00+00:00"
+    lines[-1] = json.dumps(row, sort_keys=True) + "\n"
+    out.write_text("".join(lines), encoding="utf-8")
+    assert len(out.read_text(encoding="utf-8").splitlines()) == before, (
+        f"re-stamping changed the file from {before} rows to something else")
+
+
 def _night(home: Path, *, rate: float, since: str, out: Path, repo: Path,
            extra: list[str] | None = None,
-           env_extra: dict | None = None) -> subprocess.CompletedProcess:
+           env_extra: dict | None = None,
+           night: str | None = None) -> subprocess.CompletedProcess:
     """One nightly through the documented pipeline, for a day whose rate is `rate`.
 
     `rate` is applied as whole percentage points of 100 observer calls, so no assertion here
     is ever within a rounding tolerance of being wrong. `_call` runs `cd ~/lloyd &&
     iv_grade.py | iv_metrics_record.py` under `HOME=home`, which is the checkout the
     fixture built.
+
+    `night` is the UTC date (`YYYY-MM-DD`) this nightly is supposed to BE, and it exists
+    because #4623 made the night the unit of the median window — see `_stamp_the_night`.
+    Left unset the row keeps the recorder's own stamp, which is every test that never
+    claims to be a different day.
     """
     n_dropped = round(rate * 100)
     stamp = datetime.datetime.fromisoformat(since)
@@ -1744,7 +1781,10 @@ def _night(home: Path, *, rate: float, since: str, out: Path, repo: Path,
     _make_db(repo, rows)
     env = _announcing_env(home, repo)
     env.update(env_extra or {})
-    return _call(since=since, repo=repo, out=out, extra=extra, env=env)
+    result = _call(since=since, repo=repo, out=out, extra=extra, env=env)
+    if night is not None and result.returncode in (0, 2):
+        _stamp_the_night(out, night)
+    return result
 
 
 def _nights(home: Path, *, rates: list, out: Path, repo: Path,
@@ -1754,11 +1794,21 @@ def _nights(home: Path, *, rates: list, out: Path, repo: Path,
     The series file is never seeded. Each night's `dropped_rate` and `breach` come from the
     recorder's own previous output, so the file is evidence rather than an input and the
     assertion below is reading a chain, not a fixture.
+
+    Each night's UTC date is taken from the `since` bound that night already carries — one
+    source for "which day is this night", never a second list that could disagree with the
+    timestamps the rows are graded on. They are needed because #4623 made the UTC date the
+    unit of the median window: a chain of six nightlies run inside one test session is six
+    nights in this fiction and ONE date on disk, and the window would then hold one rate
+    while the node below asserts six. `_stamp_the_night` applies it, and every date is a
+    2026-09-1x/2x day, so no simulated night can ever equal the real tonight and be excluded
+    from its own basis by the reader's `own_night`.
     """
     per_night, codes, stored = [], [], []
     for index, rate in enumerate(rates):
         before = len(_announced(home))
-        result = _night(home, rate=rate, since=f"2026-09-{15 + index:02d}T03:00:00",
+        since = f"2026-09-{15 + index:02d}T03:00:00"
+        result = _night(home, rate=rate, since=since, night=since[:10],
                         out=out, repo=repo, extra=extra, env_extra=env_extra)
         assert result.returncode in (0, 2), (
             f"night {index + 1} exited {result.returncode}, not 0 or 2 — the pipeline "
@@ -3130,3 +3180,334 @@ def test_the_architecture_doc_blames_the_recorder_and_states_the_bound():
     assert "inner_voice.observer.timeout_seconds" in para and "8,000 ms" in para, (
         "the paragraph must state the deadline the percentiles are read against, in "
         "the unit the percentiles are in — a trio with no bound is not a verdict")
+
+
+# --------------------------------------------------------------------------- #
+# #4623 — the median window is keyed per UTC NIGHT, not per row.
+#
+# The recorder appends one row per RUN, and a run that dies after the append (task #86's
+# 300 s ceiling, six times since 2026-09-26) leaves a second row on a night that already
+# has one: the live series is 71 rows over 67 UTC dates (`2026-09-14` x3, `2026-11-19`
+# and `2026-11-24` x2 each). A row-sliced 7-row window therefore held 8 rows and one
+# night's traffic took 2 of the 8 slots — 25% of the median's weight. These nodes are the
+# five acceptance clauses of the item; the numbers in each are computed, not asserted from
+# the implementation.
+# --------------------------------------------------------------------------- #
+
+def _iv_row_at(rate, night, *, hour=0, **extra):
+    """A series row stamped on one UTC night, for the reader-level nodes below.
+
+    `recorded_at` carries the `+00:00` marker every one of the 71 live rows has had since
+    #2654's stamping, so these files are shaped like the real series and the key under
+    test is exercised on the field the item ruled on — not on `since`/`until`, which are
+    local wall clock (#835) and would make a node pass on a key production never uses.
+    No `breach` field: the nodes below want `_prior_breaching` to RE-DERIVE the last
+    night, which it only does when the row did not store one.
+    """
+    row = {"recorded_at": f"{night}T{hour:02d}:00:00+00:00", "dropped_rate": rate,
+           "threshold": 0.05, "threshold_source": "test", "window_rows": 7,
+           "since": f"{night}T03:00:00", "llm_calls": 100,
+           "dropped_verdicts": round(rate * 100), "timeout_by_deadline": {},
+           "landed_rate": None, "miss_rate": None, "flagged": rate > 0.05}
+    row.update(extra)
+    return row
+
+
+def _write_iv_series(tmp_path: Path, rows) -> Path:
+    path = tmp_path / "iv-metrics.jsonl"
+    path.write_text("".join(json.dumps(r, sort_keys=True) + "\n" for r in rows),
+                    encoding="utf-8")
+    return path
+
+
+def test_a_second_row_on_one_utc_night_buys_it_one_slot_and_the_later_row_its_rate(tmp_path):
+    """Clause 1: two readable rows on one UTC `recorded_at` date contribute ONE rate to the
+    basis — the later row's — so a doubled night cannot hold two of the window's slots.
+
+    The file is 8 rows over 7 nights: 0.01..0.05 on 2026-11-17..21, then 2026-11-22 twice
+    (0.07 first, 0.02 later), and 0.09 on 2026-11-23. Keyed, the window is 7 rates over 7
+    nights with the 22nd present once, at 0.02 — the later row, which is the ruling. Read
+    as rows, the same 7 slots hold the 22nd TWICE (0.07 and 0.02) and spend no slot at all
+    on 2026-11-17, whose 0.01 the extra row pushed out: 7 rows covering 6 nights.
+    """
+    rows = [_iv_row_at(rate, f"2026-11-{17 + day}") for day, rate in
+            enumerate([0.01, 0.02, 0.03, 0.04, 0.05])]
+    rows += [_iv_row_at(0.07, "2026-11-22", hour=0), _iv_row_at(0.06, "2026-11-22", hour=12)]
+    rows += [_iv_row_at(0.09, "2026-11-23")]
+    assert len(rows) == 8 and len({r["recorded_at"][:10] for r in rows}) == 7
+    series = _write_iv_series(tmp_path, rows)
+
+    rates, malformed, _was = iv_metrics_record._prior_series(
+        series, 7, own_night="2026-11-24")
+    assert malformed == 0, "no line here is malformed; a dropped row must not read as one"
+    assert rates == [0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.09], (
+        f"one rate per night, the later of the 22nd's two rows winning: {rates}")
+    assert rates.count(0.06) == 1 and 0.07 not in rates, (
+        "the superseded earlier row must not also sit in the window")
+    assert len(rates) == 7, f"7 nights, 7 slots, none of them doubled: {rates}"
+
+    own = _iv_row_at(0.08, "2026-11-24")
+    basis = iv_metrics_record.breach_basis(own, rates)
+    assert len(basis) == 8 == len(rates) + 1, (
+        f"the own row always joins its own night's basis, once: {basis}")
+    assert sum(1 for rate in basis if rate in (0.02, 0.07)) == 1, (
+        f"the 22nd holds exactly one of the eight slots: {basis}")
+
+    row_sliced = [r["dropped_rate"] for r in rows][-7:]
+    assert row_sliced == [0.02, 0.03, 0.04, 0.05, 0.07, 0.06, 0.09], (
+        "the node's own comparison: as-shipped, one slice holds the 22nd twice "
+        f"({row_sliced})")
+    assert 0.01 not in row_sliced, "and a whole other night lost its slot to that doubling"
+
+
+def test_a_series_of_distinct_nights_still_medians_eight_rates_with_rows_equal_to_them(tmp_path):
+    """Clause 2: with no duplicate date anywhere the behaviour is byte-for-byte what it was —
+    the last 7 prior nights plus the row's own rate, 8 medianed, and `breach_basis_rows`
+    equal to the number of rates medianed.
+
+    Eight real nightlies through the shipped pipeline (the same fixture the 0.118-spike
+    node above uses), so nothing here is seeded: `breach_basis_rows` is the recorder's own
+    stored field and `prior_rates` is what its reader hands `breach_basis`. A fix that
+    keyed the window by dropping rows — collapsing a clean 8-night chain to 7 — would take
+    7 here and is exactly what this node is for.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    _per_night, codes, stored, _last = _nights(home, rates=[0.0] * 7 + [0.06], out=out,
+                                              repo=repo)
+    assert len(stored) == 8 and codes == [0] * 8, "seven clean nights then 6%: no breach"
+    assert len({r["recorded_at"][:10] for r in stored}) == 8, "no duplicate date in the chain"
+    row = stored[-1]
+    assert row["breach"] is False and row["breach_median"] == 0.0
+
+    rates, malformed, _was = iv_metrics_record._prior_series(
+        out, 7, own_night=row["recorded_at"][:10])
+    assert malformed == 0
+    assert len(rates) == 7, f"a clean chain still offers 7 prior nights: {rates}"
+    basis = iv_metrics_record.breach_basis(row, rates)
+    assert basis == rates + [row["dropped_rate"]]
+    assert len(basis) == 8, f"8 rates medianed, unchanged: {basis}"
+    assert row["breach_basis_rows"] == len(basis) == 8, (
+        "the stored count must equal the number medianed — it is what the announcement "
+        "quotes, and the claim #2511 made about the toast")
+
+
+def test_the_row_that_cannot_name_its_night_is_its_own_night_never_merged_never_dropped(tmp_path):
+    """Clause 3(a): a row whose `recorded_at` is missing, blank or unparseable is KEPT and
+    medianed as its own night — never merged with a neighbour, never dropped.
+
+    A naive key of `recorded_at[:10]` would collapse all three nameless rows into one
+    night and quietly shrink a window; a key of `None` that the caller then excludes would
+    drop them. Both are asserted against here: three unstamped rows (0.10, 0.11, 0.12) plus
+    two rows on 2026-11-20 (0.02 then 0.03) must yield FOUR rates.
+    """
+    rows = [{"dropped_rate": 0.10, "threshold": 0.05, "window_rows": 7},
+            _iv_row_at(0.11, "2026-11-19").__class__(
+                **{**_iv_row_at(0.11, "2026-11-19"), "recorded_at": ""}),
+            _iv_row_at(0.12, "2026-11-19", recorded_at="yesterday, I think")]
+    rows += [_iv_row_at(0.02, "2026-11-20", hour=0), _iv_row_at(0.03, "2026-11-20", hour=12)]
+    series = _write_iv_series(tmp_path, rows)
+    assert iv_metrics_record._night_key(rows[0]) is None
+    assert iv_metrics_record._night_key(rows[1]) is None
+    assert iv_metrics_record._night_key(rows[2]) is None
+
+    rates, malformed, _was = iv_metrics_record._prior_series(
+        series, 7, own_night="2026-11-27")
+    assert malformed == 0, "an unstamped row is not a MALFORMED row — it parsed fine"
+    assert rates == [0.10, 0.11, 0.12, 0.03], (
+        f"every nameless night kept as itself; only the 20th's superseded 0.02 goes: {rates}")
+    assert len(rates) == 4, "three nameless nights plus one stamped night, not one night"
+    assert 0.02 not in rates
+
+
+def test_the_night_keyed_read_still_reads_only_the_bounded_tail_not_the_whole_file(tmp_path):
+    """Clause 3(b): deduping by night must not turn the bounded backward read into a
+    whole-file read — the reader still takes `keep + READ_SLACK` lines and no more.
+
+    111 rows: three deep nights at 0.5 (2026-01-01..03) and 108 rows all stamped
+    2026-11-25 at 0.01. The tail is `7 + 100 = 107` lines, so the deep nights are outside
+    it: the answer is ONE rate (the flood's single night), and the absence of 0.5 is the
+    witness that the budget held rather than that the keying worked. Whole-file keying
+    would have found the three deep nights and returned 4 rates.
+    """
+    assert iv_metrics_record.READ_SLACK == 100 and iv_metrics_record.DEFAULT_WINDOW_ROWS == 7
+    rows = [_iv_row_at(0.5, f"2026-01-0{d}") for d in (1, 2, 3)]
+    rows += [_iv_row_at(0.01, "2026-11-25", hour=i % 24) for i in range(108)]
+    assert len(rows) == 111 > 7 + iv_metrics_record.READ_SLACK
+    series = _write_iv_series(tmp_path, rows)
+
+    rates, _malformed, _was = iv_metrics_record._prior_series(
+        series, iv_metrics_record.DEFAULT_WINDOW_ROWS)
+    assert rates == [0.01], f"one night inside the 107-line tail: {rates}"
+    assert 0.5 not in rates, (
+        "a rate reachable only by reading past keep + READ_SLACK appeared: the night key "
+        "made the read unbounded")
+
+
+def test_re_deriving_last_night_over_the_same_keyed_basis_does_not_announce_twice(tmp_path):
+    """Clause 4, at the function boundary: `_prior_breaching` re-derives last night over
+    ONE rate per night, so a night whose second row arrived during a breach cannot look
+    like the breach having ended.
+
+    Six nights (four at 0.06, two at 0.0) then two rows on 2026-11-20 at 0.0 — the shape
+    2026-11-19 has on the live series. Deciding 0.06 on that same night:
+      keyed    prior = [0.06, 0.06, 0.06, 0.06, 0.0, 0.0] -> median 0.06 > 0.05: breach,
+               and last night re-derived over the same key -> True, so `announce` is
+               suppressed and no second warning is emitted;
+      as-shipped row slice = [0.06, 0.06, 0.06, 0.06, 0.0, 0.0, 0.0] -> median 0.03: no
+               breach and no re-derivation of last night at all.
+    The doubled night's two zero rows occupy two of eight slots in the second reading and
+    that is what silences the alert path.
+    """
+    rows = [_iv_row_at(rate, f"2026-11-{10 + day}") for day, rate in
+            enumerate([0.06, 0.06, 0.06, 0.06, 0.0, 0.0])]
+    rows += [_iv_row_at(0.0, "2026-11-20", hour=1), _iv_row_at(0.0, "2026-11-20", hour=2)]
+    series = _write_iv_series(tmp_path, rows)
+    own = _iv_row_at(0.06, "2026-11-20", hour=3)
+
+    keyed, _malformed, keyed_was = iv_metrics_record._prior_series(
+        series, 7, own_night="2026-11-20")
+    keyed_basis = iv_metrics_record.breach_basis(own, keyed)
+    assert sorted(keyed_basis) == [0.0, 0.0, 0.06, 0.06, 0.06, 0.06, 0.06]
+    assert iv_metrics_record._verdict(dict(own), keyed, 0)[0] is True
+    assert keyed_was is True, (
+        "last night must re-derive as a breach over the same basis — otherwise the "
+        "suppression never fires and the breach is announced a second time")
+
+    as_shipped = [r["dropped_rate"] for r in rows][-7:]
+    shipped_basis = iv_metrics_record.breach_basis(own, as_shipped)
+    assert len(shipped_basis) == 8 and sorted(shipped_basis) == [0.0, 0.0, 0.0, 0.0,
+                                                                0.06, 0.06, 0.06, 0.06]
+    assert iv_metrics_record._verdict(dict(own), as_shipped, 0)[0] is False, (
+        "the node's own comparison: two slots for one night's zero rows move the median "
+        "to 0.03 and the alert path goes quiet")
+
+
+def test_a_retried_night_keeps_one_slot_and_emits_no_second_warning(tmp_path):
+    """Clause 4, end to end: six real runs, the last two of them the same UTC night, and the
+    breach is announced ONCE while every stored basis holds one rate per night.
+
+    Four nights at 6% (2026-09-15..18, stamped), then tonight at 0% TWICE — the shape the
+    defect actually has: the nightly run appends its row ~15 s in, and a second run later
+    the same UTC date appends again (2026-11-19 at 00:38Z then 12:40Z, 2026-11-24 at
+    00:54Z then 12:55Z). Those last two runs stay on the real clock deliberately:
+    `own_night` is the night the DECIDING row belongs to, and only a retried pair sharing
+    the recorder's own today reproduces that — a simulated date is a date the recorder
+    never believes. Nightly #86 stores `breach` in every row, so the second retried run's
+    silence depends on the retry row agreeing with the basis the recorder itself used, and
+    it can only agree if both read one rate per night.
+
+    Row-weighted, the sixth row medians SIX rates for FIVE nights (`breach_basis_rows` 6
+    against 5) because the night's own earlier row sits in its prior window a second time:
+    that is what the per-row claim below catches, and it is why this node is red before the
+    fix. The announce count is 1 under either reading here — a 0% pair does not move this
+    median — so the verdict-flipping case is the one
+    `test_re_deriving_last_night_over_the_same_keyed_basis` pins, two nodes up.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    tonight = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    script = (
+        "PY=$(readlink -f \"$LLOYD_REPO/../lloyd/.venvs/lloyd/bin/python\")\n"
+        "[ -x \"$PY\" ] || PY=$(command -v python3)\n"
+        "LLOYD_REPO=\"$LLOYD_REPO\" \"$PY\" - <<'EOF'\n"
+        "import json\n"
+        "print(json.dumps({\"scope\": {\"since\": \"2026-09-01T00:00:00\", "
+        "\"first\": null, \"last\": null},\n"
+        "        \"cost\": {\"llm_calls\": 100, \"turns\": 100, "
+        "\"observations\": 100}}))\n"
+        "EOF\n")
+    plan = [("2026-09-15", 0.06), ("2026-09-16", 0.06), ("2026-09-17", 0.06),
+            ("2026-09-18", 0.06), (tonight, 0.0), (tonight, 0.0)]
+    codes, warnings = [], []
+    last_stderr = ""
+    for night, rate in plan:
+        # `night=None` on the last two: the row keeps the recorder's own UTC date, which is
+        # the only way a fixture can put two rows on the night it is deciding.
+        result = _night(home, rate=rate, since=f"{night}T03:00:00",
+                        night=None if night == tonight else night,
+                        out=out, repo=repo, env_extra={"IV_GRADE_PREFIX": script})
+        codes.append(result.returncode)
+        warnings.append(len(_announced(home)))
+        last_stderr = result.stderr
+    opened = [w - (warnings[i - 1] if i else 0) for i, w in enumerate(warnings)]
+    assert opened[2] == 1, f"the third night must open the breach with one warning: {opened}"
+    assert opened[3:] == [0, 0, 0], (
+        f"the retried night added no further warning: {warnings}")
+
+    stored = _rows_of(out)
+    assert len(stored) == 6, "the append stays per RUN — the fix is read-side, not a dedupe"
+    assert sum(1 for r in stored if r["recorded_at"][:10] == tonight) == 2, (
+        "one night, two rows, both kept in the ledger")
+    last = stored[-1]
+    assert last["breach"] is True and last["breach_median"] == 0.06
+    assert "not announced again (one warning per breach)" in last_stderr, (
+        "the suppression has to be stated, not silently taken")
+    for index, row in enumerate(stored):
+        nights = {r["recorded_at"][:10] for r in stored[:index + 1]}
+        assert row["breach_basis_rows"] == min(len(nights) - 1, 7) + 1, (
+            f"row {index + 1} medianed {row['breach_basis_rows']} rates for "
+            f"{len(nights)} nights — a night is in the basis twice")
+    assert last["breach_basis_rows"] == 5, "4 prior nights plus its own, not 5 rows plus own"
+
+def test_the_window_key_is_written_down_where_both_readers_must_see_it(tmp_path):
+    """Clause 5: the comment beside `DEFAULT_WINDOW_ROWS` states the implemented key, and
+    the architecture document's night sentence describes keying that exists.
+
+    Both claims used to assert a property nothing enforced: the recorder's comment said
+    "7 nights at one row a night" and `architecture/autonomy-jobs.md` said the recorder
+    "appends **one row per night**" while the live file was 71 rows over 67 UTC dates. A
+    doc that keeps the old wording, or that moves the night claim into an append promise
+    again, fails here rather than inheriting a false record.
+    """
+    source = (ROOT / "scripts" / "iv_metrics_record.py").read_text(encoding="utf-8")
+    def flat(text):
+        # Compare PROSE, not layout: markdown wraps a sentence across lines and a comment
+        # block repeats its `#: ` marker on every one of them.
+        return re.sub(r"\s+", " ", re.sub(r"^#:\s*", "", text, flags=re.MULTILINE))
+    comment = re.search(r"#: Rows the median is taken over.*?\nDEFAULT_WINDOW_ROWS", source,
+                        re.DOTALL)
+    assert comment, "the block beside DEFAULT_WINDOW_ROWS is gone — its key claim went with it"
+    words = flat(comment.group(0))
+    assert "one row per UTC `recorded_at` date" in words, (
+        f"the comment must state the key that is implemented: {words[:240]!r}")
+    assert "the later run for a night wins" in words, "the tie-break is part of the key"
+    assert "one row per RUN" in words, "and so is what the append still does, per run"
+
+    doc = flat((ROOT / "architecture" / "autonomy-jobs.md").read_text(encoding="utf-8"))
+    assert "one row per run** to `_pipeline/reflection/iv-metrics.jsonl`" in doc, (
+        "the document must state the append invariant it can actually guarantee")
+    assert "one row per night" not in doc, "the false append guarantee must not survive"
+    assert "one rate per UTC `recorded_at` date" in doc, (
+        "the night sentence has to describe the keying that now exists")
+    assert "the later run for a night winning" in doc, "and name the tie-break it took"
+    assert "nights, not rows" in doc, (
+        "the median-window sentence must say which unit the 7 counts")
+
+
+def test_the_fixture_stamps_each_simulated_night_with_a_date_of_its_own(tmp_path):
+    """The fixture guard #4623 needs: a chain of simulated nightlies runs inside one test
+    session, so its rows share the REAL UTC date unless `_night` stamps each one — and the
+    window keyed on that date would then hold one rate where the node asserts six.
+
+    Two claims, both about the fixture rather than the recorder: every row a chain wrote
+    carries the `night=` the node asked for, and none of them carries tonight's date — the
+    one way a stamped fixture could still collapse, by naming a date that equals the
+    reader's `own_night` and so excluding a night from its own basis.
+    """
+    home = tmp_path
+    repo = _fanout_check(tmp_path)
+    out = home / "_pipeline" / "reflection" / "iv-metrics.jsonl"
+    _per_night, _codes, stored, _last = _nights(home, rates=[0.0, 0.02, 0.04], out=out,
+                                                repo=repo)
+    assert [r["recorded_at"][:10] for r in stored] == ["2026-09-15", "2026-09-16",
+                                                       "2026-09-17"]
+    assert len({r["recorded_at"][:10] for r in stored}) == 3
+    tonight = datetime.datetime.now(datetime.timezone.utc).date().isoformat()
+    assert tonight not in {r["recorded_at"][:10] for r in stored}, (
+        "a simulated night that shares the real UTC date is excluded from its own basis "
+        "by `_prior_series(own_night=...)`, which would make six nights read as five")
+    assert all(r["recorded_at"].endswith("+00:00") for r in stored), (
+        "the stamp must be the UTC field the key is taken from, not a local wall clock")

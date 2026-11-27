@@ -133,11 +133,24 @@ DEFAULT_SERIES_PATH = PIPELINE_DIR / "reflection" / "iv-metrics.jsonl"
 #: stated in `~/obsidian/autonomy/86-*.md` and to 0.05 itself, so neither can drift
 #: back silently.
 DEFAULT_THRESHOLD = 0.05
-#: Rows the median is taken over: 7 nights at one row a night. A threshold on a
-#: single night is a coin flip — the fleet's own history is one night at 0.118
+#: Rows the median is taken over: the last 7 NIGHTS, one rate per night. A threshold
+#: on a single night is a coin flip — the fleet's own history is one night at 0.118
 #: followed by nights back at 0.014 and 0.009, which is a spike to read, not a week
 #: to announce. Seven nights is also the window the ruled 0.05 was measured against:
 #: that stretch's median is over it, every healthy week's median is under it.
+#:
+#: The key is the UTC date of `recorded_at`: **the window holds one row per UTC
+#: `recorded_at` date — one rate per night — and the later run for a night wins.** It is
+#: enforced where the window is read (`_prior_series`), not where the row is appended.
+#: This constant counts nights, and `_night_key` is the function that says which night a
+#: row is; #4623 is the reason the two are now the same number. The recorder still appends
+#: one row per RUN, and a run
+#: that dies after `iv_metrics_record.py` has appended — task #86's 300 s ceiling has
+#: done that six times since 2026-09-26 (`architecture/autonomy-jobs.md`) — leaves a
+#: second row on a night that already has one. Measured 2026-11-27: the live series is
+#: 71 rows over 67 UTC dates, so two of the eight rates in the basis of a night like
+#: 2026-11-19 were that one night's two runs, 25% of the median's weight from one
+#: night's traffic instead of one slot in eight.
 DEFAULT_WINDOW_ROWS = 7
 #: Rates below this many can flag but cannot breach. Three nights is the smallest set
 #: that is a trend rather than a reading — and a first night, alone in the file, would
@@ -383,6 +396,59 @@ def _over_sync_deadline(p90, deadline_ms) -> bool | None:
     return float(p90) > float(deadline_ms)
 
 
+def _night_key(row: dict) -> str | None:
+    """Which UTC night a row is, from `recorded_at`; `None` when the row cannot say.
+
+    The key the median window is deduped on (#4623), because the recorder appends one row
+    per RUN and a run retried after it already appended leaves two rows on one night —
+    2026-11-19 and 2026-11-24 each carry two on the live series, 2026-09-14 three, so the
+    7-night window held 8 rows and one night took two of the eight slots.
+
+    `recorded_at` is the field, and only the field: it has been stamped from
+    `datetime.now(timezone.utc)` since #460 and every one of the 71 live rows ends
+    `+00:00`, so its date IS the UTC date. `since`/`until` are local wall clock (#835)
+    with the offset appended (#2654), and keying a night on those would decide "same
+    night" by two clocks in one key — a 01:00 local run and a 04:40 local run on the 19th
+    are the same local date and the same UTC date, but a 16:38-08:00 window and a
+    04:40-08:00 window are not comparable instants, and the naive pre-#2654 rows carried no
+    marker at all. A markerless `recorded_at` is still read as UTC, which is the clock it
+    was written on.
+
+    `None` — "this row names no night" — is the answer for a missing, blank or unparseable
+    stamp, and a caller must treat it as that row's OWN night rather than as a shared one:
+    a series that has lost its stamps keeps every night it has, and never collapses two
+    real nights into one because neither could say what it was.
+    """
+    raw = row.get("recorded_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        moment = datetime.datetime.fromisoformat(raw.strip())
+    except ValueError:
+        return None
+    if moment.tzinfo is not None:
+        moment = moment.astimezone(datetime.timezone.utc)
+    return moment.date().isoformat()
+
+
+def _night_rates(nights: dict, exclude: str | None) -> list[float]:
+    """The keyed rates, oldest-first, with one night optionally dropped.
+
+    `exclude` is the night whose own row is being decided: its rate is that row's, so an
+    earlier row of the same night is superseded and must not also sit in the basis — that
+    is "later run wins" (`DEFAULT_WINDOW_ROWS`), and it is what keeps tonight in its own
+    basis exactly once however many times it has already been run tonight.
+
+    `exclude=None` excludes nothing. A row that names no night is its own night, which
+    `_prior_series` encodes by giving it a key nothing else can have; folding the unnamed
+    case into `exclude` would merge every unstamped row in the file into one night and
+    silently shrink a 7-night window to 1.
+    """
+    if exclude is None:
+        return list(nights.values())
+    return [rate for night, rate in nights.items() if night != exclude]
+
+
 def breach_basis(row: dict, prior_rates: list) -> list[float]:
     """The rates the median is taken over: the last `window_rows` prior rates plus this
     row's own — empty when the row has no rate, which is what "nothing to breach" means.
@@ -392,6 +458,13 @@ def breach_basis(row: dict, prior_rates: list) -> list[float]:
     puts the median in the announcement). A second copy is how the toast could quote a
     median the decision did not use, and how "was last night a breach" could be
     re-derived over a different window than the one that night used.
+
+    `prior_rates` is expected to hold AT MOST ONE rate per night, oldest-first — the
+    contract `_prior_series` keeps by deduping on `_night_key` (#4623), and the reason a
+    doubled night no longer weighs twice. This function slices, it does not key: it has no
+    way to know which night a bare float came from, which is exactly why the keying has to
+    happen at the read. A caller that hands it one rate per ROW gets one weight per ROW, so
+    anything new that feeds this list goes through `_prior_series` or through `_night_key`.
     """
     own = row.get("dropped_rate")
     if not _numeric(own):
@@ -524,43 +597,73 @@ def _prior_breaching(last: dict | None, prior_rates: list[float]) -> bool:
     return len(basis) >= MIN_BREACH_ROWS and statistics.median(basis) > threshold
 
 
-def _prior_series(path: Path, keep: int) -> tuple[list[float], int, bool]:
-    """(rates of the last `keep` readable rows oldest-first, malformed count,
+def _prior_series(path: Path, keep: int,
+                  own_night: str | None = None) -> tuple[list[float], int, bool]:
+    """(rates of the last `keep` readable NIGHTS oldest-first, malformed count,
     was-the-newest-row-a-breach).
 
-    `floor` bounds the backward read at `keep + floor` rows so a series that has
-    accumulated thousands of rows is not read whole for a 7-row median; the floor
-    only ever engages if rows carry no parseable date. Malformed lines — the
-    realistic result of a run killed mid-append — are counted and reported rather
-    than dropped silently: a series that is quietly rotting must not report
+    The unit is a NIGHT, not a line: rows are folded onto `_night_key`'s UTC date as they
+    are read, the later row for a night replacing the earlier one's rate, and
+    `own_night` — the night of the row about to be appended, which `main` passes from the
+    row it has already built — is excluded so that tonight is in its own basis exactly once
+    no matter how many times it has already been recorded (#4623; see
+    `DEFAULT_WINDOW_ROWS` for the 71-rows-over-67-nights series this is fixing and
+    `_night_rates` for the supersession rule). Folding happens inside the loop rather than
+    as a pass over the finished list, and that is not cosmetic: the third return value
+    re-derives the newest row's breach over the basis *that row's own run* used, which is
+    the keyed state as of that line, not the keyed state as of the end of the file.
+
+    A row with no numeric `dropped_rate` still contributes nothing, and contributes nothing
+    to a night's claim on a slot either: it is not an observation of its night, so it
+    neither takes the slot nor evicts the rate an earlier row of the same night measured.
+    Dropping that earlier rate would let a run that appended a null row un-count a real
+    measurement — the same class as the `#1874` null-not-zero rule the row shape follows.
+
+    `keep + READ_SLACK` still bounds the backward read at that many ROWS and the fold never
+    widens it: a window of `keep` distinct nights is gathered from no further back than
+    `keep` rows plus the slack, so a series whose tail is all one night yields a short
+    window, not a whole-file read. Resisting that widening is the deliberate trade —
+    reaching back for the 7 distinct nights a doubled tail owes would mean reading a
+    multi-thousand-row file for a median, and the doubled nights are 4 rows in 71.
+
+    Malformed lines — the realistic result of a run killed mid-append — are counted and
+    reported rather than dropped silently: a series that is quietly rotting must not report
     "no breach" because its own tail stopped parsing.
 
     The newest row that actually parses decides the third value, even if a malformed
-    line sits behind it: a corrupt tail must not read as "the breach just started".
+    line sits behind it: a corrupt tail must not read as "the breach just started". Its
+    basis excludes its own night for the same reason `own_night` does above: that row's
+    rate is the later word on its night, and a second slot for the same night is what
+    would make a retried night double-weighted in the "did a breach just start?" answer too.
     """
     if not path.exists():
         return [], 0, False
     lines = [ln for ln in path.read_text(encoding="utf-8").splitlines() if ln.strip()]
     tail = lines[-(keep + READ_SLACK):]
-    rates, malformed = [], 0
+    nights: dict[str, float] = {}
+    malformed = 0
     last_row: dict | None = None
     last_basis: list[float] = []
-    for line in tail:
+    for offset, line in enumerate(tail):
         try:
             row = json.loads(line)
         except json.JSONDecodeError:
             malformed += 1
             continue
+        night = _night_key(row) if isinstance(row, dict) else None
         if isinstance(row, dict):
-            # Snapshot the rates preceding THIS row, so the newest parsed row's breach
+            # Snapshot the nights preceding THIS row, so the newest parsed row's breach
             # is re-derived over the basis its own run used — not over a list built by
             # blindly dropping the last element, which is only that row's own rate when
             # the newest row has a readable rate at all.
-            last_row, last_basis = row, list(rates)
-        rate = row.get("dropped_rate")
+            last_row, last_basis = row, _night_rates(nights, night)
+        rate = row.get("dropped_rate") if isinstance(row, dict) else None
         if isinstance(rate, (int, float)) and not isinstance(rate, bool):
-            rates.append(float(rate))
-    return rates[-keep:], malformed, _prior_breaching(last_row, last_basis)
+            # A row that cannot name its night is its own night: a key nothing else can
+            # have, so unstamped rows never collapse onto each other (see `_night_key`).
+            nights[night if night is not None else f"unnamed@{offset}"] = float(rate)
+    return (_night_rates(nights, own_night)[-keep:], malformed,
+            _prior_breaching(last_row, last_basis))
 
 
 def _verdict(row: dict, rates: list, malformed: int) -> tuple[bool, str]:
@@ -861,9 +964,16 @@ def main(argv: list[str] | None = None) -> int:
 
     out = Path(args.out).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
-    rates, malformed, was_breaching = _prior_series(out, args.window_rows)
+    # The row is built BEFORE the prior nights are read, for one reason only: the read has
+    # to exclude the night this row belongs to, and the honest source of that night is the
+    # stamp this row itself carries. Calling `datetime.now(timezone.utc)` again for it would
+    # read the clock twice for one instant and let a run that straddles midnight drop a
+    # different night from the one it is writing — and it would be a second spelling of the
+    # key, which is where a reader and a writer drift apart.
     row = _row(report, window_hours=args.hours, threshold=threshold,
                threshold_source=source, window_rows=args.window_rows)
+    rates, malformed, was_breaching = _prior_series(
+        out, args.window_rows, own_night=_night_key(row))
     if not args.no_outcome_score and outcome_score_due(out):
         row["outcome_score"] = weekly_outcome_score()
     # Annotate before the append: `breach` and `malformed_prior_rows` have to be
