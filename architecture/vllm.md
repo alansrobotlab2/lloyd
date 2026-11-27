@@ -1295,7 +1295,7 @@ has still not been run as of 2026-09-11.
   vLLM#57032 comment is not to be posted, and no counted day re-opens it.
 - **2026-10-09 is the newest day, as counted through 2026-10-19, on which all
   four acceptance-bar criteria hold.** That bound is no longer the page's
-  headline: as counted through 2026-11-18, 2026-11-18 clears all four, and that day
+  headline: as counted through 2026-11-26, 2026-11-26 clears all four, and that day
   now carries the page's headline — 2026-10-23 held that claim before it, as counted
   through 2026-10-24 — and what
   follows re-derives this day's own figures unchanged rather than restating them
@@ -1627,8 +1627,9 @@ has still not been run as of 2026-09-11.
   `close_on_settle` handover decision carried from #3089, and a better day moves none of
   the four marks made against 2026-09-25.
 
-- **2026-11-18 is the newest day, as counted through 2026-11-18, on which all four
-  acceptance-bar criteria hold.** Derived by `scripts.vllm_prefix_miss_window.derive`
+- **2026-11-18 cleared all four acceptance-bar criteria as counted through 2026-11-18,
+  and held the page's headline until 2026-11-26 displaced it.** Derived by
+  `scripts.vllm_prefix_miss_window.derive`
   over the extract committed as `tests/fixtures/vllm_prefix_miss_2026-11-18.json`,
   byte-identical to the standing daily job's copy, at the gate `config.yaml` carries
   (0.60): 0 of the day's 3 chat turns carries a prefix miss, so (a) holds over a
@@ -1668,6 +1669,52 @@ has still not been run as of 2026-09-11.
   ≥7 days of real ticks clearing both numbers and the `autocode.status_pipeline` /
   `close_on_settle` handover decision carried from #3089, and a better day moves none
   of the four marks made against 2026-09-25.
+
+- **2026-11-26 is the newest day, as counted through 2026-11-26, on which all four
+  acceptance-bar criteria hold.** Derived by `scripts.vllm_prefix_miss_window.derive`
+  over the extract committed as `tests/fixtures/vllm_prefix_miss_2026-11-26.json`,
+  byte-identical to the standing daily job's copy and re-produced from the same service
+  logs by the same invocation, at the gate `config.yaml` carries (0.60): 0 of the day's 7
+  chat turns carries a prefix miss, so (a) holds over a population a person can point at
+  rather than over zero of zero. What is new about this day is volume: 374 turns is the
+  highest turn count for a day this section counts the bar on since 2026-10-23's 496, and 343
+  more than the 31 that 2026-11-18 counted when it took the headline. Its headroom is thinner
+  than the recent clearing bullets were: 68 misses and 7,435,846 re-prefilled tokens
+  against §6.1's per-day 97 and 10.3M, which is 70.1% of the misses and 72.2% of the
+  tokens, so (b) holds with 27.8% of the token budget left — against 2026-11-18's 92.4%,
+  2026-11-10's 82.6% and 2026-11-11's 42.3%, though still thicker than 2026-10-09's 1.7%
+  and 2026-10-23's 17.6%. This is a busy day that cleared, not a quiet one. `by_kind` puts
+  63 of the 68 misses and 6,809,316 of the 7,435,846 tokens in `autocode`, `autonomy` at 4
+  and 511,414, and `youtubediges` at 1 and 115,116 — the key the extract's own turn rows
+  carry for that kind — and ships no `chat` key at all, which is (a) from the other side:
+  none of the re-prefill this day spent belonged to the chat population (a) is marked on.
+  KV p50 0.143, so (c) holds with room, over 5,639 in-window engine status lines
+  (`derive`'s in-window count, not the 5,779 rows the extract stores, which carry the
+  3,600 s lookback before the window opens and one trailing interval). And **9 of 1,647
+  two-request windows** run under the bar's 15 tok/s — 3 excluded as a cold engine still
+  loading the model in flight and 6 as a cold chunked prefill climbing across the line, so
+  `derive`'s `two_request_under_stall_not_cold` reports **0 counted against** — and (d)
+  holds on those ruled exclusions AND **was exercised**: nine windows really reached the
+  threshold and were adjudicated against it, which is the shape 2026-11-11's bullet had
+  and is not the empty-population zero the day this one displaced reports. The day is 374
+  turns, 374 measured, 35 turns carrying the 68 misses, worst turn 636,038 re-prefilled
+  tokens. This bullet states **no pool, free-block or churn figure at all**: the extract
+  ships `pool_tokens` empty because no engine booted inside the window or its lookback, so
+  `derive` has no measured pool and nothing to divide by, and the free-pool arithmetic the
+  neighbouring bullets quote is unspeakable for this day rather than borrowed from a boot
+  line this section has not pinned. Which build served the day is not a figure the extract
+  can produce, so this page names none. What this day does not do is replace anything:
+  2026-09-25 stays the counted reading the four criteria are marked against, and the
+  filing-condition evidence set is unmoved — `derive` gives 0 chat turns with a miss, so no
+  event on 2026-11-26 meets the accepted-loss filing condition and the paragraphs above
+  still count four days. Nor did it reach either re-open trigger: 68 misses and 7,435,846
+  tokens sit inside §6.1's per-day 97 and 10.3M, so trigger (ii) did not fire, and trigger
+  (i) is not called at all, because it is called on a chat turn carrying a miss and (a)
+  counts 0 of 7 — the day's 4 gap-joined misses at or over the gate are not chat turns.
+  Clearing the bar is a measurement, not a ruling, and this day settles nothing by itself:
+  owed-check still owes the flip its ≥7 days of real ticks clearing both numbers and the
+  `autocode.status_pipeline` / `close_on_settle` handover decision carried from #3089, and
+  a better day moves none of the four marks made against 2026-09-25.
 
 ## 11. Found on the way
 
