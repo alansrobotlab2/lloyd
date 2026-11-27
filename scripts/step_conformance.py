@@ -189,7 +189,44 @@ REASON_DECLARED_SKIP = "declared_skip_in_run_report"
 # #2617, #4224, #4517 — were each adjudicated stale by hand. The directory and the window are what
 # keep this from becoming a credit for any write at all: see `sibling_slug_write`.
 REASON_OTHER_SLUG = "artifact_written_under_other_slug"
+# `tool_substituted` is the only reason that leaves the deviation out of `runs_flagged` and
+# `deviations` altogether (#4609), and it is the only one that answers for a `tool:` step. The
+# four suppressions above all stand a missing `write:` down: the artifact went to disk, or the run
+# said it would not write it, or a sibling slug took its place. A missing `tool:` step is a
+# different question — the run called something else — and where that something else is a tool of
+# the SAME closed family writing a path this task's own history writes THAT artifact to, nothing
+# was skipped: the stage ran through an equivalent route. Task 83's run of 2026-11-22 is the
+# motivating shape — it published its note with `automod_vault_land`, the route the
+# self-modification loop requires for a vault commit, while the task's other runs used
+# `vault_write`. Printed and totalled, never billed as a flag and never filed: `write:` remains
+# the only prefix that names an artifact, so it stays the only one that can file (#2104 clause 2).
+REASON_TOOL_SUBSTITUTED = "tool_substituted"
 ESCALABLE_REASONS = (REASON_MISSING, REASON_OTHER_PATH)
+
+#: The closed set of tool families whose members stand in for one another (#4609). Two groups, and
+#: the closure is the clause: `Bash` is refused by name because a `cat > x` redirect IS already
+#: captured as a write of `x` by `write_targets`, so admitting it would let any shell command
+#: discharge a missing call and the `tool:` deviation would stop meaning anything. `MultiEdit` and
+#: `NotebookEdit` are writers like `Write`/`Edit` but are not in the group because the corpus does
+#: not show a run choosing between them and `Write` — the table records measured equivalence, not
+#: a type hierarchy, and widening it is a decision for a person (the same discipline that keeps
+#: `write_targets` reading `cp SRC DST` as SRC because that is what the corpus does).
+TOOL_EQUIVALENTS = (
+    frozenset({"Write", "Edit"}),
+    frozenset({"vault_write", "automod_vault_land"}),
+)
+
+
+def equivalents_of(tool: str) -> frozenset:
+    """The family `tool` belongs to, or an empty set — the membership test the credit runs on.
+
+    Empty for every tool outside `TOOL_EQUIVALENTS`, which is what makes the table closed: there
+    is no default family, so a tool that nobody measured earns nothing.
+    """
+    for group in TOOL_EQUIVALENTS:
+        if tool in group:
+            return group
+    return frozenset()
 
 #: The margin on the disk witness's window. `started_at` is when the queue claimed the run and
 #: `completed_at` is the queue's own write, so either can sit minutes from the tool call that
@@ -304,6 +341,16 @@ def normalized_dir(raw) -> str:
 PATH_KEYS = ("file_path", "path", "notebook_path")
 
 
+TOOL_PREFIX = "tool:"
+
+#: The keys that name a file a call touched, for the credit's purposes: `PATH_KEYS`, plus the
+#: plural `paths` that only `automod_vault_land` uses (measured: its `params_summary` carries a
+#: list of vault-relative paths, and no writer in `WRITE_TOOLS` does). Every path in a list counts,
+#: because a land commits several files and any one of them in a corroborated directory is the
+#: stage having run.
+TOOL_PATH_KEYS = PATH_KEYS + ("paths",)
+
+
 def _path_target(params) -> str:
     """The file a non-Bash call names, or "". `params` may be anything a trace holds."""
     params = params if isinstance(params, dict) else {}
@@ -312,6 +359,24 @@ def _path_target(params) -> str:
         if target:
             return str(target)
     return ""
+
+
+def _path_targets(params) -> list[str]:
+    """Every path a dispatched call names in its params, in key order, list entries flattened.
+
+    A separate function from `_path_target`, not a widened `_path_target`: that one decides which
+    capture is a call's WRITE, and adding `paths` to its keys would give `automod_vault_land` a
+    write target, which is the step-id rename #2502 forbids. This one only answers "where did this
+    call say it acted", which is a question the credit asks and nothing else reads.
+    """
+    params = params if isinstance(params, dict) else {}
+    out: list[str] = []
+    for key in TOOL_PATH_KEYS:
+        value = params.get(key)
+        for item in (value if isinstance(value, (list, tuple)) else [value]):
+            if item and str(item) not in out:
+                out.append(str(item))
+    return out
 
 
 def write_targets(name, params) -> list:
@@ -613,7 +678,62 @@ def sibling_slug_write(baseline: "TaskBaseline", trace: "Trace", step: str,
     return None
 
 
-def steps_from_tools(tools, write_paths: dict | None = None) -> list[str]:
+def tool_substitution(baseline: "TaskBaseline", trace: "Trace", step: str) -> dict | None:
+    """A missing `tool:` step this run discharged by calling an equivalent on corroborated ground.
+
+    Three conditions, each killing one way the credit could be wrong (#4609):
+
+    * the missing step's tool has a family — `equivalents_of` is empty for everything outside the
+      two measured pairs, so `Bash`, `TodoWrite` and every other tool are refused before the path
+      is even looked at;
+    * the run actually called a member of that family, which it can only do through a call in its
+      own trace, so the evidence is a call the run made and not a file that happens to exist —
+      which is why this credit needs no disk witness and no window, unlike `sibling_slug_write`:
+      the substituted call is *in* the trace, which is what makes it this run's;
+    * that call named a path in a directory the task's own history writes THAT basename to,
+      reached the way `sibling_slug_write` reaches it — through `write:<basename>`, because
+      `corroborated_dirs_of` reads `baseline.artifact_paths` and `learn` keys that by `write:` step
+      ids only. Asking it for `tool:vault_write` returns `()` and would discharge nothing, ever.
+      `dir_matches` supplies the same root-move leniency it supplies everywhere else, and an
+      observed path with no directory at all (a bare filename) corroborates nothing: `dir_matches`
+      calls an empty side a non-answer, and a non-answer must not buy a credit.
+
+    A substitution is reported and never billed: it is not in `report.deviations`, so it is out of
+    `runs_flagged` and out of the `deviations` total, and it is in no filing path — a `tool:` step
+    names a call, not an artifact, so `escalates` was already refusing it before this existed. What
+    the record carries is the call that answered for the step, the path it named and the step id
+    whose corroborated directory vouched for that path, so a reader can check the credit from the
+    row alone.
+    """
+    if not step.startswith(TOOL_PREFIX):
+        return None
+    name = step[len(TOOL_PREFIX):]
+    group = equivalents_of(name)
+    if not group:
+        return None
+    for other in sorted(group - {name}):
+        for raw in sorted((trace.tool_paths or {}).get(other, ())):
+            base = normalized_basename(raw)
+            if not base or base in GENERIC_BASENAMES:
+                continue
+            learned_dirs = corroborated_dirs_of(baseline, f"write:{base}")
+            directory = normalized_dir(str(_expand(raw)))
+            if not learned_dirs or not directory:
+                continue
+            if any(dir_matches(learned, directory) for learned in learned_dirs):
+                return {
+                    "step": f"{TOOL_PREFIX}{other}",
+                    "tool": other,
+                    "path": raw,
+                    "directory": directory,
+                    "corroborated_step": f"write:{base}",
+                    "corroborated_dirs": list(learned_dirs),
+                }
+    return None
+
+
+def steps_from_tools(tools, write_paths: dict | None = None,
+                     tool_paths: dict | None = None) -> list[str]:
     """Ordered, de-duplicated step ids for one run's tool calls, in `sequence` order.
 
     Three step kinds: `tool:<name>` for every call, plus `read:<basename>` and
@@ -624,6 +744,13 @@ def steps_from_tools(tools, write_paths: dict | None = None) -> list[str]:
     `_satisfied_steps` and the disk witness, each of which needs the path a step id does not
     carry. Collected in the same pass rather than by a second extractor, so the two can never
     disagree about which capture was a write.
+
+    Pass a dict as `tool_paths` and it comes back keyed by TOOL NAME instead, holding every path
+    that call named in its params (#4609). The step grammar cannot carry these: a `tool:` id is a
+    call's name and nothing else, and the one tool that needs them most — `automod_vault_land`,
+    which names its files under a plural `paths` key — is deliberately not a writer, because
+    making it one would emit a `write:` step for every path it lands and rename the published step
+    ids of every task that uses it. So the credit reads this map, and the write side never sees it.
     """
     steps: list[str] = []
     seen: set[str] = set()
@@ -642,10 +769,19 @@ def steps_from_tools(tools, write_paths: dict | None = None) -> list[str]:
             if str(raw) not in seen_paths:
                 seen_paths.append(str(raw))
 
+    def add_tool_path(name: str, raw) -> None:
+        if tool_paths is None:
+            return
+        seen_paths = tool_paths.setdefault(name, [])
+        if str(raw) not in seen_paths:
+            seen_paths.append(str(raw))
+
     for tool in sorted(tools, key=lambda t: t.get("sequence") or 0):
         name = tool.get("name") or ""
         params = tool.get("params_summary") or {}
-        add(f"tool:{name}")
+        add(f"{TOOL_PREFIX}{name}")
+        for raw in _path_targets(params):
+            add_tool_path(name, raw)
         target = _path_target(params)
         if target and name in READ_TOOLS:
             base = normalized_basename(target)
@@ -670,6 +806,11 @@ class Trace:
     #: was written; the witness needs the path, and the path has to survive the loader for the
     #: escalation half of the pipeline to be able to ask the disk anything.
     write_paths: dict = field(default_factory=dict)
+    #: Tool name -> every path that tool's params named (#4609). Separate from `write_paths`
+    #: because it is not a write: `automod_vault_land` lands files through a route the step grammar
+    #: does not read as a write at all, and the tool-substitution credit needs the path its params
+    #: named to ask the directory question. Read-only evidence, never a step id.
+    tool_paths: dict = field(default_factory=dict)
 
     @property
     def task_number(self) -> int | None:
@@ -796,6 +937,12 @@ class Deviation:
     #: is learned at, and that file's mtime sits inside the run's window. The record
     #: `sibling_slug_write` returns, so the row names the file that answered for the step.
     sibling_slug: dict | None = None
+    #: The credit #4609 added: this missing `tool:` step was answered by an equivalent call naming
+    #: a path in a directory the baseline corroborates for that artifact. The record
+    #: `tool_substitution` returns, so the row names the call that stood in and the path it named.
+    #: `None` on every other deviation, and never on a `write:` one — the credit reads a call, and
+    #: an artifact is not discharged by a call.
+    tool_substitution: dict | None = None
 
     def to_json(self) -> dict:
         return {
@@ -820,6 +967,7 @@ class Deviation:
             "written_elsewhere": list(self.written_elsewhere),
             "declared_in": self.declared_in,
             "sibling_slug": self.sibling_slug,
+            "tool_substitution": self.tool_substitution,
         }
 
 
@@ -833,6 +981,13 @@ class RunReport:
     deviations: list[Deviation] = field(default_factory=list)
     pending: list[Deviation] = field(default_factory=list)
     late_steps: list[dict] = field(default_factory=list)
+    #: Missing `tool:` steps the run discharged by calling an equivalent on a corroborated path
+    #: (#4609). A deviation lives here or in `deviations`, never both: `flagged` is
+    #: `bool(self.deviations)` and the header's `deviations` total is `len(r.deviations)`, so the
+    #: separate list is the only way to report a substitution without billing it — popping it off
+    #: `deviations` would delete the printed line too, and the rule at the head of
+    #: `escalation_targets` is that de-escalation removes the draft, never the observation.
+    substituted: list[Deviation] = field(default_factory=list)
 
     @property
     def flagged(self) -> bool:
@@ -848,6 +1003,7 @@ class RunReport:
             "deviations": [d.to_json() for d in self.deviations],
             "pending": [d.to_json() for d in self.pending],
             "late_steps": list(self.late_steps),
+            "substituted": [d.to_json() for d in self.substituted],
         }
 
 
@@ -921,7 +1077,8 @@ def load_traces(trajectory_dir, *, session_keys=None, since: datetime | None = N
         for row in sorted(rows, key=lambda r: str(r.get("timestamp") or "")):
             tools.extend(row.get("tools") or [])
         paths: dict[str, list[str]] = {}
-        steps = steps_from_tools(tools, paths)
+        tool_named: dict[str, list[str]] = {}
+        steps = steps_from_tools(tools, paths, tool_named)
         traces.append(
             Trace(
                 session_key=key,
@@ -929,6 +1086,7 @@ def load_traces(trajectory_dir, *, session_keys=None, since: datetime | None = N
                 steps=steps,
                 trace_ts=stamps.get(key),
                 write_paths=paths,
+                tool_paths=tool_named,
             )
         )
     return traces
@@ -1331,7 +1489,18 @@ def score_run(
                 # needs no stand-in and must not have its own account overwritten by one.
                 sibling = sibling_slug_write(baseline, trace, step, (started, ended),
                                              grace_seconds=grace_seconds)
-        if witness is not None:
+        # Fourth reading, and the only one that is not about an artifact (#4609): this missing step
+        # names a CALL, and the run made an equivalent one on ground the baseline corroborates.
+        # Asked only once the row is a finding — a `pending` row is inside the grace window and is
+        # not an accusation yet, so its reason stays whatever the older reading gives it and the
+        # `pending` totals keep meaning the same thing they did before this existed.
+        substituted_by = (
+            tool_substitution(baseline, trace, step)
+            if step.startswith(TOOL_PREFIX) and state == "deviation" else None
+        )
+        if substituted_by is not None:
+            reason = REASON_TOOL_SUBSTITUTED
+        elif witness is not None:
             reason = REASON_WITNESSED
         elif declared:
             reason = REASON_DECLARED_SKIP
@@ -1363,8 +1532,16 @@ def score_run(
             written_elsewhere=elsewhere,
             declared_in=declared,
             sibling_slug=sibling,
+            tool_substitution=substituted_by,
         )
-        (report.pending if state == "pending" else report.deviations).append(deviation)
+        if state == "pending":
+            report.pending.append(deviation)
+        elif substituted_by is not None:
+            # Reported, not billed: see `RunReport.substituted` for why this cannot be a
+            # `deviations` entry with a flag on it.
+            report.substituted.append(deviation)
+        else:
+            report.deviations.append(deviation)
     for step in baseline.ordered(present & expected):
         learned_position = baseline.positions.get(step)
         if learned_position is None:
@@ -1429,6 +1606,13 @@ def replay(
         "deviations_written_elsewhere": sum(
             1 for r in reports for d in r.deviations if d.written_elsewhere
         ),
+        # The one total that is NOT a subtotal of `deviations` (#4609): a substitution left the
+        # flagged set entirely, so this number adds to `pending`+`deviations` only in the sense
+        # that it names findings the instrument looked at and declined to bill. A reader who adds
+        # it to `deviations` is double-counting nothing, but a reader who expects it inside
+        # `deviations` is reading a different instrument: the two lists are disjoint by
+        # construction, and the print below puts it beside the other suppressions for company only.
+        "deviations_tool_substituted": sum(len(r.substituted) for r in reports),
         # The rate a reader compares against the acceptance bound, stated as what it is. On
         # unlabelled traffic a flag may be a true positive, so `flagged_rate` is an *upper
         # bound* on the false-alarm rate and `*_flagged` below counts true positives and false
@@ -2034,13 +2218,17 @@ def print_replay(result: dict) -> None:
         f"tasks_scored={result['tasks_scored']} tasks_without_baseline={result['tasks_without_baseline']}"
         f" runs_scored={result['runs_scored']}"
     )
-    flagged = [r for r in result["reports"] if r["deviations"]]
+    # A run with only substitutions still gets its rows printed (#4609 clause 4): the credit
+    # withdraws the bill, not the observation. `runs_flagged` above does not count it.
+    shown = [r for r in result["reports"]
+             if r["deviations"] or r.get("substituted")]
     print(
         f"runs_flagged={result['runs_flagged']}/{result['runs_scored']}"
         f" ({result['runs_flagged'] / result['runs_scored'] * 100.0 if result['runs_scored'] else 0.0:.2f}%)"
         f" runs_pending={result['runs_pending']} deviations={result['deviations']} pending={result['pending']}"
         f" disk_witnessed={result['deviations_witnessed']}"
         f" written_elsewhere={result['deviations_written_elsewhere']}"
+        f" tool_substituted={result['deviations_tool_substituted']}"
     )
     print(
         f"success_recorded_runs={result['success_recorded_runs']}"
@@ -2053,12 +2241,12 @@ def print_replay(result: dict) -> None:
         " flagged run is a *candidate* skipped step for a human to adjudicate and may be a true"
         " positive. The labelled rate comes from `validate`. Nothing here alerts."
     )
-    for report in flagged:
+    for report in shown:
         print(
             f"\n- task {report['task_id']} {report['run_id']} status={report['run_status']}"
             f" session={report['session_key']}"
         )
-        for dev in report["deviations"]:
+        for dev in report["deviations"] + report.get("substituted", []):
             print(
                 f"    missing {dev['step']!r} (structural, reason={dev.get('reason')}) —"
                 f" expected in {dev['learned_from_n']}"
@@ -2085,6 +2273,14 @@ def print_replay(result: dict) -> None:
                     f"    artifact written under other slug {sib['step']!r} at {sib['path']}"
                     f" mtime {sib['mtime']} — not escalated: this run wrote its artifact into"
                     f" {sib['directory']} under a name the baseline had not learned"
+                )
+            sub_by = dev.get("tool_substitution")
+            if sub_by:
+                print(
+                    f"    tool call substituted by {sub_by['tool']} on {sub_by['path']}"
+                    f" in {sub_by['directory']} — not counted as flagged: the runs that taught"
+                    f" this task {sub_by['corroborated_step']} wrote it under"
+                    f" {sub_by['corroborated_dirs']}, so the stage ran through an equivalent call"
                 )
             print(f"    expected_steps={dev['expected_steps']}")
 

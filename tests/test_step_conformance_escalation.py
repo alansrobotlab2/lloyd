@@ -1469,3 +1469,160 @@ def test_a_sibling_slug_note_in_another_directory_still_files(tmp_path):
     assert f"missing {SLUG_LEARNED_STEP!r}" in proc.stdout, proc.stdout[-2000:]
     assert sc.REASON_OTHER_SLUG not in proc.stdout, proc.stdout[-2000:]
     assert "escalations_filed=1/1" in proc.stdout, proc.stdout[-400:]
+
+
+# ---------------------------------------------------------------------------
+# #4609 — a missing `tool:` step credited by an equivalent call is a
+# substitution: printed, counted under its own header total, never flagged.
+#
+# The measured cost of not having this, on the shipped nightly window
+# (`replay(days=7, support=1.0)`) as triaged on 2026-11-26: 5 of 36 deviations
+# across 3 of 18 flagged runs are the closed table's — task 83's run publishing
+# through the licensed `automod_vault_land` where its task's other runs used
+# `vault_write`, and tasks 40, 42, 38 and 39 writing with the other half of
+# {Write, Edit}. All of them print, none of them can file (only `write:` files),
+# and every one of them was billed as a flagged run.
+#
+# The corpora are the shared builders in `tests/test_step_conformance.py`, each
+# built so the faulty run's ONLY missing step is the tool: one — see the block
+# comment there for how the `n_runs - 1` expectation rule buys that.
+# ---------------------------------------------------------------------------
+
+
+def _sub_cli(tmp_path, specs, *extra: str) -> subprocess.CompletedProcess:
+    """The shipped CLI over a substitution corpus: the same process boundary job 93 crosses."""
+    corpus = tmp_path / "corpus"
+    base._write_corpus(corpus, specs)
+    return _run_cli(corpus, tmp_path / "backlog", *extra)
+
+
+def test_a_licensed_vault_land_on_a_corroborated_path_is_a_substitution_not_a_flagged_run(tmp_path):
+    """#4609 clause 1, across the process boundary the nightly filer actually crosses.
+
+    Task 83's run of 2026-11-22 (`run_scheduled-task_20261122_113854_a4fec8`) published its note
+    with `automod_vault_land` — the route the self-modification loop REQUIRES for a vault commit —
+    while every other run of that task published with `vault_write`. The replay printed
+    `missing 'tool:vault_write'` and billed the run as flagged. Here the shipped CLI prints the
+    step with `reason=tool_substituted`, files nothing, and leaves the run out of both
+    `runs_flagged` and `deviations`, while `tool_substituted=1` says where it went.
+
+    The path condition is the whole safety of the credit: `PUB_A` is the vault-relative path run 0
+    of this very task published to, so the substituting call names a directory the baseline
+    corroborates for THAT basename, not merely some file the run happened to touch.
+    """
+    proc = _sub_cli(tmp_path, base._vault_sub_specs("land"), "--escalate-writes")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert "missing 'tool:vault_write' (structural, reason=tool_substituted" in proc.stdout, \
+        proc.stdout[-2500:]
+    assert f"by automod_vault_land on {base.PUB_A}" in proc.stdout, proc.stdout[-2500:]
+    assert "runs_flagged=0/6" in proc.stdout, proc.stdout[-400:]
+    assert "deviations=0" in proc.stdout, proc.stdout[-400:]
+    assert "tool_substituted=1" in proc.stdout, proc.stdout[-400:]
+    assert "escalations_filed=0/0" in proc.stdout, proc.stdout[-400:]
+    assert _drafts(tmp_path / "backlog") == []
+    # The falsifier: with the credit removed the run is flagged and its step is a plain missing
+    # one, so a node that passed on an empty corpus could not tell the two readings apart.
+    plain = _sub_cli(tmp_path / "plain", base._vault_sub_specs("none"))
+    assert "runs_flagged=1/6" in plain.stdout, plain.stdout[-400:]
+    assert "tool_substituted=0" in plain.stdout, plain.stdout[-400:]
+
+
+@pytest.mark.parametrize("direction", ["write", "edit"])
+def test_the_write_edit_pair_credits_the_missing_tool_call_in_both_directions(tmp_path, direction):
+    """#4609 clause 2, both halves of {Write, Edit}.
+
+    A run that edited the file its task usually writes, or wrote the file it usually edits, called
+    an equivalent: same tool family, same artifact, same directory the task's own history writes
+    it in. The item's own measured cases are exactly these — task 40
+    (`run_scheduled-task_20261120_100036_43b609`) and task 42 missing `tool:Write` answered by
+    `Edit`, tasks 38 and 39 missing `tool:Edit` answered by `Write`.
+    """
+    missing = {"write": "tool:Write", "edit": "tool:Edit"}[direction]
+    earned_by = {"write": "Edit", "edit": "Write"}[direction]
+    corpus = tmp_path / "corpus"
+    result = _replay(corpus, base._file_tool_sub_specs(direction))
+    report = next(r for r in result["reports"] if r["run_id"] == f"run_wesub_{base.SUB_FAULTY}")
+    assert _steps(report) == [], report["deviations"]
+    assert [d["step"] for d in report["substituted"]] == [missing], report["substituted"]
+    credited = report["substituted"][0]
+    assert credited["reason"] == sc.REASON_TOOL_SUBSTITUTED
+    assert credited["tool_substitution"]["tool"] == earned_by
+    assert credited["tool_substitution"]["path"] == base.SCRATCH
+    assert result["runs_flagged"] == 0 and result["deviations"] == 0
+    assert result["deviations_tool_substituted"] == 1
+    assert sc.escalation_targets(result) == []
+
+
+def test_the_equivalence_table_is_closed_to_every_tool_outside_the_two_pairs(tmp_path):
+    """#4609 clause 2's other half: the table is CLOSED, and the closed set is exactly two groups.
+
+    `Bash` is the one they had to refuse by name. A redirect is captured as a write of its target
+    — `write_targets` has always read `> path` — so a run that replaced its `Edit` with
+    `cat > …` keeps the artifact step satisfied and still lacks `tool:Edit`; if the redirect also
+    earned the tool call, the credit would cover any shell command at all and the deviation would
+    stop meaning anything. `TodoWrite`, `skills_read` and the rest of the 4 of 7 tool-prefixed
+    flagged runs that this change does not touch earn nothing either.
+    """
+    assert sc.equivalents_of("Write") == frozenset({"Write", "Edit"})
+    assert sc.equivalents_of("automod_vault_land") == frozenset(
+        {"vault_write", "automod_vault_land"})
+    for tool in ("Bash", "TodoWrite", "MultiEdit", "NotebookEdit", "Read", "skills_read"):
+        assert sc.equivalents_of(tool) == frozenset(), tool
+    assert len(sc.TOOL_EQUIVALENTS) == 2
+
+    proc = _sub_cli(tmp_path, base._file_tool_sub_specs("bash"))
+    assert "missing 'tool:Edit' (structural, reason=missing_structural_step" in proc.stdout, \
+        proc.stdout[-2500:]
+    assert "runs_flagged=1/6" in proc.stdout, proc.stdout[-400:]
+    assert "deviations=1" in proc.stdout, proc.stdout[-400:]
+    assert "tool_substituted=0" in proc.stdout, proc.stdout[-400:]
+
+
+def test_a_missing_tool_call_with_no_equivalent_stays_a_flagged_missing_step(tmp_path):
+    """#4609 clause 3, first edge: nothing stands in, so the flag stands.
+
+    The run publishes nothing at all. One deviation, `reason=missing_structural_step`, counted in
+    `runs_flagged` and `deviations`, `tool_substituted=0` — and still no draft, because a `tool:`
+    step names a call and not an artifact, which is what #2104 clause 2 settled.
+    """
+    proc = _sub_cli(tmp_path, base._vault_sub_specs("none"), "--escalate-writes")
+    assert proc.returncode == 0, proc.stderr[-1500:]
+    assert "missing 'tool:vault_write' (structural, reason=missing_structural_step" in proc.stdout, \
+        proc.stdout[-2500:]
+    assert "runs_flagged=1/6" in proc.stdout, proc.stdout[-400:]
+    assert "deviations=1" in proc.stdout, proc.stdout[-400:]
+    assert "tool_substituted=0" in proc.stdout, proc.stdout[-400:]
+    assert "escalations_filed=0/0" in proc.stdout, proc.stdout[-400:]
+    assert _drafts(tmp_path / "backlog") == []
+
+
+def test_an_equivalent_naming_an_unlearned_directory_stays_a_flagged_missing_step(tmp_path):
+    """#4609 clause 3, second edge — and the reason an unrelated write cannot discharge.
+
+    Same tool, same basename, a directory no run that taught the step ever used. `dir_matches` is
+    the whole difference between this and the credited shape, exactly as it is for #2502's
+    disk witness and #4518's sibling slug: the root may move, the directory may not. The
+    `write:` half of the same corpus is the #2502 flag surviving this change — a run that wrote
+    the artifact basename under `/lloyd/_pipeline/other-reflection` still earns
+    `artifact_written_at_other_path` and still files.
+    """
+    vault = _sub_cli(tmp_path, base._vault_sub_specs("land_unlearned_dir"), "--escalate-writes")
+    assert vault.returncode == 0, vault.stderr[-1500:]
+    assert ("missing 'tool:vault_write' (structural, reason=missing_structural_step"
+            in vault.stdout), vault.stdout[-2500:]
+    assert "runs_flagged=1/6" in vault.stdout, vault.stdout[-400:]
+    assert "tool_substituted=0" in vault.stdout, vault.stdout[-400:]
+    assert _drafts(tmp_path / "backlog") == []
+
+    corpus, backlog = tmp_path / "w" / "corpus", tmp_path / "w" / "backlog"
+    result = _replay(corpus, base._file_tool_sub_specs("write_unlearned_dir"))
+    report = next(r for r in result["reports"] if r["run_id"] == f"run_wesub_{base.SUB_FAULTY}")
+    reasons = {d["step"]: d["reason"] for d in report["deviations"]}
+    assert reasons == {"tool:Write": sc.REASON_MISSING,
+                       "write:scratch-latest.md": sc.REASON_OTHER_PATH}, reasons
+    assert result["runs_flagged"] == 1 and result["deviations"] == 2
+    assert result["deviations_tool_substituted"] == 0
+    targets = sc.escalation_targets(result)
+    assert [t["step"] for t in targets] == ["write:scratch-latest.md"], targets
+    filed = sc.file_escalations(result, backlog_dir=backlog)
+    assert len(filed) == 1 and len(_drafts(backlog)) == 1

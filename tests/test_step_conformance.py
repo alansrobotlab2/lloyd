@@ -1271,3 +1271,265 @@ def test_a_sibling_slug_at_an_unlearned_directory_still_files(tmp_path):
     assert deviation.reason == sc.REASON_MISSING, deviation.reason
     assert deviation.sibling_slug is None, deviation.sibling_slug
     assert sc.REASON_OTHER_SLUG not in sc.ESCALABLE_REASONS
+
+
+# ---------------------------------------------------------------------------
+# #4609 — a missing `tool:` step answered by an equivalent call is a
+# substitution, not a flagged run.
+#
+# The two fixture families below are built so the faulty run has EXACTLY ONE
+# missing step. That is not tidiness: a corpus with two deviations cannot say
+# which reading a node is grading, and the substitution reading is the one under
+# test. The trick is the gap between what a step id counts and what an
+# expectation requires — `tool:vault_write` is taken by five of the six runs so at
+# strict support it IS expected of the sixth, while the artifact each of those
+# calls writes is written by only one or four runs and so is expected of nobody
+# (an expectation needs `n_runs - 1` = 5 of 6, `_expected_threshold`).
+# ---------------------------------------------------------------------------
+
+#: The vault family's paths are RELATIVE because that is the shape the real params
+#: carry: a `vault_write` capture is `backlog/1073-….md`, vault-relative, and so is
+#: every entry of an `automod_vault_land` `paths` list. Task 83's run of 2026-11-22
+#: is that capture.
+VAULT_DIR = "backlog"
+VAULT_UNLEARNED_DIR = "_unlearned"
+PUB_A = f"{VAULT_DIR}/pub-a-latest.md"
+PUB_B = f"{VAULT_DIR}/pub-b-latest.md"
+
+#: The file-tool family's paths, and the directory no baseline corroborates.
+SUB_DIR = "/lloyd/_pipeline/reflection"
+UNLEARNED_DIR = "/lloyd/_pipeline/other-reflection"
+SCRATCH = f"{SUB_DIR}/scratch-latest.md"
+NOTE_A = f"{SUB_DIR}/note-a-latest.md"
+NOTE_B = f"{SUB_DIR}/note-b-latest.md"
+SUB_RUNS = 6
+SUB_FAULTY = 5
+
+
+def _path_call(name, key, value, seq):
+    """A call that names its file under `key` rather than `file_path`.
+
+    `vault_write` names `path`; `automod_vault_land` names a LIST under `paths`, which no
+    writing tool in `WRITE_TOOLS` does — the reason its params reach the scorer on a map of
+    their own instead of through `write_paths`.
+    """
+    call = _tool(name, seq=seq)
+    call["params_summary"][key] = value
+    return call
+
+
+def _spec(run_id, session_key, calls, *, source=TASK, task_id=7):
+    return {
+        "run_id": run_id, "session_key": session_key, "status": "success",
+        "source": source, "task_id": task_id, "calls": calls,
+    }
+
+
+def _vault_sub_specs(substitute: str) -> list[dict]:
+    """Six runs of one task that publish through `vault_write`, the last publishing otherwise.
+
+    Runs 1..4 publish `PUB_B` and run 0 publishes `PUB_A`; the run at `SUB_FAULTY` replaces its
+    `vault_write` with `substitute`:
+
+    * `"land"` — the licensed `automod_vault_land` on `PUB_A`, the vault pair #4609 is named for;
+    * `"land_unlearned_dir"` — the same call on the same basename in `_unlearned/`, a directory
+      no run that taught the step ever used;
+    * `"none"` — no publish at all, so nothing stands in for the step.
+
+    `automod_vault_land` is deliberately NOT a writer to the step grammar: adding it to
+    `WRITE_TOOLS` would emit a new `write:` step and rename published step ids, which is the
+    thing #2502 forbids. So it contributes a `tool:` step and no `write:` one.
+    """
+    specs = []
+    for i in range(SUB_RUNS):
+        calls = [
+            _tool("Read", path=SOURCE_FILE, seq=1),
+            _tool("Write", path=REPORT, seq=2),
+        ]
+        if i == SUB_FAULTY:
+            if substitute == "land":
+                calls.append(_path_call("automod_vault_land", "paths", [PUB_A], 3))
+            elif substitute == "land_unlearned_dir":
+                calls.append(_path_call("automod_vault_land", "paths",
+                                        [f"{VAULT_UNLEARNED_DIR}/pub-a-latest.md"], 3))
+            elif substitute != "none":
+                raise AssertionError(f"unknown substitute {substitute!r}")
+        else:
+            calls.append(_path_call("vault_write", "path", PUB_A if i == 0 else PUB_B, 3))
+        specs.append(_spec(f"run_vsub_{i}", f"sk_vsub_{i}", calls))
+    return specs
+
+
+def _file_tool_sub_specs(direction: str) -> list[dict]:
+    """Six runs of one task where the last one writes with the OTHER tool of the {Write, Edit} pair.
+
+    Every run publishes `NOTE_A` through a `cat > …` redirect, so the only `Write` or `Edit` call a
+    run makes is the one under test. That is not decoration: the credit reads every path the
+    equivalent tool named in the run, so with `NOTE_A` written by `Edit` the row for a missing
+    `tool:Write` would name the shared file rather than the call that actually stood in — a true
+    credit, but evidence that does not point at the substitution a reader has to check.
+
+    * `"write"` — the clean five also `Write` `SCRATCH`; the faulty one `Edit`s it instead, so its
+      single missing step is `tool:Write`, answered by that `Edit` on `SCRATCH`;
+    * `"edit"` — the mirror: the clean five `Edit` `SCRATCH`, the faulty one `Write`s it, so the
+      missing step is `tool:Edit` answered by a `Write`;
+    * `"write_unlearned_dir"` — the faulty one `Edit`s the same basename under `UNLEARNED_DIR`. The
+      directory condition fails, so `tool:Write` stays a plain missing step, and the artifact
+      deviation is #2502's swap, which still files;
+    * `"bash"` — the clean five also `Edit` `NOTE_B`, the faulty one publishes `NOTE_B` with a
+      second redirect. The redirect IS captured as a write of `NOTE_B`, keeping that artifact step
+      satisfied, so the run's only missing step is `tool:Edit`; the redirect names a corroborated
+      path and calls no member of either family, which is what measures the table being CLOSED.
+    """
+    writer, other = ("Edit", "Write") if direction.startswith("write") else ("Write", "Edit")
+    specs = []
+    for i in range(SUB_RUNS):
+        faulty = i == SUB_FAULTY
+        if faulty:
+            if direction == "bash":
+                third = _tool("Bash", command=f"cat > {NOTE_B}", seq=3)
+            elif direction == "write_unlearned_dir":
+                third = _tool("Edit", path=f"{UNLEARNED_DIR}/scratch-latest.md", seq=3)
+            else:
+                third = _tool(writer, path=SCRATCH, seq=3)
+        else:
+            third = _tool(other, path=NOTE_B if direction == "bash" else SCRATCH, seq=3)
+        calls = [
+            _tool("Read", path=SOURCE_FILE, seq=1),
+            _tool("Bash", command=f"cat > {NOTE_A}", seq=2),
+            third,
+        ]
+        specs.append(_spec(f"run_wesub_{i}", f"sk_wesub_{i}", calls))
+    return specs
+
+
+def _swapped_write_specs(source: str = "autonomy-task:9", task_id: int = 9) -> list[dict]:
+    """Six runs of a second task that write their artifact, the last writing it elsewhere.
+
+    Every run calls `Write`, so no `tool:` step is missing anywhere in this corpus: the faulty
+    run's one deviation is `write:report-latest.md` at an unlearned directory — #2502's swap, which
+    is a real finding that files. That is the counterpart a substitution count has to stay separate
+    from: one billable, one not, in the same header.
+    """
+    specs = []
+    for i in range(SUB_RUNS):
+        target = f"{UNLEARNED_DIR}/report-latest.md" if i == SUB_FAULTY else REPORT
+        calls = [
+            _tool("Read", path=SOURCE_FILE, seq=1),
+            _tool("Write", path=target, seq=2),
+        ]
+        specs.append(_spec(f"run_swap_{i}", f"sk_swap_{i}", calls,
+                           source=source, task_id=task_id))
+    return specs
+
+
+def _sub_replay(tmp_path: Path, specs, **kwargs):
+    """Score specs through the real loaders and the real `replay`."""
+    traj, db = _write_corpus(tmp_path / "corpus", specs)
+    return sc.replay(trajectory_dir=traj, db_path=db, **kwargs)
+
+
+def _header_line(stdout: str) -> str:
+    """The replay header's counter line — the one a nightly log reader reads first."""
+    lines = [line for line in stdout.splitlines() if "runs_flagged=" in line]
+    assert len(lines) == 1, stdout
+    return lines[0]
+
+
+# ---------------------------------------------------------------------------
+# clause 4 — the credit prints, files nothing, and never widens what may file
+# ---------------------------------------------------------------------------
+
+
+def test_a_credited_substitution_is_printed_and_is_never_a_filing_target(tmp_path, capsys):
+    """#4609 clause 4. The row survives the draft it no longer files — here, the count.
+
+    Task 83's run of 2026-11-22 published its note with the licensed `automod_vault_land` while
+    every other run used `vault_write`, and the instrument printed `missing 'tool:vault_write'`
+    and billed the run as flagged: an equivalent call on a path the baseline corroborates is a
+    substitution, and a substitution is not a skipped stage. The deviation has to stay PRINTED
+    (the standing rule at the head of `escalation_targets`: de-escalation removes the draft,
+    never the observation) while leaving `deviations` and `runs_flagged`, so it lives on
+    `RunReport.substituted` and nowhere near the filing path.
+    """
+    corpus, joined, _unjoined = _corpus(tmp_path / "scored", _vault_sub_specs("land"))
+    trace, run = next((t, r) for t, r in joined if t.session_key == "sk_vsub_5")
+    report = sc.score_run(trace, run, corpus)
+    assert [d.step for d in report.substituted] == ["tool:vault_write"], report.substituted
+    assert report.deviations == [] and report.flagged is False
+    credited = report.substituted[0]
+    assert credited.reason == sc.REASON_TOOL_SUBSTITUTED
+    assert credited.tool_substitution["tool"] == "automod_vault_land"
+    assert credited.tool_substitution["path"] == PUB_A
+    assert credited.tool_substitution["corroborated_step"] == "write:pub-a-latest.md"
+    assert sc.REASON_TOOL_SUBSTITUTED not in sc.ESCALABLE_REASONS
+    # `write:` is still the only prefix that can file, and this run has nothing to file with.
+    assert sc.escalates("write:report-latest.md") is True
+    assert sc.escalates("tool:vault_write") is False
+    assert sc.escalates("read:source-latest.md") is False
+    result = _sub_replay(tmp_path / "printed", _vault_sub_specs("land"))
+    assert sc.escalation_targets(result) == []
+    sc.print_replay(result)
+    out = capsys.readouterr().out
+    assert "missing 'tool:vault_write' (structural, reason=tool_substituted" in out, out
+    assert f"by automod_vault_land on {PUB_A}" in out, out
+    assert "runs_flagged=0" in out, out
+
+
+def test_the_directory_condition_is_what_the_credit_is_falsified_by(tmp_path):
+    """The credit routes through the basename, the way `sibling_slug_write` does — or it never
+    fires, because `corroborated_dirs_of` reads `baseline.artifact_paths`, which `learn` keys by
+    `write:` step ids only.
+
+    So `corroborated_dirs_of(baseline, "tool:vault_write")` is empty and a credit that asked the
+    id directly could never match anything. What the credit asks instead is whether the
+    substituting call's OWN path sits in a directory the task's history writes THAT basename to.
+    A call that names no path at all, or a path with no directory, corroborates nothing either.
+    """
+    baseline = _sub_replay(tmp_path, _vault_sub_specs("land"))["corpus"].baselines[TASK]
+    assert sc.corroborated_dirs_of(baseline, "tool:vault_write") == ()
+    assert sc.corroborated_dirs_of(baseline, "write:pub-a-latest.md") == (VAULT_DIR,)
+    assert sc.corroborated_dirs_of(baseline, "write:pub-b-latest.md") == (VAULT_DIR,)
+
+
+# ---------------------------------------------------------------------------
+# clause 5 — the header totals the substitutions beside the other suppressions
+# ---------------------------------------------------------------------------
+
+
+def test_the_replay_header_totals_substitutions_beside_the_other_counters(tmp_path, capsys):
+    """#4609 clause 5. `tool_substituted=N` sits with `disk_witnessed=` and
+    `written_elsewhere=`, and N is the number of credited deviations — NOT an additional one, so
+    the same corpus reads `deviations=0` and `runs_flagged=0/6`: the whole point of the change is
+    that a substitution stops being billable as a flag."""
+    result = _sub_replay(tmp_path, _vault_sub_specs("land"))
+    sc.print_replay(result)
+    header = _header_line(capsys.readouterr().out)
+    assert "tool_substituted=1" in header, header
+    assert "disk_witnessed=0" in header and "written_elsewhere=0" in header, header
+    assert "deviations=0" in header, header
+    assert header.index("tool_substituted=") > header.index("written_elsewhere="), header
+    assert result["deviations_tool_substituted"] == 1
+    assert result["deviations"] == 0 and result["runs_flagged"] == 0
+
+
+def test_a_mixed_corpus_keeps_the_substitution_and_the_dropped_stage_apart(tmp_path, capsys):
+    """The counter is only meaningful against its denominator, so one corpus carries both shapes:
+    task 7's run that published through the licensed lander (credited, unbillable) and task 9's
+    run that wrote its artifact into a directory no run of that task ever used (billable, and
+    filed). The header must say `runs_flagged=1/12`, `deviations=1`, `written_elsewhere=1` and
+    `tool_substituted=1` — one flag, one substitution, and no arithmetic that lets a reader add
+    them to two findings."""
+    specs = _vault_sub_specs("land") + _swapped_write_specs()
+    result = _sub_replay(tmp_path, specs)
+    sc.print_replay(result)
+    header = _header_line(capsys.readouterr().out)
+    assert "runs_flagged=1/12" in header, header
+    assert "deviations=1" in header, header
+    assert "written_elsewhere=1" in header, header
+    assert "tool_substituted=1" in header, header
+    assert result["runs_flagged"] == 1 and result["deviations"] == 1
+    assert result["deviations_tool_substituted"] == 1
+    flagged = [r for r in result["reports"] if r["deviations"]]
+    assert [(r["task_id"], r["run_id"]) for r in flagged] == [(9, "run_swap_5")], flagged
+    assert [t["step"] for t in sc.escalation_targets(result)] == ["write:report-latest.md"]
