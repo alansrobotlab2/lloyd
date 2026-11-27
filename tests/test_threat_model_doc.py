@@ -838,7 +838,7 @@ def test_the_credential_escape_rows_name_the_substitution_and_its_limit():
     assert "unsubstituted" in t20.lower(), (
         "T-20 no longer says a model-composed BODY leaves unsubstituted, which is "
         "the half of this capability that no control closes")
-    assert "outbound_content.py:580" in t20, (
+    assert "outbound_content.py:859" in t20, (
         "T-20 stopped citing the module's outbound-payload control")
     assert "**Partial" in t20, (
         "T-20 is no longer marked a partial cell, so a reader takes the citation as "
@@ -849,7 +849,7 @@ def test_the_credential_escape_rows_name_the_substitution_and_its_limit():
     assert "agent_mcp/egress.py" in t08, (
         "T-08 credits no egress control, so a marked credential that does leave over "
         "a guarded lane is still credited to the scanner that only recorded it")
-    assert "outbound_content.py:580" in t08, (
+    assert "outbound_content.py:859" in t08, (
         "T-08 cites `redact` again, or lost the payload control beside the substitution")
 
     for rid, cells in ((t20_cells[_CAPABILITY], t20_cells),

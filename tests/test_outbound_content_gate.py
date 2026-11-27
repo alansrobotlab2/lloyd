@@ -16,7 +16,7 @@ triage counted 0 tier-2/tier-3 side effects in `workers.db` and 0 `email_send`
 among 2,826 transcripts, so a person accepts this corpus in place of that
 measurement; inventing a real sent set is not this round's call.
 
-Counts quoted in prose are counts asserted here: 5 rules (3 deny, 2 report),
+Counts quoted in prose are counts asserted here: 6 rules (4 deny, 2 report),
 14 arm points, 11 benign payloads.
 """
 
@@ -224,7 +224,11 @@ def test_the_rule_table_is_a_declaration_and_validates():
         "direction 'in' would read tool results, which is out of scope"
     names = [r.name for r in OC.CONTENT_RULES]
     assert len(names) == len(set(names)), names
-    assert sum(1 for r in OC.CONTENT_RULES if r.action == "deny") == 3
+    # 4 deny + 2 report = 6 rows. The counts are the item's, so a row added or dropped
+    # here is a change to the shipped gate and has to be said out loud: it was 3 deny
+    # until #4634 added `lloyd-aggregator-credential`, the fourth deny and the only row
+    # whose subject is a value on disk rather than a shape in the text.
+    assert sum(1 for r in OC.CONTENT_RULES if r.action == "deny") == 4
     assert sum(1 for r in OC.CONTENT_RULES if r.action == "report") == 2
 
 
@@ -1341,9 +1345,12 @@ def test_a_tier1_call_skips_the_scan_entirely(monkeypatch):
     calls = []
     real = OC.scan_outbound_payload
 
-    def spy(args):
+    def spy(args, **kwargs):
+        # `**kwargs` because the hook passes `token_value=None` — the one caller that
+        # reads the credential (#4634). Spying the arguments, not the credential read,
+        # is still what this node measures: that a tier-1 call never reaches the scan.
         calls.append(args)
-        return real(args)
+        return real(args, **kwargs)
 
     monkeypatch.setattr(OC, "scan_outbound_payload", spy)
     _fire(_content_only(scope=CHAT), "vault_read", {"path": "/tmp/x"})
@@ -1532,3 +1539,203 @@ def test_no_exempt_literal_is_a_raw_live_prefixed_string_on_disk():
             f"{prefix}… is a raw literal in outbound_content.py and will block "
             "the next push; split it across a `+` as the others are")
         assert prefix in src, "the split halves must still be there to join"
+
+
+# ---------------------------------------------------------------------------
+# The aggregator credential (#4634)
+# ---------------------------------------------------------------------------
+# The committed stand-ins, never a live value: 43 base64url characters with a `-` and
+# an `_` inside the first 32, which is the shape `secrets.token_urlsafe(32)` produces.
+ON_FILE_STANDIN = OC.AGGREGATOR_FIXTURE_TOKEN
+OTHER_STANDIN = OC.AGGREGATOR_OTHER_TOKEN
+HEADER = "X-Lloyd-Aggregator-Token"
+
+SHAPES_4634 = {
+    "command": lambda v: {"command": f"curl -s -H '{HEADER}: {v}' "
+                                     "http://127.0.0.1:8765/v1/query"},
+    "body": lambda v: {"body": f"the token is {v} — quote this in the email"},
+    "headers dict": lambda v: {"url": "http://127.0.0.1:8765/v1/query",
+                              "headers": {HEADER: v}},
+}
+
+
+def test_the_aggregator_credential_is_denied_in_each_argument_shape():
+    """One deny per shape, and `credential-value` names the half that spoke.
+
+    The third shape is the one no other rule in the table can reach: the credential
+    arrives as the *value* of a nested `headers` object keyed by its own header name, and
+    keys are never scanned. With the value supplied by the caller the scan reads nothing.
+    """
+    for label, build in SHAPES_4634.items():
+        out = OC.scan_outbound_payload(build(ON_FILE_STANDIN),
+                                       token_value=ON_FILE_STANDIN)
+        assert len(out) == 1, (label, [(f.rule, f.matched) for f in out])
+        f = out[0]
+        assert (f.rule, f.action, f.category, f.severity) == (
+            "lloyd-aggregator-credential", "deny", "credential", "critical"), label
+        assert f.matched == "credential-value", label
+        assert ON_FILE_STANDIN not in f.excerpt and ON_FILE_STANDIN[:5] not in f.excerpt, \
+            "the ledger excerpt must not carry the credential"
+
+
+def _credential_unreadable(monkeypatch, tmp_path):
+    """Make the credential impossible to read, by the route the shipped hook takes.
+
+    `read_token(publish=False)` answers from `LLOYD_MCP_TOKEN` if the environment carries
+    one and otherwise from `token_path()`; this removes the first and moves the second to
+    a path whose parent directory does not exist. The point of doing it that way rather
+    than stubbing `OC.read_token_for_scan` is that these two nodes then exercise the
+    resolution the module actually depends on — move `token_path()` and the value half
+    goes quiet — instead of asserting against a reader this module wrote itself.
+    """
+    from agent_mcp import aggregator_auth as AUTH
+    monkeypatch.delenv("LLOYD_MCP_TOKEN", raising=False)
+    monkeypatch.setattr(AUTH, "token_path",
+                        lambda env=None: tmp_path / "absent-dir" / "aggregator-token")
+
+
+def test_the_degraded_rule_reports_the_header_half_and_only_the_header_half(
+        monkeypatch, tmp_path):
+    """With `token_path()` unreadable, the header shapes are still denied — and the
+    finding says `header-literal`, the blunt half, rather than claiming a value match it
+    never made. The `tok = '<value>'` shape, which names neither header nor environment
+    variable, produces no finding at all: the degraded rule is not a general secret
+    detector, and a silent narrowing would be the failure mode this clause exists to make
+    visible.
+    """
+    _credential_unreadable(monkeypatch, tmp_path)
+    read = lambda args: OC.scan_outbound_payload(args, token_value=None)  # noqa: E731
+    out = read(SHAPES_4634["command"](ON_FILE_STANDIN))
+    assert [f.matched for f in out] == ["header-literal"], out
+    assert out[0].action == "deny", out
+    assert "header" in out[0].rule or out[0].matched == "header-literal", out
+    # A header quoted in prose behaves the same way, which is the half that keeps the
+    # degraded rule honest: it denies anything credential-shaped beside the name.
+    prose = read({"body": f"send it with {HEADER}: {ON_FILE_STANDIN} in the body"})
+    assert [f.matched for f in prose] == ["header-literal"], prose
+    # The nested `headers` dict is denied too, and the way it is reached is the point of
+    # the row: `_arg_paths` puts the header name in the argument's *path* and the credential
+    # in its text, so this row — and only this row — reads that one name off the path. Keys
+    # are still never scanned as text, which is what keeps a schema echo allowed.
+    nested = read(SHAPES_4634["headers dict"](ON_FILE_STANDIN))
+    assert [f.matched for f in nested] == ["header-literal"], nested
+    assert nested[0].arg == f"headers.{HEADER}", nested[0].arg
+    # and a bare assignment, naming neither header nor env variable, is not denied degraded
+    assert read({"body": f"tok = '{ON_FILE_STANDIN}'"}) == []
+
+
+def test_the_documented_substitution_and_a_placeholder_are_not_denied(
+        monkeypatch, tmp_path):
+    """The five shapes that must survive, each asserted in both states.
+
+    The first is the documented way of putting this credential on a command line without
+    writing it (architecture/tools.md:1289); the sha256 prose is what a triage note says
+    about the same secret; a different 43-character run is some other box's credential; a
+    `<placeholder>` is a template.
+
+    Four of the five are clean in both states, and why each one is clean is a different
+    mechanism: `$(` and `<` are not characters `secrets.token_urlsafe` can emit, so the
+    needle's capture never starts; the digest prose names neither header nor environment
+    variable; a 6-character value cannot reach the needle's 20-character floor. The fifth,
+    another box's credential under the header name, is clean **only** while the value can
+    be read — that is precisely the distinction the blunt half cannot make — so it is
+    asserted as `header-literal` degraded rather than skipped, and that expectation is the
+    rule's own limitation stated as a test.
+    """
+    cases = {
+        "dollar-cat": ({"command": f"curl -s -H '{HEADER}: $(cat "
+                                  "~/.local/state/lloyd/aggregator-token)' "
+                                  "http://127.0.0.1:8765/health"}, []),
+        "sha256 prose": ({"body": "the credential whose sha256 begins "
+                                 "a67e9263f1c0 sits in ~/.local/state — no literal here"},
+                         []),
+        "other credential": (SHAPES_4634["headers dict"](OTHER_STANDIN),
+                             ["header-literal"]),
+        "placeholder": (SHAPES_4634["headers dict"]("<placeholder>"), []),
+        "no token at all": (SHAPES_4634["command"]("unused"), []),
+    }
+    for label, (args, degraded) in cases.items():
+        sharp = OC.scan_outbound_payload(args, token_value=ON_FILE_STANDIN)
+        assert sharp == [], (label, [(f.rule, f.matched) for f in sharp])
+    for label, (args, degraded) in cases.items():
+        _credential_unreadable(monkeypatch, tmp_path)
+        out = OC.scan_outbound_payload(args, token_value=None)
+        assert [(f.rule, f.matched) for f in out] == [
+            ("lloyd-aggregator-credential", d) for d in degraded], (label, out)
+
+
+def test_the_new_row_ships_a_positive_and_a_negative_corpus():
+    """`validate_rule_table` grades each row against its own corpus at import.
+
+    The import already proves the call succeeded — a row whose positive failed to match,
+    or whose negative matched, raises there — so what is pinned here is the thing an
+    import cannot: that this row's two corpora are non-empty, and that the documented
+    substitution form and the `<placeholder>` are in the negative half specifically. A row
+    with two empty tuples would import fine and validate vacuously.
+    """
+    row = _rule("lloyd-aggregator-credential")
+    assert row.positive and row.negative, "an empty corpus validates vacuously"
+    assert row.action == "deny" and row.direction == "out" \
+        and row.category == "credential", row
+    assert len(row.regexes) == 2, row.regexes
+    assert any("$(cat" in text and HEADER in text for text in row.negative), \
+        "the documented substitution idiom must be a named negative of this row"
+    assert any("<placeholder>" in text for text in row.negative), row.negative
+    OC.validate_rule_table()
+
+
+def test_scanning_never_writes_or_mints_a_credential_file(tmp_path, monkeypatch):
+    """No file at the token path, and `read_token` never reached with `publish=True`.
+
+    A gate that minted a credential in order to detect one would create the thing it
+    denies, and the minting form is also the one that writes. The seam here is
+    `agent_mcp.aggregator_auth.read_token` itself — the function that decides — pinned by
+    a wrapper that fails the test on a publish and records the keyword it was given.
+    """
+    from agent_mcp import aggregator_auth as AUTH
+    missing = tmp_path / "no-such-dir" / "token"
+    seen = []
+
+    def spy(publish=True, **kwargs):
+        seen.append(publish)
+        return None if not publish else "MINTED-THIS-MUST-NEVER-HAPPEN"
+
+    monkeypatch.setattr(AUTH, "read_token", spy)
+    monkeypatch.setattr(AUTH, "token_path", lambda *a, **k: missing)
+    args = SHAPES_4634["headers dict"](ON_FILE_STANDIN)
+    out = OC.scan_outbound_payload(args, token_value=None)   # the reading path
+    assert [f.matched for f in out] == ["header-literal"], out
+    assert not missing.exists(), "a scan created the credential file"
+    assert not missing.parent.exists(), "a scan created the credential directory"
+    assert seen and all(p is False for p in seen), seen
+    # and the default scan does not call the reader at all
+    seen.clear()
+    OC.scan_outbound_payload(args)
+    assert seen == [], "the default scan read the credential; only the hook may"
+
+
+def test_the_credential_is_compared_as_of_scan_time_not_import(tmp_path, monkeypatch):
+    """Rotate the file between two scans in one process and the answer rotates with it.
+
+    Nothing here is stubbed: `LLOYD_MCP_TOKEN_FILE` points the real `token_path()` at a
+    temp file and the scan runs with `token_value=None`, the shipped hook's own argument,
+    so the read is `agent_mcp.aggregator_auth.read_token(publish=False)` doing what the
+    aggregator's clients do. That is the only way to prove the clause — a pattern compiled
+    from the value at import would have needed this file present at import, and would keep
+    matching A after B replaced it. A denied, then B denied, then A clean, one process, no
+    re-import. The file is left exactly as the last write put it, which doubles as the
+    assertion that a scan never writes it.
+    """
+    monkeypatch.delenv("LLOYD_MCP_TOKEN", raising=False)
+    tokfile = tmp_path / "aggregator-token"
+    tokfile.write_text(ON_FILE_STANDIN)
+    monkeypatch.setenv("LLOYD_MCP_TOKEN_FILE", str(tokfile))
+    read = lambda args: OC.scan_outbound_payload(args, token_value=None)  # noqa: E731
+    args_a = SHAPES_4634["command"](ON_FILE_STANDIN)
+    assert [f.matched for f in read(args_a)] == ["credential-value"]
+    tokfile.write_text(OTHER_STANDIN)
+    args_b = SHAPES_4634["command"](OTHER_STANDIN)
+    assert [f.matched for f in read(args_b)] == ["credential-value"]
+    assert read(args_a) == [], \
+        "the old value is still being matched: the comparison was taken at import"
+    assert tokfile.read_text() == OTHER_STANDIN, "the scan rewrote the token file"

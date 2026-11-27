@@ -199,12 +199,254 @@ def _guard_not_placeholder(token: str) -> bool:
     return not any(mark in low for mark in _PLACEHOLDER_MARKS)
 
 
+def _guard_credential_shape(token: str) -> bool:
+    """True when `token` could be a minted credential, judged from its characters.
+
+    The other guards ask things about a token by itself — is it a hex digest, is it
+    random, is it a documented placeholder. This one is the credential row's own condition,
+    and it carries the half of that condition a pattern cannot: the needle's capture group
+    is a run of minting charset, which cannot also insist the run be *varied*, so a
+    20-character filler — `aaaaaaaaaaaaaaaaaaaa`, or a `abababab…` rule-out — sitting beside
+    the header name in a document would otherwise be denied as a credential. Four distinct
+    characters is the floor `has_credential_charset` states. What the needle itself rejects
+    is the documented `$(cat ~/.local/state/lloyd/aggregator-token)` form
+    (architecture/tools.md:1289) and `X-Lloyd-Aggregator-Token: <placeholder>`: `$(` and `<`
+    are not characters `secrets.token_urlsafe` can emit, so the capture never starts. Both
+    halves are needed, and the row's own corpus is what proves each one fires.
+    """
+    return has_credential_charset(token, _MIN_CREDENTIAL_CHARS)
+
+
 _GUARDS = {
     "present": _guard_present,
     "not-hex-digest": _guard_not_hex_digest,
     "high-entropy": _guard_high_entropy,
     "not-placeholder": _guard_not_placeholder,
+    "credential-shape": _guard_credential_shape,
 }
+
+
+# ---------------------------------------------------------------------------
+# The one credential on this box that no pattern can describe
+# ---------------------------------------------------------------------------
+#
+# `agent_mcp/aggregator_auth.py` mints the aggregator credential with
+# `secrets.token_urlsafe(32)` — 43 base64url characters, no prefix. Every other
+# credential rule in this table works because the vendor prefixed its own keys
+# (`AKIA`, `ghp_`, `sk-ant-`, `AIza`) or because the shape is unmistakable, and a
+# pattern keyed to those prefixes cannot see this one; `assigned-high-entropy-secret`
+# cannot either, because its capture group is `[A-Za-z0-9]{32,}` and a base64url
+# value's longest such run is usually under 32 (`-` and `_` land inside the first 32
+# characters roughly 3 times in 4). What is left is to compare against the value, and
+# to say which half of the rule answered when a comparison is impossible.
+#
+# Three constants the tests and the table both read. Deliberately *not* the live
+# credential: the committed corpus must keep meaning the same thing on every machine
+# and after every rotation, so it uses stand-ins of the identical shape — 43 characters
+# of the minting alphabet with `-` and `_` inside the first 32, which is exactly the
+# case a prefix- or charset-only rule misses.
+
+#: The credential shape, as it would appear in an argument. 43 base64url characters;
+#: the `-`/`_` at positions 10 and 22 are what defeat `[A-Za-z0-9]{32,}`.
+AGGREGATOR_FIXTURE_TOKEN = "Wt5HnJd9Q8-k2Lp7Rg4Y1B_SxCe6ToZuAfCiKlPwUrG"
+
+#: A different credential of the same shape: what a rotated token, another box's token,
+#: or a randomly generated lookalike looks like. It must never be denied by the value
+#: half, because this rule's subject is *this* box's credential, not any token.
+AGGREGATOR_OTHER_TOKEN = "Fp3GsXd7Rj-Ynq5Wc8Th2Z_6LkMe4UbQsAoIwCrDtEu"
+
+#: The header the credential travels under (`AGENT_HEADER` in `aggregator_auth.py:58`).
+AGGREGATOR_HEADER_NAME = "X-Lloyd-Aggregator-Token"
+
+#: Degraded half: the header name, up to six characters of whatever separates a header
+#: from its value, then 20+ characters of minting alphabet. The `$(` of the documented
+#: `$(cat …)` form and the `<` of a `<placeholder>` are not in that alphabet, so the capture
+#: never starts on either; what the capture cannot express — that a long run also be varied
+#: — is the row's guard.
+AGGREGATOR_HEADER_NEEDLE = (
+    AGGREGATOR_HEADER_NAME + r"""[\s"'=:,]{0,6}(?P<token>[A-Za-z0-9_-]{20,})""")
+
+#: The other transport for the same secret: `LLOYD_MCP_TOKEN`, the environment variable
+#: `agent_mcp/aggregator_auth.py:30` says the backend can carry it in. An argument that
+#: *sets* that name for a subprocess hands the credential over exactly as a header does, so
+#: it is a needle of this row and not of `assigned-high-entropy-secret`, whose name list
+#: does not reach it. The 20-character capture is what keeps a payload that names only the
+#: *path* variable allowed: after `LLOYD_MCP_TOKEN_FILE=~/.local/state/lloyd/aggregator-token`
+#: the longest run of minting alphabet is `state`, which cannot reach 20.
+AGGREGATOR_ENV_NEEDLE = (
+    r"LLOYD_MCP_TOKEN" + r"""["'=:,\s]{0,6}(?P<token>[A-Za-z0-9_-]{20,})""")
+
+#: The row's own corpus, built from the stand-ins above so a committed test string and
+#: the shipped pattern can never drift apart.
+AGGREGATOR_POSITIVES = (
+    "-H '" + AGGREGATOR_HEADER_NAME + ": " + AGGREGATOR_FIXTURE_TOKEN + "'",
+    'headers = {"' + AGGREGATOR_HEADER_NAME + '": "' + AGGREGATOR_FIXTURE_TOKEN + '"}',
+    'env = {"LLOYD_MCP_TOKEN": "' + AGGREGATOR_FIXTURE_TOKEN + '"}',
+    'export LLOYD_MCP_TOKEN="' + AGGREGATOR_FIXTURE_TOKEN + '" && curl -s '
+    "http://127.0.0.1:8765/health",
+)
+
+#: The shapes this rule must survive, all of them real: the documented way of putting the
+#: credential on a curl command line without writing it (architecture/tools.md:1289), a
+#: placeholder under the header, prose about the credential's digest, and a schema echo that
+#: names both keys with no value. What is deliberately *not* here is the same header
+#: carrying a different 43-character credential: in the degraded state the header needle
+#: cannot tell the two apart, so that case is a claim about the sharp state and is pinned in
+#: tests/test_outbound_content_gate.py::
+#: test_a_different_credential_under_the_header_is_not_denied, where the value is readable.
+AGGREGATOR_NEGATIVES = (
+    "needs `" + AGGREGATOR_HEADER_NAME + ": $(cat ~/.local/state/lloyd/"
+    "aggregator-token)` and the literal is never in the payload",
+    AGGREGATOR_HEADER_NAME + ": <placeholder>",
+    "the credential's sha256 prefix is d3dd6e40, which is not the credential",
+    "the tool schema lists " + AGGREGATOR_HEADER_NAME + " and LLOYD_MCP_TOKEN as header "
+    "names, and no value at all",
+)
+
+# Which half of the rule answered, recorded on the finding so a degraded report is
+# distinguishable from a confirmed one in the ledger months later.
+NEEDLE_VALUE = "credential-value"
+NEEDLE_HEADER = "header-literal"
+NEEDLE_ENV = "env-assignment"
+
+#: The floor for the credential-shaped run, copied from
+#: `agent_mcp/aggregator_auth._MIN_TOKEN_CHARS` rather than imported: the credential
+#: module owns that number, and this module must not need `agent_mcp` importable to build
+#: its own table. A credential shorter than this cannot have been minted here.
+_MIN_CREDENTIAL_CHARS = 16
+
+#: What a minting alphabet looks like: no whitespace, no punctuation. Used by
+#: `has_credential_charset`, which is the row's guard.
+_CREDENTIAL_SHAPE = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def has_credential_charset(text: str, min_len: int = _MIN_CREDENTIAL_CHARS) -> bool:
+    """True when every character of `text` could come from `secrets.token_urlsafe`.
+
+    Deliberately *not* an entropy estimate. `_guard_high_entropy` needs Shannon to tell a
+    key from `aaaaaaaaaaaaaaaaaaaaaaaa`; this question is only "could those characters be
+    a token at all", and the answer must not depend on a threshold somebody tuned. The
+    four-distinct-characters floor is the one exception, and it is there so a needle hit on
+    `X-Lloyd-Aggregator-Token: aaaaaaaaaaaaaaaaaaaa` is not a finding.
+    """
+    if len(text) < min_len or not _CREDENTIAL_SHAPE.fullmatch(text):
+        return False
+    return len(set(text)) >= 4
+
+
+def read_token_for_scan() -> str:
+    """The credential on file, or "" — the client form only, never the server one.
+
+    `agent_mcp.aggregator_auth.read_token(publish=False)` resolves the path through
+    `token_path()` itself, so `LLOYD_MCP_TOKEN_FILE` is honoured here exactly as by every
+    other consumer, and it applies that module's own validity test (`_MIN_TOKEN_CHARS` and
+    the minting alphabet) so a missing file, an unreadable file and a file of garbage all
+    answer the same way. `publish=True` is never reachable from here: it mints and *writes*
+    when the file is absent, so a gate that reached for it in order to detect a credential
+    would create the thing it denies. Imported lazily because `agent_mcp` is the larger
+    package and this module's import must stay cheap and cycle-free — the aggregator's own
+    server imports `app.harness` at module level.
+    """
+    try:
+        from agent_mcp.aggregator_auth import read_token
+        return (read_token(publish=False) or "").strip()
+    except Exception:      # an unreadable credential is a state, not an error
+        return ""
+
+
+def credential_state(token_value: str | None = "") -> tuple[str, str]:
+    """`(value, state)` for this scan: state is 'given', 'file' or 'unreadable'.
+
+    Nothing is cached, in either direction: a credential rotated between two scans in one
+    process must change the answer, and so must one restored. Three ways in —
+
+    * a non-empty string, 'given': the caller supplies the value, so the scan performs no
+      read at all and a replay of a recorded payload stays reproducible.
+    * `""`, the default, 'unreadable' *without looking*: the two needles run and the scan
+      touches no filesystem, which is what keeps every caller that predates this row — the
+      table's own validator above all — a pure function.
+    * `None`, 'file' or 'unreadable': read it through `read_token_for_scan()`.
+    """
+    if token_value:
+        return token_value.strip(), "given"
+    if token_value == "":
+        return "", "unreadable"
+    value = read_token_for_scan()
+    return (value, "file") if value else ("", "unreadable")
+
+
+#: The rows whose matcher, not the loop's regex pass, decides when they fire. Their subject
+#: is a relationship — this credential, this header, this environment name — rather than a
+#: shape in the text, so the answer depends on a value that is not in the payload and on
+#: whether that value could be read at all. The patterns still live in the row's own
+#: `regexes`, which is where `validate_rule_table` grades them against the row's own corpus
+#: exactly as it grades every other row; only the firing moves here.
+VALUE_COMPARED_RULES = frozenset({"lloyd-aggregator-credential"})
+
+
+def _match_aggregator_credential(text: str, path: str,
+                                 token_value: str | None = "") -> list[tuple]:
+    """Findings for the credential row in one argument: `[(token, needle, span)]`.
+
+    Three needles, and every finding says which one spoke:
+
+    * `credential-value` — an exact substring hit on the credential on file. Sharp, and the
+      only half that can see the dispatch shape `{"headers": {"X-Lloyd-Aggregator-Token":
+      value}}`, where the header name is an argument *key* and `_arg_paths` yields keys as
+      paths and never scans them (docstring, above). So the credential travelling under its
+      own name is not invisible to this row: the value itself is what it catches.
+    * `header-literal` — the header half, consulted **only** when the value could not be
+      read. Blunt by necessity: with no value to compare, it cannot tell this box's
+      credential from a different 43-character one, so it fires on credential-shaped text
+      beside the header name and says in the finding that this is what matched. It is the
+      half that keeps a stolen-or-rotated-token payload reaching a human on a box where the
+      file is unreadable, which is the failure this row exists to close.
+    * `env-assignment` — `LLOYD_MCP_TOKEN=<value>`, the other transport for the same
+      secret: an argument that binds that name for a subprocess hands the credential over
+      as surely as a header does. Like the header half it is a degraded-state needle, and
+      for the same reason: in the sharp state the value comparison already covers it, and
+      firing on *any* value bound to that name would deny a payload carrying a different
+      box's token, which is not this rule's subject.
+
+    Never two needles for the same text: the value half returns as soon as it hits, and the
+    needle halves run only when there was no value to compare against. A missing credential
+    file is never an error and never a mint.
+    """
+    value, state = credential_state(token_value)
+    if state != "unreadable":
+        if not value:
+            return []      # value readable (or supplied) and absent: nothing to say
+        m = re.search(re.escape(value), text)
+        return [(value, NEEDLE_VALUE, m.span())] if m else []
+
+    for m in re.finditer(AGGREGATOR_HEADER_NEEDLE, text):
+        if _guard_credential_shape(m.group("token")):
+            return [(m.group("token"), NEEDLE_HEADER, m.span("token"))]
+    for m in re.finditer(AGGREGATOR_ENV_NEEDLE, text):
+        if _guard_credential_shape(m.group("token")):
+            return [(m.group("token"), NEEDLE_ENV, m.span("token"))]
+    if state == "unreadable" and AGGREGATOR_HEADER_NAME.lower() in path.lower():
+        # The dispatch shape again, with no value to compare against: `_arg_paths` has put
+        # the header name in the *path* and the credential in the text, so the text alone
+        # would look like any other long token. Asking both — this argument lives under that
+        # name, and its value is credential-shaped — is the most this half can honestly ask.
+        for m in _CREDENTIAL_SHAPE.finditer(text):
+            if _guard_credential_shape(m.group(0)):
+                return [(m.group(0), NEEDLE_HEADER, m.span())]
+    return []
+
+
+def _match_rule(rule: ContentRule, path: str, text: str,
+                token_value: str | None = "") -> list[tuple]:
+    """Credential findings for one (rule, argument); [] for every row not in the set.
+
+    A dispatch on the rule name, not a second matcher to keep in step: the five rows whose
+    subject *is* a shape keep the table's regex path untouched, and this keeps one place
+    where the value comparison happens.
+    """
+    if rule.name not in VALUE_COMPARED_RULES:
+        return []
+    return _match_aggregator_credential(text, path, token_value)
 
 
 # ---------------------------------------------------------------------------
@@ -374,6 +616,37 @@ CONTENT_RULES: tuple[ContentRule, ...] = (
         ),
     ),
     ContentRule(
+        name="lloyd-aggregator-credential",
+        description=(
+            "The credential this box's aggregator accepts, in an outbound argument. It "
+            "is 43 base64url characters with no vendor prefix, so the prefix-keyed "
+            "provider-token rule cannot see it and the assigned-secret rule's capture "
+            "group cannot span its `-`/`_`; and the shape the aggregator is actually "
+            "called with — a nested `headers` object keyed by the header name — puts the "
+            "name in an argument *key*, which no text-scanning rule ever reads. So this "
+            "row compares the candidate against the value on file instead of describing "
+            "it, and when that file cannot be read it falls back to the header and "
+            "environment needles and says so on the finding."
+        ),
+        severity="critical",
+        category="credential",
+        action="deny",
+        direction="out",
+        regexes=(AGGREGATOR_HEADER_NEEDLE, AGGREGATOR_ENV_NEEDLE),
+        condition=(
+            "the argument carries this box's credential: an exact match on the value on "
+            "file, or — only while that value cannot be read — the header name or the "
+            "environment name followed by a run of minting charset that passes "
+            "`credential-shape`. Naming the header is not carrying it: the documented "
+            "`$(cat ~/.local/state/lloyd/aggregator-token)` form at "
+            "architecture/tools.md:1289 and a `<placeholder>` are both allowed, and both "
+            "are in this row's own negative corpus"
+        ),
+        guards=("credential-shape",),
+        positive=AGGREGATOR_POSITIVES,
+        negative=AGGREGATOR_NEGATIVES,
+    ),
+    ContentRule(
         name="tailnet-address",
         description=(
             "A private/CGNAT IPv4 or a `.taile<NNN>.ts.net` tailnet hostname. "
@@ -513,13 +786,19 @@ class Finding:
     arg: str
     excerpt: str
     matched_sha256: str = ""
+    #: Which matcher fired, for the one row that has more than one. A value-needle hit and
+    #: a header-needle hit mean different things to whoever triages the ledger months
+    #: later: the first says this payload carries the credential that is on this box right
+    #: now; the second says the payload names the header beside something credential-shaped
+    #: while the gate could not read the credential to be sure. Empty for every other row.
+    matched: str = ""
 
     def as_row(self) -> dict[str, str]:
         return {
             "rule": self.rule, "severity": self.severity,
             "category": self.category, "action": self.action,
             "arg": self.arg, "excerpt": self.excerpt,
-            "matched_sha256": self.matched_sha256,
+            "matched_sha256": self.matched_sha256, "matched": self.matched,
         }
 
 
@@ -577,11 +856,16 @@ MAX_SCAN_CHARS = 65_536
 OVERSIZED_FINDING = "_skipped_oversized"
 
 
-def scan_outbound_payload(args: Any) -> list[Finding]:
+def scan_outbound_payload(args: Any, *,
+                          token_value: str | None = "") -> list[Finding]:
     """Findings for one call's arguments. Detection only — it decides nothing.
 
-    Pure and synchronous: no I/O, no model, no clock, so the same arguments
-    always produce the same findings and a replay is a real measurement.
+    Pure and synchronous for every row except the one whose subject is a value on disk,
+    and the caller decides whether that read happens: `token_value` is a string to supply
+    the credential (no read at all), `""` — the default — to read nothing and leave the
+    value half silent, or `None` to read it through `read_token_for_scan()`. No model and
+    no clock in any of the three, and the difference between them is pinned in
+    tests/test_outbound_content_gate.py::test_no_scanning_path_ever_mints_or_writes.
     """
     findings: list[Finding] = []
     oversized: list[tuple[str, int]] = []
@@ -591,6 +875,21 @@ def scan_outbound_payload(args: Any) -> list[Finding]:
             oversized.append((path, len(text)))
             text = text[:MAX_SCAN_CHARS]
         for rule in CONTENT_RULES:
+            # The value-compared row fires from its own matcher, which is the only thing
+            # that knows whether the credential could be read; its patterns are skipped
+            # below so a needle cannot fire in a state its logic ruled out.
+            for token, needle, _span in _match_rule(rule, path, text, token_value):
+                findings.append(Finding(
+                    rule=rule.name, severity=rule.severity,
+                    category=rule.category, action=rule.action, arg=path,
+                    excerpt=redact(token),
+                    matched_sha256=hashlib.sha256(
+                        token.encode("utf-8", "replace")).hexdigest()[:12],
+                    matched=needle,
+                ))
+                break
+            if rule.name in VALUE_COMPARED_RULES:
+                continue
             for pattern in _COMPILED[rule.name]:
                 for match in pattern.finditer(text):
                     token = _candidate_text(match)
@@ -1480,7 +1779,11 @@ def install_outbound_content_gate(
                          active_scope, tool_name, reason_exempt)
             return {}
         try:
-            findings = scan_outbound_payload(input_data.get("tool_input") or {})
+            # The only read in this module's own call graph, and the only place it belongs:
+            # this is where a credential actually leaves the box. `None` means "read it",
+            # through the client form, which cannot mint — see read_token_for_scan.
+            findings = scan_outbound_payload(input_data.get("tool_input") or {},
+                                             token_value=None)
         except Exception as exc:  # noqa: BLE001 — fail closed, see docstring
             return _deny(
                 "outbound-content: the content scan could not be evaluated "
