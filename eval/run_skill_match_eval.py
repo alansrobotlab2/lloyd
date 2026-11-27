@@ -35,6 +35,11 @@ No model, no GPU, no daemon. It reads the skill inventory the matcher reads.
 
 The baseline is runtime data, so it lives under `app.paths.EVAL_BASELINES_DIR`
 (`skill_match_baseline.json`), never in the tree.
+
+--compare grades drift on the turn ids the baseline and today's labelled set BOTH
+carry (`baseline_drift`), not on the two headline figures: subtracting those scores
+label growth as if it were matcher drift. On 2026-11-26 that read `-0.0572`, past
+`DRIFT_TOLERANCE`, where the 51 turn ids the two sets share moved only `-0.0196`.
 """
 
 from __future__ import annotations
@@ -56,7 +61,9 @@ QUERIES = ROOT / "eval" / "skill_match_queries.yaml"
 BASELINE_NAME = "skill_match_baseline.json"
 K = 5
 #: A lexical recall@5 move larger than this against the recorded baseline is
-#: reported as a regression by --compare.
+#: reported as a regression by --compare. Graded on the shared-turn-id figure
+#: from `baseline_drift()`, never on the two headline figures: a headline moves
+#: when the labelled set grows, and that is not matcher drift (#4611).
 DRIFT_TOLERANCE = 0.05
 
 Arm = Callable[[str], list[str]]
@@ -370,6 +377,78 @@ def build_report(records: list[dict], lexical: dict) -> dict:
     }
 
 
+def baseline_drift(baseline: dict, current: dict, records: list[dict],
+                   k: int = K) -> dict:
+    """Compare this run to a recorded baseline on the turn ids BOTH of them scored.
+
+    #4611: the baseline and today's set are two different populations whenever
+    `skill_match_queries.yaml` gained labelled turns, and subtracting the two
+    `recall@5` headlines grades that growth as matcher drift. On 2026-11-26 that
+    printed `-0.0572` — past `DRIFT_TOLERANCE`, so an rc of 1 — while the move on
+    the 51 turn ids the two sets shared was `-0.0196`: the whole gap was the three
+    new ids `smq076/077/078`, each scoring 0.0.
+
+    So the graded figure is recall@5 recomputed over ONLY the turn ids that carry
+    a row in `baseline["arms"]["lexical"]["turns"]` AND an expected skill in
+    today's records, with both sides scored against the same current labels at the
+    same k. The committed baseline stores `id` + `returned` and no per-turn metric,
+    so its side is derived from the top-5 it recorded — which is why this stays
+    exact rather than approximate: over the shared 51 the derived baseline figure
+    is its own recorded `0.6961`.
+
+    A baseline whose denominator cannot be enumerated is not a regression, so
+    `comparable` is False with a `reason` when the two sets share no turn id or the
+    baseline stores no per-turn rows at all. The headline figures and their drift
+    are still returned: they are what a naive read sees, and the artifact should
+    say which two sets produced them.
+    """
+    base_lex = (baseline.get("arms") or {}).get("lexical") or {}
+    base_rows = base_lex.get("turns")
+    expectations = {rec["id"]: set(rec.get("expected_skills") or [])
+                    for rec in records}
+    b, n = base_lex.get("recall@5"), current.get("recall@5")
+    out = {
+        "baseline_labelled_turns": base_lex.get("labelled_turns"),
+        "current_labelled_turns": current.get("labelled_turns"),
+        "lexical_recall5_baseline": b,
+        "lexical_recall5_now": n,
+        "headline_drift": round(n - b, 4) if b is not None and n is not None else None,
+        "shared_labelled_turns": 0,
+        "shared_recall5_baseline": None,
+        "shared_recall5_now": None,
+        "graded_drift": None,
+        "comparable": False,
+        "reason": None,
+        "tolerance": DRIFT_TOLERANCE,
+    }
+    if not base_rows:
+        out["reason"] = ("the baseline records no per-turn rows, so the turn ids its "
+                         "recall@5 was computed over cannot be enumerated")
+        return out
+    base_top5 = {t["id"]: list(t.get("returned") or [])[:k]
+                 for t in base_rows if "id" in t}
+    now_top5 = {t["id"]: list(t.get("returned") or [])[:k]
+                for t in (current.get("turns") or []) if "id" in t}
+    labelled_now = {i for i, e in expectations.items() if e}
+    shared = sorted(set(base_top5) & set(now_top5) & labelled_now)
+    out["shared_labelled_turns"] = len(shared)
+    if not shared:
+        out["reason"] = ("the baseline's turn ids and the current labelled set share "
+                         "no turn id")
+        return out
+
+    def recall(top5: dict[str, list[str]]) -> float:
+        return round(sum(len(expectations[i] & set(top5[i])) / len(expectations[i])
+                         for i in shared) / len(shared), 4)
+
+    sb, sn = recall(base_top5), recall(now_top5)
+    out["shared_recall5_baseline"] = sb
+    out["shared_recall5_now"] = sn
+    out["graded_drift"] = round(sn - sb, 4)
+    out["comparable"] = True
+    return out
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[1])
     ap.add_argument("--json", default="", help="also write the full report here")
@@ -472,22 +551,38 @@ def main(argv: list[str] | None = None) -> int:
             print(f"no baseline at {base_file}", file=sys.stderr)
         else:
             base = json.loads(base_file.read_text())
-            b = base["arms"]["lexical"]["recall@5"]
-            n = lex["recall@5"]
-            drift = round(n - b, 4)
-            report["baseline_comparison"] = {
-                "baseline_file": str(base_file),
-                "baseline_measured_at": base.get("measured_at"),
-                "lexical_recall5_baseline": b,
-                "lexical_recall5_now": n,
-                "drift": drift,
-            }
-            print(f"vs baseline ({base.get('measured_at')}): lexical recall@5 "
-                  f"{b} -> {n} ({drift:+})")
-            if abs(drift) > DRIFT_TOLERANCE:
-                print(f"REGRESSION: lexical recall@5 moved more than "
-                      f"{DRIFT_TOLERANCE} against the baseline", file=sys.stderr)
-                rc = 1
+            bc = baseline_drift(base, lex, records)
+            report["baseline_comparison"] = {"baseline_file": str(base_file),
+                                             "baseline_measured_at": base.get("measured_at"),
+                                             **bc}
+            headline = (f"vs baseline ({base.get('measured_at')}): lexical recall@5 "
+                        f"{bc['lexical_recall5_baseline']} -> {bc['lexical_recall5_now']}")
+            if bc["headline_drift"] is not None:
+                headline += f" ({bc['headline_drift']:+.4f})"
+            print(headline)
+            if not bc["comparable"]:
+                # Not a green and not a regression: the two populations have
+                # nothing in common, so no drift is measurable at all (#4611).
+                print(f"baseline NOT COMPARABLE: {bc['reason']} "
+                      f"(shared labelled turn ids: {bc['shared_labelled_turns']})")
+            else:
+                print(f"GRADED on the {bc['shared_labelled_turns']} turn ids both sets "
+                      f"share: lexical recall@5 {bc['shared_recall5_baseline']} -> "
+                      f"{bc['shared_recall5_now']} ({bc['graded_drift']:+.4f}), "
+                      f"tolerance {DRIFT_TOLERANCE} "
+                      f"(baseline {bc['baseline_labelled_turns']} labelled turns, "
+                      f"now {bc['current_labelled_turns']})")
+                grew = bc["current_labelled_turns"] - bc["shared_labelled_turns"]
+                if grew > 0:
+                    print(f"  {grew} labelled turn(s) scored today have no baseline row, "
+                          f"so they are excluded from the graded figure but counted in "
+                          f"the headline above")
+                if abs(bc["graded_drift"]) > DRIFT_TOLERANCE:
+                    print(f"REGRESSION: lexical recall@5 moved more than "
+                          f"{DRIFT_TOLERANCE} against the baseline on the "
+                          f"{bc['shared_labelled_turns']} turn ids the two sets share",
+                          file=sys.stderr)
+                    rc = 1
 
     if args.write_baseline:
         base_file.parent.mkdir(parents=True, exist_ok=True)

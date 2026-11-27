@@ -5,11 +5,19 @@ The labelled set and scorer came from branch automod/SM_20260911_055006
 so these tests pin three things: the metric definitions (a hand-computed
 fixture, so a change to what recall@5 means fails here), the corpus contract
 #711 filters, and the arm's absence.
+
+The `--compare` nodes at the bottom pin #4611: the graded drift is scored over
+only the turn ids the baseline and today's set share, so adding labelled turns
+can never read as matcher drift again. On 2026-11-26 `--compare` exited 1
+claiming `-0.0572` while the move on the 51 ids the two sets shared was
+`-0.0196` — every byte of the headline gap came from three new labelled ids
+that score 0.0.
 """
 from __future__ import annotations
 
 import ast
 import importlib.util
+import json
 from pathlib import Path
 
 import pytest
@@ -148,3 +156,156 @@ def test_the_gold_set_carries_queries_whose_skill_the_pruned_arm_cuts_away():
         f"only {len(tail)} labelled records name a skill the pruned arm cuts away ({tail}); "
         "the pruned arm would then be scored on surviving queries alone and its headline is the "
         "green this clause forbids")
+
+
+# --- #4611: --compare grades drift on the shared turn ids, not on two
+# --- different denominators.
+#
+# The fixture reproduces 2026-11-26 in miniature. The baseline scored two
+# labelled turns (c1 hits at full recall, c2 returns nothing) for a recorded
+# recall@5 of 0.5. Since then the matcher has NOT moved: on the same two ids it
+# returns the same rankings. The only change is that the set gained one labelled
+# turn, c3, which the matcher scores 0.0. Headline recall@5 therefore falls
+# 0.5 -> 0.3333 (-0.1667, past DRIFT_TOLERANCE = 0.05) while the shared-set drift
+# is exactly 0.0. The old compare block subtracted those two headlines and exited
+# 1 on this fixture; that is the false REGRESSION #4611 removes.
+
+CMP_RECORDS = [
+    {"id": "c1", "turn": "t1", "expected_skills": ["a"]},
+    {"id": "c2", "turn": "t2", "expected_skills": ["b"]},
+    {"id": "c3", "turn": "t3", "expected_skills": ["d"]},   # added since the baseline
+    {"id": "c4", "turn": "t4", "expected_skills": [], "expected_empty": True},
+]
+CMP_NOW = {"t1": ["a"], "t2": [], "t3": ["e"], "t4": []}
+CMP_BASELINE = {
+    "measured_at": "2026-09-24T19:29:49Z",
+    "arms": {"lexical": {
+        "labelled_turns": 2,
+        "expected_empty_turns": 1,
+        "recall@5": 0.5,
+        # The September baseline records only id + returned, no per-turn metric.
+        "turns": [{"id": "c1", "returned": ["a"]},
+                  {"id": "c2", "returned": []},
+                  {"id": "c4", "returned": []}],
+    }},
+}
+
+
+def _run_compare(tmp_path, monkeypatch, records, returned, baseline):
+    """Run the real CLI main() over a fixture: rc plus what it printed.
+
+    The scorer, the label check, the active-skill inventory and the baseline file
+    are all that main() reaches outside of, so patching exactly those four keeps
+    the node hermetic while still crossing the boundary that matters — the exit
+    code and stdout a human or a scheduled job reads.
+    """
+    ev = _load()
+    base_file = tmp_path / "skill_match_baseline.json"
+    base_file.write_text(json.dumps(baseline))
+    monkeypatch.setattr(ev, "load_records", lambda *a, **k: records)
+    monkeypatch.setattr(ev, "active_skill_names", lambda: {"a", "b", "c", "d", "e"})
+    monkeypatch.setattr(ev, "lexical_top5", lambda turn: returned[turn])
+    monkeypatch.setattr(ev, "baseline_path", lambda: base_file)
+    return ev, ev.main(["--compare"])
+
+
+def test_the_graded_drift_is_scored_on_only_the_turn_ids_both_sets_share(tmp_path, monkeypatch, capsys):
+    """Clause 1: the figure --compare grades is recall@5 over the shared turn ids.
+
+    c3 exists only in today's set and scores 0.0, so it belongs in neither side of
+    the graded subtraction. The graded drift here is 0.0 while the headline gap is
+    -0.1667: pinning both numbers is what stops a later edit from comparing
+    denominators again.
+    """
+    ev, rc = _run_compare(tmp_path, monkeypatch, CMP_RECORDS, CMP_NOW, CMP_BASELINE)
+    out = capsys.readouterr().out
+    cmp_block = ev.baseline_drift(CMP_BASELINE, ev.score(CMP_RECORDS, lambda t: CMP_NOW[t]),
+                                  CMP_RECORDS)
+    assert cmp_block["shared_labelled_turns"] == 2, "c1 and c2 only — c3 is not in the baseline"
+    assert cmp_block["shared_recall5_baseline"] == pytest.approx(0.5)
+    assert cmp_block["shared_recall5_now"] == pytest.approx(0.5)
+    assert cmp_block["graded_drift"] == pytest.approx(0.0)
+    assert cmp_block["headline_drift"] == pytest.approx(-0.1667)
+    assert rc == 0
+    assert "graded" in out.lower(), out
+    assert "+0.0000" in out, f"the graded figure is the one printed: {out}"
+
+
+def test_label_growth_alone_does_not_read_as_a_regression(tmp_path, monkeypatch, capsys):
+    """Clause 2: shared drift inside tolerance, headline past it -> exit 0, both headlines printed."""
+    ev, rc = _run_compare(tmp_path, monkeypatch, CMP_RECORDS, CMP_NOW, CMP_BASELINE)
+    captured = capsys.readouterr()
+    assert rc == 0, f"label growth is not matcher drift: {captured.err}"
+    assert "REGRESSION" not in captured.err, captured.err
+    # Both headline figures still print, so the artifact shows what a naive read sees.
+    assert "0.5" in captured.out and "0.3333" in captured.out, captured.out
+    assert "0.1667" in captured.out, f"the headline drift is still stated: {captured.out}"
+    assert ev.DRIFT_TOLERANCE == 0.05
+
+
+def test_the_baseline_comparison_records_both_denominators(tmp_path, monkeypatch):
+    """Clause 3: the artifact states which two sets were compared.
+
+    2 labelled turns on the baseline side, 3 today, 2 shared — recorded as data,
+    so a reader of the JSON never has to guess which denominator a figure came
+    from (the guess that made the -0.0572 look like a loss).
+    """
+    ev = _load()
+    lex = ev.score(CMP_RECORDS, lambda t: CMP_NOW[t])
+    cmp_block = ev.baseline_drift(CMP_BASELINE, lex, CMP_RECORDS)
+    assert cmp_block["baseline_labelled_turns"] == 2
+    assert cmp_block["current_labelled_turns"] == 3
+    assert cmp_block["shared_labelled_turns"] == 2
+    assert cmp_block["comparable"] is True
+    report = ev.build_report(CMP_RECORDS, lex)
+    report["baseline_comparison"] = cmp_block
+    assert report["baseline_comparison"]["baseline_labelled_turns"] == 2
+    assert report["baseline_comparison"]["current_labelled_turns"] == 3
+
+
+def test_a_baseline_sharing_no_turn_id_is_reported_not_comparable(tmp_path, monkeypatch, capsys):
+    """Clause 4: nothing in common -> not comparable, exit 0, never a REGRESSION claim."""
+    disjoint = json.loads(json.dumps(CMP_BASELINE))
+    disjoint["arms"]["lexical"]["turns"] = [{"id": "smq900", "returned": ["a"]}]
+    ev, rc = _run_compare(tmp_path, monkeypatch, CMP_RECORDS, CMP_NOW, disjoint)
+    captured = capsys.readouterr()
+    assert rc == 0, f"an incomparable baseline must not fail the run: {captured.err}"
+    assert "REGRESSION" not in captured.err, captured.err
+    assert "not comparable" in (captured.out + captured.err).lower()
+    cmp_block = ev.baseline_drift(disjoint, ev.score(CMP_RECORDS, lambda t: CMP_NOW[t]),
+                                 CMP_RECORDS)
+    assert cmp_block["comparable"] is False
+    assert cmp_block["graded_drift"] is None
+    assert cmp_block["shared_labelled_turns"] == 0
+
+
+def test_a_real_matcher_move_on_the_shared_set_still_exits_1(tmp_path, monkeypatch, capsys):
+    """The guard still guards: fix the denominator, do not delete the check.
+
+    Same ids, and the matcher now finds c2's skill where the baseline found
+    nothing: shared recall@5 0.5 -> 1.0, +0.5 past the 0.05 tolerance.
+    """
+    moved = dict(CMP_NOW, t2=["b"])
+    ev, rc = _run_compare(tmp_path, monkeypatch, CMP_RECORDS, moved, CMP_BASELINE)
+    captured = capsys.readouterr()
+    assert rc == 1, f"a 0.5 move on the shared set is a real regression: {captured.out}"
+    assert "REGRESSION" in captured.err, captured.err
+    cmp_block = ev.baseline_drift(CMP_BASELINE, ev.score(CMP_RECORDS, lambda t: moved[t]),
+                                 CMP_RECORDS)
+    assert cmp_block["graded_drift"] == pytest.approx(0.5)
+
+
+def test_a_baseline_without_per_turn_rows_is_not_comparable(tmp_path, monkeypatch):
+    """A trimmed baseline that records no turn ids gives no shared set, not a headline subtraction.
+
+    Its headline was computed over a set this round cannot enumerate, so grading
+    against it is the exact mismatch #4611 removes.
+    """
+    trimmed = json.loads(json.dumps(CMP_BASELINE))
+    trimmed["arms"]["lexical"].pop("turns")
+    ev = _load()
+    cmp_block = ev.baseline_drift(trimmed, ev.score(CMP_RECORDS, lambda t: CMP_NOW[t]),
+                                 CMP_RECORDS)
+    assert cmp_block["comparable"] is False
+    assert cmp_block["graded_drift"] is None
+    assert cmp_block["reason"]
