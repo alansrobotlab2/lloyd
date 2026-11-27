@@ -48,6 +48,7 @@ import ast
 import hashlib
 import inspect
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -3929,7 +3930,35 @@ def test_the_reword_keeps_every_graded_span_bounded_and_both_rails_intact(readin
 # from: the rotation, not this file's imagination.
 
 SEVENTH_EXTRACT = ROOT / "tests" / "fixtures" / "vllm_prefix_miss_2026-10-15.json"
-DAILY_EXTRACT_DIR = Path.home() / "lloyd-data" / "vllm-prefix-miss"
+
+
+def _production_data_root() -> Path:
+    """The root the script's `--data-root` defaults to and the standing daily job writes to.
+
+    Read where the script reads it — `main` imports this same object inside itself, so the arms
+    and the script can never be looking at two rotations. The anchor is the account, not `$HOME`:
+    `app.data_root.PRODUCTION_DATA_ROOT` is built on `ACCOUNT_HOME`, taken from the passwd entry
+    for exactly this reason. A gate run re-points `HOME` at the round's symlink farm and
+    `HOME_LINK_SKIP` (`scripts/automod/worktree.py:87`) deliberately keeps `lloyd-data` out of
+    that farm, so a `$HOME`-anchored path of this name is an empty directory for the whole of a
+    gate round. Measured 2026-11-27 on round SM_20261127_093531: with the `$HOME` spelling all
+    three re-derive arms took their daily-copy precondition skip BEFORE the shared guard, so the
+    guard #4616 asks to be the single decider never ran and the clause could not be graded at all.
+
+    The file already spelled this directory the other way at `PRODUCTION_DATA_ROOT /
+    "vllm-prefix-miss"` in the sixth day's provenance node; `DAILY_EXTRACT_DIR` below is the same
+    directory with the anchor that survives the gate, so the family reads one root, and
+    `test_the_extract_daily_copy_anchor_resolves_out_of_the_gates_round_home_too` is what keeps
+    it there.
+    """
+    from app.paths import PRODUCTION_DATA_ROOT
+    return Path(PRODUCTION_DATA_ROOT)
+
+
+#: The standing daily job's own extract directory, resolved from the account anchor above. Every
+#: node in this family that wants the job's copy — including the daily-copy preconditions that
+#: sit above the three re-derive guards — reads it from here.
+DAILY_EXTRACT_DIR = _production_data_root() / "vllm-prefix-miss"
 _SEVENTH_HEADING = "- **The 2026-10-15 count:"
 
 
@@ -8451,6 +8480,80 @@ def _rederived_extract(out: Path, written: "subprocess.CompletedProcess[str]") -
             f"{(written.stderr or written.stdout or '(nothing)')[-400:]!r}") from exc
 
 
+#: Name of the environment variable a child pytest process may set to point a re-derive at a
+#: scratch view of the engine log rotation instead of the live tape. An ambient value is dropped
+#: at import, so the only process that can ever substitute a tape is the child this file itself
+#: spawns (#4616 clause 1) — otherwise the byte-identity witness could be made to certify against
+#: a tape chosen from outside the test.
+REDERIVE_TAPE_ROOT_ENV = "LLOYD_VLLM_REDERIVE_TAPE_ROOT"
+os.environ.pop(REDERIVE_TAPE_ROOT_ENV, None)
+
+
+def _tape_view() -> "Path | None":
+    """A data root to re-derive against, or `None` to read this box's live tape.
+
+    The rotation moves daily, so an arm that skips only once a rotation has actually taken a day
+    cannot be shown skipping until that day arrives — which is why #4616's own clauses could only
+    grade the guard. Two routes reach this value, and they are for different depths of call:
+    `test_no_rederive_extract_arm_can_be_shown_skipping_…` monkeypatches the env var below to a
+    directory holding the same `event_logs` and `usage.db` and the same rotation minus ONE file,
+    which is how an ARM is shown a different tape — an arm spells its re-derive as
+    `_rederived_extract(day, day_end, out)` with no third argument, exactly as the byte-identity
+    run does, so its view can only come from here; nodes that grade `_rederived_extract` or the
+    guard directly pass `tape_view=` instead. Either way the arm, its guard and its message are
+    untouched, so what the witness catches is the arm's own decision about a tape that has lost a
+    file. An AMBIENT value is popped at import and never survives into a collection —
+    `test_the_extract_daily_copy_anchor_resolves_out_of_the_gates_round_home_too` pins that in a
+    child interpreter — so the only things that can substitute a tape are a `monkeypatch` inside
+    this file and a caller who names the argument.
+    """
+    view = os.environ.get(REDERIVE_TAPE_ROOT_ENV)
+    return Path(view) if view else None
+
+
+def _derive_window(start: str, end: str, out: Path,
+                   gate: str | None = None) -> "subprocess.CompletedProcess[str]":
+    """Run the canonical re-derive invocation for `[start, end)` into `out`.
+
+    The one command the three arms share, hoisted out of their bodies for #4616 clause 1 so that
+    no arm holds a process handle at all. With no view set — every ordinary run, including the
+    whole suite — this is the invocation each arm ran before:
+    `python -m scripts.vllm_prefix_miss_window --start … --end … [--gate 0.6] --write-extract …`
+    against this box's tape. Only a child spawned with `REDERIVE_TAPE_ROOT_ENV` adds
+    `--data-root`, and it adds it to the SAME invocation. The handle goes to `_rederived_extract`,
+    which raises when no extract came back so a broken invocation stays RED; no caller branches on
+    the exit code and no caller reads the output.
+    """
+    argv = [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
+            "--start", start, "--end", end]
+    if gate is not None:
+        argv += ["--gate", gate]
+    argv += ["--write-extract", str(out)]
+    view = _tape_view()
+    if view is not None:
+        argv += ["--data-root", str(view)]
+    return subprocess.run(argv, cwd=str(ROOT), capture_output=True, text=True)
+
+
+def _assert_committed_extract_is_tracked(extract: Path) -> None:
+    """Fail unless `extract` is in git, not merely on disk.
+
+    The fifteenth arm's own archaeology probe, hoisted out of its body for #4616 clause 1 with the
+    command and the message unchanged. Its exit code certifies the CHECKOUT and can never report
+    the tape, but clause 1 asks that no re-derive arm hold a process at all — so the question
+    lives here, in a helper whose name says what it asks. The other nodes in this file that ask
+    git the same question are not re-derive arms and are untouched by this round.
+    """
+    tracked = subprocess.run(
+        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
+         str(extract.relative_to(ROOT))],
+        capture_output=True, text=True)
+    assert tracked.returncode == 0, (
+        f"{extract.name} is on disk but not in git; `tests/fixtures/.gitignore` "
+        "negates this family on purpose, so an untracked extract is a day whose evidence dies "
+        "with the rotation that produced it")
+
+
 def _bytes_are_the_witness(fresh: Path, committed: Path | bytes) -> bool:
     """The byte comparison every re-derive arm performs once the guard says the day is covered.
 
@@ -8462,17 +8565,6 @@ def _bytes_are_the_witness(fresh: Path, committed: Path | bytes) -> bool:
     """
     return fresh.read_bytes() == (committed if isinstance(committed, bytes)
                                  else committed.read_bytes())
-
-
-def _production_data_root() -> Path:
-    """The root the script's `--data-root` defaults to, read where the script reads it.
-
-    `main` imports it from `app.paths` inside itself, so this module reaches the same object the
-    same way rather than inventing a path: the arms re-derive against that rotation, and the
-    reproduction below has to withhold files from the same directory or it proves nothing.
-    """
-    from app.paths import PRODUCTION_DATA_ROOT
-    return Path(PRODUCTION_DATA_ROOT)
 
 
 def _rotation_inventory(data_root: Path | None = None) -> list[RotationFile]:
@@ -8498,6 +8590,16 @@ def _rotation_inventory(data_root: Path | None = None) -> list[RotationFile]:
     return sorted(files, key=lambda f: f.last_written)
 
 
+#: The phrase that marks a re-derive skip as the GUARD'S OWN VERDICT. A node that wants to watch
+#: the guard fire has to tell that skip apart from the one each arm takes ABOVE the guard, when
+#: the daily job's copy is not on disk — and under a gate run that copy is never on disk:
+#: `HOME_LINK_SKIP` (`scripts/automod/worktree.py:87`) keeps `lloyd-data` out of the round-home
+#: symlink farm, so `DAILY_EXTRACT_DIR` is the round's own empty data root there. The helper
+#: writes the phrase through this constant rather than as a second literal, so the marker a node
+#: recognises and the text a human reads cannot drift apart.
+REDERIVE_EXPIRY_MARKER = "expiring out of re-derivability"
+
+
 def _rederive_expiry_message(day: str, committed: dict, fresh: dict,
                              inventory: list[RotationFile]) -> str:
     """Build the skip text for a re-derive arm whose fresh extract no longer spans the day.
@@ -8514,7 +8616,7 @@ def _rederive_expiry_message(day: str, committed: dict, fresh: dict,
     newest = inventory[-1] if inventory else oldest
     return (
         f"re-deriving {day} from this box's tape is no longer possible, and that is the day "
-        "expiring out of re-derivability rather than a regression: the extract just written "
+        f"{REDERIVE_EXPIRY_MARKER} rather than a regression: the extract just written "
         f"spans {'nothing' if got is None else f'{got[0]} to {got[1]}'} of the committed "
         f"extract's own sample span {want[0]} to {want[1]} "
         f"({len(committed['kv_samples']):,} sample rows committed, "
@@ -8573,8 +8675,22 @@ def test_the_rederive_guard_reads_the_committed_extract_span_not_the_window(
     assert len(fifteenth_raw["kv_samples"]) == FIFTEENTH_RAW_KV_ROWS, (
         f"the committed extract holds {len(fifteenth_raw['kv_samples'])} sample rows, not the "
         f"{FIFTEENTH_RAW_KV_ROWS} this node quotes")
+    # The committed day's three boot lines: the reason `pool_tokens` came back empty on the
+    # truncated reading, and the figure the skip message quotes as the secondary signal.
+    assert fifteenth_raw["pool_tokens"] == [813_381, 840_330, 844_969], (
+        f"the committed extract's `pool_tokens` is {fifteenth_raw['pool_tokens']!r}, not the three "
+        "boot lines #4616 recorded as living in `agent-llm-primary.log.10`, so the truncation "
+        "being simulated here is not the one that rotation produces")
 
     fresh_span = _sample_span(_ROTATION_HEAD_LOST_2026_11_11)
+    assert (len(_ROTATION_HEAD_LOST_2026_11_11["turns"]),
+            len(_ROTATION_HEAD_LOST_2026_11_11["misses"]),
+            _ROTATION_HEAD_LOST_2026_11_11["pool_tokens"]) == (314, 54, []), (
+        "the planted reading no longer carries the figures the 2026-11-26 run measured — turns "
+        f"314, misses 54, `pool_tokens` [] — it carries {len(_ROTATION_HEAD_LOST_2026_11_11['turns'])}"
+        f" / {len(_ROTATION_HEAD_LOST_2026_11_11['misses'])} / "
+        f"{_ROTATION_HEAD_LOST_2026_11_11['pool_tokens']!r}. Those three figures are the point of "
+        "clause 2: the reading is healthy everywhere the guard does not look")
     assert fresh_span == (1794420800, 1794441601), (
         f"the planted rotation signature spans {fresh_span}, not the measured 1794420800 → "
         "1794441601, so a pass below would be a pass about some other reading")
@@ -8608,23 +8724,31 @@ def test_the_rederive_guard_reads_the_committed_extract_span_not_the_window(
     assert _rederive_covers_committed(fifteenth_raw, same_span), (
         "the guard refused a reading whose span equals the committed one, so it would skip the "
         "re-derive witness on a day the tape still holds and void it silently")
-    # The byte half, through the comparison the arms actually run (`_bytes_are_the_witness`), on
-    # an extract whose span is the committed one and whose bytes are not: coverage says proceed,
-    # the witness says differ. `json.dumps` with the script's own separators round-trips the
-    # committed file byte for byte, so the only change here is one boot-line token count — a
-    # reading off a tape that still spans the day but is not the day's bytes.
-    same_span_bytes = json.dumps(
-        {**fifteenth_raw, "pool_tokens": [fifteenth_raw["pool_tokens"][0] + 1,
-                                          *fifteenth_raw["pool_tokens"][1:]]},
-        indent=None, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    # The byte half, through the comparison the arms actually run (`_bytes_are_the_witness`), on a
+    # reading whose span is the committed one and whose bytes are not: coverage says proceed, the
+    # witness says differ. The difference is planted at the byte level — the committed file with
+    # one byte added — and asserted as one byte BEFORE anything reads it, because re-encoding this
+    # fixture is emphatically not a one-byte difference: `json.dumps` with the script's own
+    # separators moves 120,505 of its 131,790 bytes (measured 2026-11-27), so a control built that
+    # way would be failing on an entire re-format while claiming to fail on one byte.
+    committed_bytes = FIFTEENTH_EXTRACT.read_bytes()
+    one_byte_different = committed_bytes + b"\n"
+    assert (len(one_byte_different) == len(committed_bytes) + 1
+            and one_byte_different[:-1] == committed_bytes), (
+        "the planted extract is not the committed bytes plus exactly one byte, so what is graded "
+        "below is not the one-byte difference clause 3 names")
+    same_span_bytes = json.loads(one_byte_different)
+    assert same_span_bytes["kv_samples"] == fifteenth_raw["kv_samples"], (
+        "the added byte moved the samples, so the guard would skip ahead of the witness and the "
+        "half of this clause that needs the witness to fire would never run")
     altered = tmp_path / FIFTEENTH_EXTRACT.name
-    altered.write_bytes(same_span_bytes)
-    assert _rederive_covers_committed(fifteenth_raw, json.loads(same_span_bytes)), (
+    altered.write_bytes(one_byte_different)
+    assert _rederive_covers_committed(fifteenth_raw, same_span_bytes), (
         "the guard did not report an extract whose samples are the committed ones as covered, so "
         "the byte witness behind it would never be reached on a full day")
     assert not _bytes_are_the_witness(altered, FIFTEENTH_EXTRACT), (
-        "the comparison the guard sits in front of called a one-token-count difference the "
-        "committed bytes, so past the guard there would be nothing left to fail")
+        "the comparison the guard sits in front of called a one-byte difference the committed "
+        "bytes, so past the guard there would be nothing left to fail")
     # Control for the falsifier "the shared witness always reports False": a faithful copy of the
     # committed file has to compare equal, or the assert above would pass on any bytes at all.
     faithful = tmp_path / "faithful.json"
@@ -8828,14 +8952,7 @@ def test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_b
     assert fifteenth_raw["year"] == 2026, (
         f"the extract's `year` is {fifteenth_raw['year']!r}, so the epoch rows and the "
         "window strings are being read on different calendars")
-    tracked = subprocess.run(
-        ["git", "-C", str(ROOT), "ls-files", "--error-unmatch",
-         str(FIFTEENTH_EXTRACT.relative_to(ROOT))],
-        capture_output=True, text=True)
-    assert tracked.returncode == 0, (
-        f"{FIFTEENTH_EXTRACT.name} is on disk but not in git; `tests/fixtures/.gitignore` "
-        "negates this family on purpose, so an untracked extract is a day whose evidence dies "
-        "with the rotation that produced it")
+    _assert_committed_extract_is_tracked(FIFTEENTH_EXTRACT)
     raw = FIFTEENTH_EXTRACT.read_text(encoding="utf-8")
     assert raw.endswith("\n") and not raw.endswith("\n\n")
     assert raw == json.dumps(fifteenth_raw, separators=(",", ":")) + "\n", (
@@ -8867,14 +8984,10 @@ def test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_b
     # Span coverage is the test; `in_window`'s limits would pass a truncated day.
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / FIFTEENTH_EXTRACT.name
-        written = subprocess.run(
-            [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
-             "--start", "2026-11-11", "--end", "2026-11-12", "--write-extract", str(out)],
-            cwd=str(ROOT), capture_output=True, text=True)
-        fresh = _rederived_extract(out, written)
+        fresh = _rederived_extract(out, _derive_window("2026-11-11", "2026-11-12", out))
         if not _rederive_covers_committed(fifteenth_raw, fresh):
             pytest.skip(_rederive_expiry_message("2026-11-11", fifteenth_raw, fresh,
-                                                 _rotation_inventory()))
+                                                 _rotation_inventory(_tape_view())))
         assert _bytes_are_the_witness(out, FIFTEENTH_EXTRACT), (
             "re-running the canonical invocation for this window produces bytes that differ "
             "from the committed extract, so the committed day is not what the script derives "
@@ -9112,11 +9225,7 @@ def test_the_sixteenth_extract_is_committed_byte_identical_to_the_daily_jobs_cop
         "edited, and #3507's case for byte-level agreement — an extract whose KV sample list "
         "held 2026-09-24's data under a 2026-09-25 label — is exactly this difference")
     fresh = tmp_path / SIXTEENTH_EXTRACT.name
-    written = subprocess.run(
-        [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
-         "--start", "2026-11-18", "--end", "2026-11-19", "--gate", "0.6",
-         "--write-extract", str(fresh)],
-        cwd=str(ROOT), capture_output=True, text=True)
+    written = _derive_window("2026-11-18", "2026-11-19", fresh, gate="0.6")
     # #4616: this arm used to ask the process — first a nonzero exit, then a grep of its output
     # — and both of those tests were dead code. `main` writes the extract and returns 0 for any
     # window it can open, and the string the deleted branch grepped for is printed by nothing
@@ -9126,7 +9235,7 @@ def test_the_sixteenth_extract_is_committed_byte_identical_to_the_daily_jobs_cop
     fresh_extract = _rederived_extract(fresh, written)
     if not _rederive_covers_committed(sixteenth_raw, fresh_extract):
         pytest.skip(_rederive_expiry_message("2026-11-18", sixteenth_raw, fresh_extract,
-                                             _rotation_inventory()))
+                                             _rotation_inventory(_tape_view())))
     assert _bytes_are_the_witness(fresh, committed), (
         "`--write-extract` reproduced 2026-11-18 differently from the committed bytes, so the "
         "derivation and the job's extract are no longer the same computation — which, given "
@@ -9704,19 +9813,15 @@ def test_the_seventeenth_extract_is_committed_byte_identical_to_the_daily_jobs_c
     # firing on nothing while the extract it protected came back a quarter of its size, so the
     # arm asks `_rederive_covers_committed` instead and that guard compares the fresh extract's
     # sample span with the committed extract's own. Which day is still on the tape is published
-    # by the skip message from the rotation it reads at the time, never dated into this comment
-    # where it would rot: 2026-11-26 sits inside roughly the eleven days of rotation this box
-    # retains, so this arm is a witness for now and not a standing guarantee.
+    # by the skip message from the rotation it reads at the time, never dated or counted into
+    # this comment where it would rot: this arm is a witness while the tape covers the day and
+    # the guard's skip is its expected state afterwards (#4256's owed-check clause).
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / SEVENTEENTH_EXTRACT.name
-        written = subprocess.run(
-            [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
-             "--start", "2026-11-26", "--end", "2026-11-27", "--write-extract", str(out)],
-            cwd=str(ROOT), capture_output=True, text=True)
-        fresh = _rederived_extract(out, written)
+        fresh = _rederived_extract(out, _derive_window("2026-11-26", "2026-11-27", out))
         if not _rederive_covers_committed(seventeenth_raw, fresh):
             pytest.skip(_rederive_expiry_message("2026-11-26", seventeenth_raw, fresh,
-                                                 _rotation_inventory()))
+                                                 _rotation_inventory(_tape_view())))
         assert _bytes_are_the_witness(out, committed), (
             "re-running the canonical invocation for this window produces bytes that differ "
             "from the committed extract, so the committed day is not what the script derives "
@@ -9767,11 +9872,317 @@ def _process_and_temp_probes(src: str) -> list[str]:
 
 
 #: The three nodes that re-run the canonical invocation over the rotation as a witness.
+#: The window each arm re-derives, in `_REDERIVE_ARMS` order. Named separately from the arms so
+#: this node can check an arm still asks for ITS OWN day rather than some other day's.
+_REDERIVE_WINDOWS = (("2026-11-11", "2026-11-12"),
+                     ("2026-11-18", "2026-11-19"),
+                     ("2026-11-26", "2026-11-27"))
+
+
 _REDERIVE_ARMS = (
     test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_byte,
     test_the_sixteenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy,
     test_the_seventeenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy,
 )
+
+
+#: Each re-derive arm with the window it re-derives, the gate it passes, the raw-extract fixture
+#: it is handed and the committed extract file behind that fixture, so one node can call all three
+#: as ordinary functions. Calling them directly is what makes a skip observable at all: under a
+#: real run a skip leaves only a report line, and #4616's clauses could therefore only grade the
+#: guard, never the arm's decision. The committed path is named for its own file so a node can ask
+#: whether the daily job's living copy of THAT day is where `DAILY_EXTRACT_DIR` points — the
+#: precondition the arms skip on above the guard, anchored by `_production_data_root` and pinned by
+#: `test_the_extract_daily_copy_anchor_resolves_out_of_the_gates_round_home_too`.
+_REDERIVE_EXAMPLES = (
+    ("fifteenth",
+     test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_byte,
+     fifteenth_raw, ("2026-11-11", "2026-11-12"), None, FIFTEENTH_EXTRACT),
+    ("sixteenth",
+     test_the_sixteenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy,
+     sixteenth_raw, ("2026-11-18", "2026-11-19"), "0.6", SIXTEENTH_EXTRACT),
+    ("seventeenth",
+     test_the_seventeenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy,
+     seventeenth_raw, ("2026-11-26", "2026-11-27"), None, SEVENTEENTH_EXTRACT),
+)
+
+
+def _fixture_value(fixture):
+    """The value a `@pytest.fixture` function produces, without the fixture machinery.
+
+    The three raw-extract fixtures are plain readers over the committed files, and calling them
+    directly is the only way to hand the same reading to an arm outside a pytest collection —
+    pytest refuses a decorated fixture called directly, and `__wrapped__` is what it leaves behind.
+    """
+    return getattr(fixture, "__wrapped__", fixture)()
+
+
+def _call_rederive_arm(arm, raw_fixture, where: Path) -> None:
+    """Call a re-derive arm as a plain function, supplying the two fixtures it declares.
+
+    Directly calling the arm is what makes its skip inspectable: a skip under a normal run leaves
+    nothing but a report line, which is why #4616's clauses could only grade the guard and never
+    the arm's decision. An arm that grows a fixture this does not know is an error, not a skip —
+    skipping here would leave clause 1 unproven for that day and read as coverage.
+    """
+    value = _fixture_value(raw_fixture)
+    args = []
+    for name in inspect.signature(arm).parameters:
+        if name == "tmp_path":
+            args.append(where)
+        elif name == raw_fixture.__name__:
+            args.append(value)
+        else:
+            raise AssertionError(
+                f"{arm.__name__} declares a fixture {name!r} that this helper cannot supply; "
+                "teach the helper rather than letting the arm go unexercised")
+    arm(*args)
+
+
+def _withhold_rotation(tmp_path: Path, day: str, committed: dict):
+    """A scratch data root reading this box's live tape minus the ONE rotation file that supplies
+    the committed day's first sample, as `(view_root, withheld_name, oldest_remaining)`.
+
+    Which file that is is a HEURISTIC, not a property this helper can prove: rotation retires the
+    oldest file first and the files are written in time order, so the file whose mtime is the
+    first at or after the committed day's first sample is the one that supplied that sample —
+    true while mtimes track content order, which is how supervisord writes a rotation series. The
+    node that calls this is
+    the proof: it asserts the arm's skip carries `REDERIVE_EXPIRY_MARKER` and names
+    `oldest_remaining`, so if mtimes ever stop tracking content the node goes RED rather than
+    certify a truncation that never happened. `usage.db` and `event_logs` are symlinked through,
+    so only the tape differs. `withheld_name` comes back empty when nothing can be withheld
+    without taking the live log, which is still being written.
+    """
+    root = _production_data_root()
+    tape = sorted((root / "logs" / "services").glob("agent-llm-primary.log*"),
+                  key=lambda p: p.stat().st_mtime)
+    span = _sample_span(committed)
+    assert span is not None, f"the {day} fixture holds no samples to build a view for"
+    front = next((p for p in tape if p.stat().st_mtime >= span[0]), None)
+    if front is None or front.name == "agent-llm-primary.log":
+        return tmp_path, "", (tape[0] if tape else tmp_path)
+    view = tmp_path / "tape-view"
+    (view / "logs" / "services").mkdir(parents=True)
+    (view / "usage.db").symlink_to(root / "usage.db")
+    (view / "event_logs").symlink_to(root / "event_logs")
+    for path in tape:
+        if path.name != front.name:
+            (view / "logs" / "services" / path.name).symlink_to(path)
+    remaining = [p for p in tape if p.name != front.name]
+    return view, front.name, remaining[0]
+
+
+@pytest.mark.parametrize("arm_name", [case[0] for case in _REDERIVE_EXAMPLES])
+def test_no_rederive_extract_arm_can_be_shown_skipping_before_the_real_rotation_rotates_it_out(
+        arm_name, tmp_path, monkeypatch):
+    """#4616 clause 1 as behaviour: each arm is CALLED against a tape that has lost the rotation
+    file supplying its day, and what comes back is the guard's skip and not a failure.
+
+    Every other clause graded the guard as a function, so no arm had ever been shown skipping —
+    the rotation that takes 2026-11-11 had not happened, and the item's own owed list is waiting
+    on it. Here it has, as a view of the live tape with one file withheld behind the same
+    `usage.db` and `event_logs`. The arm is called with nothing supplied: its daily-copy
+    precondition is met by the anchored `DAILY_EXTRACT_DIR` (see `_production_data_root`), which
+    reads the same rotation in a gate round as on this box, so the guard is the only thing in
+    reach that can skip. Two runs per arm, and the pair is the point:
+
+      * with the view the arm raises `pytest.skip.Exception` carrying `REDERIVE_EXPIRY_MARKER` —
+        the guard's own verdict, not a skip handed down by a precondition above it — and the
+        message names the day and the OLDEST RETAINED rotation file. It cannot name the file that
+        went: a reader of a skip sees what survives, not what was deleted — so what is asserted is
+        the surviving end, and the message stays honest about a tape rather than mentioning the
+        scratch view.
+      * with no view the same arm on the live tape must NOT skip today: the day is still covered,
+        so a guard that skipped on anything else — a substituted tape, an empty directory, a file
+        it merely disliked — goes red here instead of quietly voiding the witness.
+
+    An arm whose day has already rotated out for real reports the guard's skip on the live tape as
+    well, and that IS the demonstration; this node then skips with the reason rather than failing
+    a control that can no longer hold, because owed-check is the reader who sees the real thing.
+    """
+    arm, raw_fixture, (day, _end), _gate, committed_file = next(
+        case[1:] for case in _REDERIVE_EXAMPLES if case[0] == arm_name)
+    committed = _fixture_value(raw_fixture)
+    # The arm's daily-copy precondition, satisfied by the anchor rather than planted. If the
+    # standing job's copy of this day is genuinely gone the node cannot grade the guard at all, so
+    # it says that instead of catching the wrong skip and calling it the guard's verdict.
+    if not (DAILY_EXTRACT_DIR / committed_file.name).is_file():
+        pytest.skip(
+            f"{arm_name} ({day}): the daily job's own copy of this day is not in "
+            f"{DAILY_EXTRACT_DIR}, so the arm skips at that precondition and never reaches the "
+            "guard this node grades. The digest and byte count in the arm still pin the day")
+    view, withheld, oldest_remaining = _withhold_rotation(tmp_path, day, committed)
+    if not withheld:
+        pytest.skip(
+            f"{arm_name} ({day}): withholding anything else would take the live log, still being "
+            "written, so that day's expiry is the real rotation's to demonstrate, not this "
+            "node's")
+
+    def run(with_view: bool):
+        """Return the arm's skip message, or `None` if it did not skip."""
+        if with_view:
+            monkeypatch.setenv(REDERIVE_TAPE_ROOT_ENV, str(view))
+        else:
+            monkeypatch.delenv(REDERIVE_TAPE_ROOT_ENV, raising=False)
+        scratch = tmp_path / ("with-view" if with_view else "live-tape")
+        scratch.mkdir(exist_ok=True)
+        try:
+            _call_rederive_arm(arm, raw_fixture, scratch)
+        except pytest.skip.Exception as skipped:
+            return str(skipped)
+        return None
+
+    skipped = run(with_view=True)
+    assert skipped is not None, (
+        f"{arm_name} did not skip on a tape with `{withheld}` withheld: it either passed (so the "
+        "view never reached the script, or the guard is not what decides this arm) or it failed, "
+        "which is exactly the red #4616 exists to stop")
+    assert REDERIVE_EXPIRY_MARKER in skipped, (
+        f"{arm_name} skipped on a tape with `{withheld}` withheld, but not on the guard's verdict; "
+        f"the message it raised was:\n{skipped!r}\nA skip handed down by a precondition above the "
+        "re-derive is not the one clause 1 is about — supply that precondition here rather than "
+        "grade the wrong arm.")
+    assert day in skipped, f"the skip does not name the day it is expiring: {skipped!r}"
+    assert oldest_remaining.name in skipped, (
+        f"the skip does not name the oldest rotation file the view still retains "
+        f"(expected {oldest_remaining.name!r}): {skipped!r}")
+    assert "tape-view" not in skipped and REDERIVE_TAPE_ROOT_ENV not in skipped, (
+        f"the skip describes the test's view instead of the tape ({skipped!r}); a reader of a "
+        "real expiry must not be told a scratch directory was involved")
+
+    live = run(with_view=False)
+    if live is not None:
+        assert REDERIVE_EXPIRY_MARKER in live, (
+            f"{arm_name} skipped on this box's LIVE tape on something OTHER than the guard's "
+            f"verdict: {live!r}. That is a precondition above the re-derive which this node did "
+            "not supply, so the control run graded nothing and the node has to say so rather than "
+            "read as coverage.")
+        pytest.skip(
+            f"{arm_name}'s day ({day}) has genuinely rotated out of this box's tape, so the live "
+            "control can no longer hold and the expiry this node simulates has actually arrived; "
+            "the owed check is the reader who confirms it. What the arm reported: " + live)
+
+
+def test_the_extract_daily_copy_anchor_resolves_out_of_the_gates_round_home_too(tmp_path, monkeypatch):
+    """#4616 clause 1's last leg: the guard must be the only thing that can skip an arm in the
+    environment the gate actually runs the arms in, which means the daily-copy precondition below
+    it has to be readable there. That is a property of the anchor, so this node tests the anchor.
+
+    The gate does not run these arms in this account's home. `gate._child_env` points `HOME` at
+    the round's home and `ensure_round_home` (`scripts/automod/worktree.py:100-136`) symlinks
+    every entry of the real one into it EXCEPT the names in `HOME_LINK_SKIP` — `lloyd` and
+    `lloyd-data`. A `$HOME`-anchored extract directory is therefore an empty one for the whole of
+    a gate round, every arm skips at its daily-copy precondition BEFORE the guard, and clause 1's
+    "single decider" is never executed where it is graded. Measured 2026-11-27 in a throwaway
+    checkout of the previous head (299a68f4) with `HOME` pointed at a farm built from
+    `HOME_LINK_SKIP` itself: all three arms took that precondition skip in 1.03s without reading a
+    line of the tape, and `DAILY_EXTRACT_DIR` named `<farm>/lloyd-data/vllm-prefix-miss`.
+
+    The previous round answered the same finding by planting the copy inside the nodes that needed
+    it, which makes the witness run but leaves the precondition pointed at the round's empty
+    directory everywhere else in the family — including the three arms themselves. This anchors it
+    instead, on the object the script's `--data-root` defaults to, whose own docstring
+    (`app/data_root.py:109-122`) promises "the same path whatever `$HOME` or `LLOYD_DATA` say"
+    because it is built on the passwd entry. Three claims, and the middle one is the falsifier:
+
+      * the anchor is the script's root, and all three tracked days' living copies are in it;
+      * re-pointing `HOME` at a farm assembled from the shipped `HOME_LINK_SKIP` moves the old
+        `$HOME` spelling inside that farm, where it holds nothing, while the anchor does not move
+        at all — the two spellings are genuinely different paths in the gate's home, so this node
+        cannot pass vacuously if the anchor were reverted;
+      * a fresh interpreter imported with that `HOME`, which is what a gate round's pytest is
+        because `DAILY_EXTRACT_DIR` is computed at import time, reports the same anchored
+        directory and the copies visible in it, and reports that an ambient value of
+        `REDERIVE_TAPE_ROOT_ENV` in the environment did NOT become the tape view — the seam the
+        simulated-expiry node rides is closed against the outside world.
+    """
+    from scripts.automod.worktree import HOME_LINK_SKIP
+
+    assert "lloyd" in HOME_LINK_SKIP and "lloyd-data" in HOME_LINK_SKIP, (
+        "`HOME_LINK_SKIP` no longer withholds `lloyd-data`, so a round home would link the real "
+        "data root and the isolation this node demonstrates is gone. The anchor is still the right "
+        "one — it is what the script reads — but settle what a round home now sees before "
+        "changing it: `DAILY_EXTRACT_DIR` is " + str(DAILY_EXTRACT_DIR))
+    assert DAILY_EXTRACT_DIR == _production_data_root() / "vllm-prefix-miss", (
+        "`DAILY_EXTRACT_DIR` is no longer the script's own data root with `vllm-prefix-miss` "
+        f"appended (it is {DAILY_EXTRACT_DIR}), so the arms and `--write-extract` are reading two "
+        "different rotations again")
+    # The definition, not just its value: in this account's home `$HOME` and the account anchor are
+    # the same directory, so every other assert in this node can hold while the line above spells
+    # the path from `$HOME` — and the next gate round is where that difference shows up.
+    definition = next(line for line in Path(__file__).resolve().read_text(encoding="utf-8")
+                      .splitlines() if line.startswith("DAILY_EXTRACT_DIR ="))
+    assert "_production_data_root()" in definition and "Path.home()" not in definition, (
+        f"`DAILY_EXTRACT_DIR` is defined as {definition.strip()!r}, which is not the account "
+        "anchor: the child probe below is the only thing that would notice, and a `$HOME`-anchored "
+        "extract directory is the state round SM_20261127_093531 could not grade clause 1 in")
+    missing = [case[5].name for case in _REDERIVE_EXAMPLES
+               if not (DAILY_EXTRACT_DIR / case[5].name).is_file()]
+    assert not missing, (
+        f"{DAILY_EXTRACT_DIR} holds no copy of {missing}, so the daily job's living half of the "
+        "identity is unreadable here and every re-derive arm skips above its guard")
+
+    farm = tmp_path / "round-home"
+    farm.mkdir()
+    for entry in sorted(Path.home().iterdir()):
+        if entry.name in HOME_LINK_SKIP:
+            continue
+        (farm / entry.name).symlink_to(entry)
+    assert not (farm / "lloyd-data").exists(), (
+        "a home assembled under `HOME_LINK_SKIP` unexpectedly carries `lloyd-data`, so it is not "
+        "the environment the gate runs the arms in and this node proves nothing about it")
+
+    monkeypatch.setenv("HOME", str(farm))
+    home_anchored = Path.home() / "lloyd-data" / "vllm-prefix-miss"
+    assert home_anchored == farm / "lloyd-data" / "vllm-prefix-miss", (
+        f"with `HOME` re-pointed, `$HOME`-anchoring resolved to {home_anchored} rather than "
+        "inside the round home, so the environment this node is about no longer exists")
+    assert not home_anchored.is_dir(), (
+        f"{home_anchored} unexpectedly exists in the round home, so a `$HOME`-anchored "
+        "extract directory would find the daily copy there and the anchor would be moot")
+    assert _production_data_root() / "vllm-prefix-miss" != home_anchored, (
+        "the account anchor collapsed onto the round home, which means it is reading `$HOME` "
+        "after all and the arms skip above the guard under a gate run")
+
+    probe = tmp_path / "import-under-round-home.py"
+    probe.write_text("""import json, os, sys
+from pathlib import Path
+sys.path.insert(0, os.environ["LLOYD_REPO_FOR_PROBE"])
+import tests.test_vllm_doc_claims as m
+
+print(json.dumps({
+    "home": str(Path.home()),
+    "daily": str(m.DAILY_EXTRACT_DIR),
+    "visible": sorted(n for n in json.loads(sys.argv[1])
+                      if (m.DAILY_EXTRACT_DIR / n).is_file()),
+    "view": None if m._tape_view() is None else str(m._tape_view()),
+}))
+""", encoding="utf-8")
+    names = [case[5].name for case in _REDERIVE_EXAMPLES]
+    env = {**os.environ, "HOME": str(farm), "LLOYD_REPO_FOR_PROBE": str(ROOT),
+           REDERIVE_TAPE_ROOT_ENV: str(tmp_path / "someone-elses-tape")}
+    child = subprocess.run([sys.executable, str(probe), json.dumps(names)], cwd=ROOT, env=env,
+                           capture_output=True, text=True, timeout=120)
+    assert child.returncode == 0, (
+        f"the probe interpreter could not import this module under a round home: "
+        f"{(child.stderr or child.stdout)[-500:]!r}")
+    report = json.loads(child.stdout.strip().splitlines()[-1])
+    assert report["home"] == str(farm), (
+        f"the probe did not run in the round home (its `Path.home()` is {report['home']!r}), so "
+        "everything below grades an import that was not isolated")
+    assert report["daily"] == str(DAILY_EXTRACT_DIR), (
+        f"a fresh import under the round home resolved the extract directory to {report['daily']!r}"
+        f", not the anchored {DAILY_EXTRACT_DIR} — the arms take the daily-copy skip above the "
+        "guard under a gate run, which is the state that made clause 1 ungradeable in round "
+        "SM_20261127_093531")
+    assert report["visible"] == sorted(names), (
+        f"under the round home the anchored directory showed {report['visible']} of the three "
+        f"living copies {sorted(names)}, so an arm would skip above its guard there")
+    assert report["view"] is None, (
+        f"an ambient {REDERIVE_TAPE_ROOT_ENV}={env[REDERIVE_TAPE_ROOT_ENV]!r} became the tape view "
+        f"of a normal import ({report['view']!r}); the simulated-expiry node's substitution must "
+        "be scoped to the child it spawns, or a stale environment would decide what is on the tape")
 
 
 def test_every_rederive_extract_arm_asks_the_shared_guard_and_never_the_process():
@@ -9783,6 +10194,13 @@ def test_every_rederive_extract_arm_asks_the_shared_guard_and_never_the_process(
     code, not whether the file it wrote is there, not its output. The git handle in the
     fifteenth's tracked-check is exempt: it asks a question of git, which does answer.
 
+    A single decider is also about what sits ABOVE the guard, so two more things are read off each
+    arm: it reaches the daily job's copy through the anchored `DAILY_EXTRACT_DIR` and anchors
+    nothing on `$HOME` — a precondition that resolves into the gate's round home, where
+    `HOME_LINK_SKIP` withholds `lloyd-data`, skips the arm before the guard is ever consulted, and
+    that is the state round SM_20261127_093531 was refused for — and the gate it passes is the gate
+    `_REDERIVE_EXAMPLES` declares for it, so that column is a graded claim and not documentation.
+
     The removed branch is named here by construction rather than by literal, because clause 4 is
     an absence grep over this file and the file must not itself contain what it removes.
     """
@@ -9791,17 +10209,52 @@ def test_every_rederive_extract_arm_asks_the_shared_guard_and_never_the_process(
     assert removed_branch not in whole_file, (
         "the branch #4616 deleted is back in this file somewhere: clause 4's check is a grep "
         "for that string over `tests/`, so its text may not appear even in a comment about it")
-    for arm in _REDERIVE_ARMS:
+    # The canonical invocation is now named once, inside `_derive_window`, instead of once per
+    # arm. That is the same guarantee in a stronger shape: an arm cannot drift by editing an argv
+    # it no longer has, so this asserts the module is invoked by exactly one helper AND that every
+    # arm routes its OWN window through that helper AND that no arm re-spells the module.
+    invoker = inspect.getsource(_derive_window)
+    assert "scripts.vllm_prefix_miss_window" in invoker, (
+        "`_derive_window` no longer runs the canonical invocation, so the three arms are not "
+        "re-deriving anything and this whole family needs a look")
+    for arm, window in zip(_REDERIVE_ARMS, _REDERIVE_WINDOWS):
         src = inspect.getsource(arm)
-        assert "scripts.vllm_prefix_miss_window" in src, (
-            f"{arm.__name__} no longer runs the canonical invocation, so it is not one of the "
-            "re-derive arms and does not belong in `_REDERIVE_ARMS`")
+        assert f"_derive_window(\"{window[0]}\", \"{window[1]}\"" in src, (
+            f"{arm.__name__} no longer routes its own window {window!r} through the shared "
+            "`_derive_window`, so it is either building its own invocation (which is what clause "
+            "1 forbids, because of the process handle it would hold) or it is not a re-derive "
+            "arm at all")
+        assert "scripts.vllm_prefix_miss_window" not in src, (
+            f"{arm.__name__} spells the canonical invocation out again instead of calling "
+            "`_derive_window`; that is how a divergent argv comes back")
         assert "_rederive_covers_committed(" in src, (
             f"{arm.__name__} decides its re-derive skip somewhere other than the shared guard, "
             "which is the divergence #4616 clause 1 exists to prevent")
         assert "_rederive_expiry_message(" in src, (
             f"{arm.__name__} skips with an ad-hoc message instead of the one the shared helper "
             "assembles from the rotation inventory, so its skip would not name the tape")
+        # The precondition chain, not just the guard: an arm whose daily copy is spelled against
+        # `$HOME` again is empty for the whole of a gate round, and the guard below it never runs
+        # where the gate grades it — the state round SM_20261127_093531 was refused for.
+        assert "DAILY_EXTRACT_DIR" in src, (
+            f"{arm.__name__} no longer reaches the daily job's copy through the anchored "
+            "`DAILY_EXTRACT_DIR`, so its precondition is somebody's path again and the guard it "
+            "sits above may not be reachable in a gate round")
+        assert "Path.home()" not in src, (
+            f"{arm.__name__} anchors something on `$HOME`, which inside a gate round is the "
+            "round's symlink farm with `lloyd-data` withheld by `HOME_LINK_SKIP` — the anchor is "
+            "`_production_data_root`, which is what the script's own `--data-root` reads")
+        # The table's `gate` column is a claim about the invocation, so it is checked against the
+        # invocation rather than carried as documentation: only 2026-11-18 was cut with --gate.
+        declared_gate = next(case[4] for case in _REDERIVE_EXAMPLES if case[1] is arm)
+        gate_spelled = 'gate="' in src
+        assert gate_spelled == (declared_gate is not None), (
+            f"{arm.__name__} {'spells a gate' if gate_spelled else 'passes no gate'} while "
+            f"`_REDERIVE_EXAMPLES` declares {declared_gate!r} for it, so the table and the "
+            "invocation describe different re-derivations")
+        if declared_gate:
+            assert f'gate="{declared_gate}"' in src, (
+                f"{arm.__name__} does not pass gate={declared_gate!r} as the table declares")
         probes = _process_and_temp_probes(src)
         assert not probes, (
             f"{arm.__name__} decides on the derivation process or on whether the scratch extract "
