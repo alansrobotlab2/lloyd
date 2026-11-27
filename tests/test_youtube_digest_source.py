@@ -852,6 +852,101 @@ def test_the_vault_skill_body_carries_no_placeholder(tmp_path):
         "the task block that workers/sources/youtube_digest.py renders")
 
 
+#: The card-count spellings that state a capacity budget this file does not own.
+#: Matched case-folded because the two surfaces wrote the claim with different
+#: cases, and pinning one spelling leaves the other one edit away from returning.
+#: Lowercase here on purpose, and quoted nowhere else in this file: the #4632
+#: witness greps the tree for the stale line as it was written and must find it
+#: in one archived fixture and nowhere else, so a docstring that spelled it out
+#: in its own case would make this file the second hit. Deliberately phrase-shaped
+#: rather than a bare card count — `scripts/run-sglang.sh` names two cards for a
+#: tensor-parallel mode, and that claim is not stale.
+STALE_CARD_COUNTS = ("two 24 gb", "two gpus")
+
+#: The producer that publishes the bundle this skill digests. Its frame cap is
+#: the other repo surface that carried the same stale bar (#4481 fixed the skill,
+#: #4632 the comment) and the reason both nodes live in this one file: one bar,
+#: two prose surfaces, both reached by a reader of the youtube pipeline.
+MONITOR_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "youtube_channel_monitor.py"
+
+
+def _actionable_tier(body: str) -> str:
+    """The skill's `actionable` bullet — the only tier that states a compute bar.
+
+    Sliced between the two tier names rather than grepped out of the whole body,
+    so the assertion is aimed at the bar a digest run actually applies. Asserts
+    rather than raising an index error: a rewrite that renames or drops a tier
+    must fail with that named, not as a traceback from `str.index`.
+    """
+    start = body.find("`actionable`")
+    assert start != -1, f"skills/{Y.SKILL}/SKILL.md has no `actionable` tier"
+    end = body.find("`worth_a_look`", start + 1)
+    assert end != -1, f"skills/{Y.SKILL}/SKILL.md has no `worth_a_look` tier"
+    return body[start:end]
+
+
+def test_the_actionable_tier_states_the_bar_without_a_card_count():
+    """The filing bar names one card's size, never how many cards the box has.
+
+    `build_prompt` loads this skill unformatted into every digest prompt, so a
+    capacity line here is an instruction the model files against. #4481 rewrote
+    the tier to a single free 24 GB card after the 2026-11-21 digest prompt
+    carried a two-card bar instead — a box `eval/lloyd_profile.md`
+    § Hardware and models does not describe. Nothing pinned the skill's wording:
+    `tests/test_lloyd_profile_doc_claims.py` binds the profile path only, so the
+    profile was corrected in #4309 while the stale half — the one that renders —
+    stayed. That is the gap this node closes.
+
+    An absence check alone is vacuous: deleting the tier would pass it. So the
+    node also requires the tier to still name a 24 GB allocation and to hand
+    every live figure to the profile's Hardware section.
+    """
+    tier = _actionable_tier((SKILL_DIR / "SKILL.md").read_text(encoding="utf-8"))
+    lowered = tier.lower()
+    for phrase in STALE_CARD_COUNTS:
+        assert phrase not in lowered, (
+            f"the actionable tier states {phrase!r} again — the card map belongs "
+            f"to the profile, not the filing bar: {tier.strip()!r}")
+    assert "24 gb" in lowered, (
+        "the actionable tier no longer names a 24 GB allocation, so the absence "
+        "check above would be passing on a deleted bar rather than a corrected one")
+    assert "lloyd_profile.md" in tier and "hardware and models" in lowered, (
+        "the actionable tier must defer the card map and every live occupancy "
+        "figure to eval/lloyd_profile.md § Hardware and models")
+
+
+def test_the_frame_cap_rationale_defers_the_card_map_to_the_profile():
+    """The monitor's `MAX_FRAMES_PER_VIDEO` comment is prose a reader trusts.
+
+    The cap's justification is real — 1300 estimated tokens per frame on the
+    primary's ViT against a 20-image-per-request ceiling — but its last clause
+    attributed that budget to a two-card 24 GB box, the map the profile has not
+    carried since the Blackwell took GPU 1. No prompt renders this file, so
+    unlike the skill line the defect is a false hardware rationale read by
+    whoever edits the code, which is why it gets its own pin.
+
+    The slice is the constant's own trailing comment, so deleting the rationale to
+    clear the absence check fails here: the token estimate, the per-request
+    ceiling and the profile citation all have to survive.
+    """
+    src = MONITOR_SCRIPT.read_text(encoding="utf-8")
+    rationale = re.search(r"^MAX_FRAMES_PER_VIDEO = 24[^\n]*(?:\n[ \t]*#.*)*", src, re.M)
+    assert rationale, (
+        "MAX_FRAMES_PER_VIDEO is no longer the literal 24 with a trailing comment; "
+        "tests/test_youtube_channel_monitor.py:894 is the pin that owns the value")
+    comment = rationale.group(0)
+    lowered = comment.lower()
+    for phrase in STALE_CARD_COUNTS:
+        assert phrase not in lowered, (
+            f"the frame-cap rationale states {phrase!r} again: {comment!r}")
+    assert "image_token_estimate" in comment and "20-image-per-request" in comment, (
+        "the token budget is the cap's actual justification; dropping it to pass "
+        "the card-count check leaves the constant with no rationale at all")
+    assert "lloyd_profile.md" in comment and "hardware and models" in lowered, (
+        "the rationale must defer the card map and every occupancy figure to "
+        "eval/lloyd_profile.md § Hardware and models")
+
+
 @pytest.mark.parametrize("content", [None, "", "   \n"],
                          ids=["absent", "empty", "whitespace"])
 async def test_a_missing_skill_fails_the_run_before_the_session(tmp_path, backlog, monkeypatch,

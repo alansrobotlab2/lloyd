@@ -1694,7 +1694,10 @@ MAX_FRAMES_PER_VIDEO = 24   # 1300 estimated tokens per frame on the primary's V
                             # (config.yaml models.primary.image_token_estimate) and
                             # a 20-image-per-request ceiling: 24 frames is two
                             # requests, a 90-minute uncapped deck is tens of
-                            # thousands of tokens on a box with two 24 GB GPUs
+                            # thousands of tokens. The card map and every live
+                            # occupancy figure belong to eval/lloyd_profile.md
+                            # § Hardware and models — read a number there, never
+                            # one restated here.
 FRAME_RESOLUTION_CAP = 1280  # longest edge, in px — a guess, see the caveat
 FRAME_SAMPLE_SECONDS = 30.0  # the fallback cadence when no scene change is found
 SCENE_THRESHOLD = 0.30       # ffmpeg's `scene` filter cut confidence
