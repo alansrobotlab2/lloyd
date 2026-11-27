@@ -1292,6 +1292,81 @@ def is_real_follow_up(follow: dict) -> bool:
     return True
 
 
+# ── A ruling that disowns the follow-up filed beside it (#4619) ─────────────
+#
+# `is_real_follow_up` and `backlog.is_derived_name` both read the CHILD — its name
+# and its body — and both stay right about what they read. Neither can see the
+# answer owed-check wrote on #4333 at 2026-11-26T19:53:55 (`20261126_195355_owedcheck_b0c5`):
+# a ruling that opens "No follow_up filed: baseline_problem already refuses any N
+# mismatch …" with a `follow_up` object naming a real imperative sentence and a
+# real spec. Every shape test passes legitimately — the child IS well formed — and
+# the answer still contradicts itself: #4333 settled carrying `follow_up: 4618` two
+# lines under a ruling that says nothing is being filed. #4618 then bought a sweep
+# (2026-11-27T04:12:42, `worth=low size=small`, parked) and an autotriage close
+# (04:30:36, `stale`) against a decision its own parent record had already refused.
+#
+# The vocabulary is the corpus's, not invented. Replayed over the front matter of
+# all 4,436 parseable `~/obsidian/backlog/*.md` on 2026-11-26: 2,133 `owed_settled`
+# records carry a `ruling`, 49 of them contain one of these phrasings, and 21 of
+# those 49 place it at the head of a sentence. The arms below are the whole observed
+# set — `no new item filed`, `no follow-up filed`, `no follow_up filed`, `no item
+# filed`, `no follow-up is filed`, `no item is filed`, `no follow_up is filed`,
+# `no new item needed`, `no new item is filed`, `nothing further to file`, `no new
+# item is needed`, `no new item is warranted`, `no follow-up needed` — because a
+# check keyed to the one snake_case literal the witness happens to use covers 27 of
+# the 188 matches the same scan found across the whole board.
+_DISOWN_PHRASE = re.compile(
+    r"no[\s_]+(?:new[\s_]+)?(?:follow[\s_\-]*up|item)[\s_]+(?:is[\s_]+)?"
+    r"(?:filed|needed|warranted)"
+    r"|nothing[\s_]+further[\s_]+(?:to[\s_]+file|filed)",
+    re.IGNORECASE)
+
+# What a sentence of a ruling actually starts with: the position of the first
+# non-decoration character at the top of the text or after a terminator. Decoration
+# is what the model wraps a verdict in — quotes, markdown emphasis, a `>` or a list
+# marker — and `_DISOWN_PHRASE` anchored without it would miss `"No item filed"`
+# and `**No new item filed**`. A colon is deliberately NOT a break: a ruling that
+# reaches the phrase after one ("The verdict stands: no item filed, but add X") is
+# quoting or hedging, not leading with the verdict, and its child still files.
+_HEAD_DECORATION = r"\"'`*_#>\[\-\u2013\u2014\t \r\n"
+_SENTENCE_HEAD = re.compile(r"^[" + _HEAD_DECORATION + r"]*"
+                            r"|(?<=[.!?\n])[" + _HEAD_DECORATION + r"]*")
+
+
+def ruling_disowns_follow_up(ruling: str) -> str:
+    """The disownment a ruling states AS ITS VERDICT, or "" when it states none.
+
+    Truthy means the answer refused a follow-up in its own words, so nothing should
+    be filed for it. Returns the phrase it matched (normalised, lower-cased) rather
+    than a bare bool so the caller can name the disownment in the note it writes.
+
+    Only a sentence-INITIAL phrase counts, which is the whole of the design. A
+    ruling is free to refer to an earlier pass's decision — "the 09-30 pass wrote no
+    item filed and was wrong; add the guard anyway" names a real next step while
+    containing the words — and a substring test would file nothing for it. Measured
+    on the same replay as the counts above: of the 49 rulings that contain such a
+    phrasing, 28 place it somewhere other than a sentence head, so anchoring is what
+    keeps 28 of 49 filings alive that an unanchored check would have refused.
+
+    The converse limit is stated rather than papered over: a ruling that LEADS with
+    a disownment and then names a step anyway is refused here too. That shape
+    contradicts itself in the same record, and the recorded corpus holds 21 of them,
+    exactly one of which also filed a child — #4333's, which is the junk #4619. A
+    forward-looking arm ("instead", "however", "but") would be the open-ended
+    denylist `is_real_follow_up`'s own docstring refuses to write.
+    """
+    text = str(ruling or "")
+    if not text.strip():
+        return ""
+    heads = {m.end() for m in _SENTENCE_HEAD.finditer(text)}
+    found = _DISOWN_PHRASE.search(text)
+    while found:
+        if found.start() in heads:
+            return " ".join(found.group(0).split()).lower()
+        found = _DISOWN_PHRASE.search(text, found.start() + 1)
+    return ""
+
+
 # ── The child copy of an owed line (#2013) ──────────────────────────────────
 #
 # A filed follow-up quotes the parent's owed line in its trailer. Copied
@@ -1548,6 +1623,11 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
     keep: list[dict] = []
     notes: list[str] = []
     filed: list[int] = []
+    # #4619: the (owed row, disowning phrase) pairs a refused filing would have put on
+    # its child. Scheduled on the PARENT, and only after the `updates` write below,
+    # because that write replaces the whole `owed` list with `keep` — an `add_owed` run
+    # inside this loop would be overwritten by it and leave nothing on disk.
+    pending_rearm: list[tuple[str, str]] = []
     amended: list[int] = []
     item_move = ""
     move_why = ""
@@ -1760,8 +1840,29 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
         if derived:
             notes.append(f"#{n} follow-up not filed: it only witnesses or records "
                          f"this item's own claim, so the debt stays here")
-        if (out in ("work", "ruling") and is_real_follow_up(follow) and not derived
-                and len(filed) < spawn_cap):
+        # #4619: `record["ruling"]` is in scope here and the gate never read it. An
+        # answer whose ruling OPENS with its own verdict that nothing is being filed
+        # is refused the child even when the optional `follow_up` object is well
+        # formed — the shape gates read only the child, and the record that settles is
+        # the one that contradicts itself. `work` keeps its hold in the `elif` below
+        # either way, so this arm drops no debt: an unfiled `work` still goes back owed.
+        disowning = (ruling_disowns_follow_up(record.get("ruling") or "")
+                     if out in ("work", "ruling") else "")
+        would_file = (out in ("work", "ruling") and is_real_follow_up(follow)
+                      and not derived and len(filed) < spawn_cap)
+        if would_file and disowning:
+            notes.append(f"#{n} follow-up not filed: the ruling states {disowning} as its "
+                         f"own verdict, so the child this answer named contradicts it")
+            # …and a re-arm condition the same ruling named must not go with the child
+            # that was never created (#4185's permanent prose, one route over). It goes
+            # onto THIS item, after the `owed` write — see `pending_rearm`.
+            condition = rearm_condition(record.get("ruling") or "")
+            if condition:
+                pending_rearm.append((_text(
+                    f"Record whether the {REARM_MARKER} condition this item's own ruling "
+                    f"named has fired, and reopen this when it has: {condition}", 500),
+                    disowning))
+        if would_file and not disowning:
             new = B.new_item(_text(follow.get("name"), 140),
                              f"{str(follow.get('body') or '').strip()}\n\n"
                              f"Filed by owed-check from #{item_id}'s owed entry: "
@@ -1851,6 +1952,28 @@ def apply_verdict(path: Path, entries: list[dict], answers: list[dict], *, item_
                          # Only when the legacy tag is there: a removal with
                          # nothing to remove would write `tags: []`.
                          remove_tags=(B.NEEDS_HUMAN_TAG,) if legacy else ())
+    # #4619: a filing refused by its own ruling has no child to carry a RE-ARM
+    # condition, so the condition becomes a scheduled owed row HERE. After the write
+    # above, deliberately: that write replaces `owed` with `keep`, so the same
+    # `add_owed` call made inside the loop would be erased by it and the condition
+    # would go back to being prose in a settled `ruling:` string — #4185's failure,
+    # which is what the block at the filing site exists to prevent. An item that
+    # closes with this row on it is still visited: `owing_items` reads closed items
+    # too, and a row is what makes it due.
+    if pending_rearm:
+        from datetime import timedelta
+        scheduled = add_owed(
+            path, [w for w, _ in pending_rearm], kind="check",
+            recheck_after=recheck_date(
+                (now + timedelta(days=REARM_RECHECK_DAYS)).isoformat(), now),
+            activity="owed-check: a ruling disowned its own follow-up ("
+                     + "; ".join(sorted({p for _, p in pending_rearm}))
+                     + "); the RE-ARM condition it named is scheduled on this item "
+                       "instead of on a child that was never filed")
+        notes.append(f"#{item_id} re-arm condition from a disowning ruling scheduled on "
+                     f"this item" if scheduled else
+                     f"#{item_id} named a re-arm condition that is not a demand: refused, "
+                     f"the ruling stands unre-armed")
     moved = ""
     if item_move == "reopen" and is_open:
         try:

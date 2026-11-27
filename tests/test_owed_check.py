@@ -3187,3 +3187,197 @@ def test_a_discharge_quoting_a_closed_items_clause_leaves_it_derivable(isolated)
                 if r.get("what") == _CITED_ELSEWHERE], "a settle line for B's clause landed"
     assert [e["what"] for e in O.derived_entries(fm_of(b))] == [_CITED_ELSEWHERE], \
         "the quoted clause is no longer derivable on the item that owns it"
+
+
+# ── #4619: a ruling that disowns its own follow-up files no child ───────────
+#
+# The owed-check ruling `20261126_195355_owedcheck_b0c5` on #4333 opens "No
+# follow_up filed: …" and its front matter carries `follow_up: 4618` two lines
+# below it. The child it filed was well formed — a real imperative name and a real
+# spec — so `is_real_follow_up` and `is_derived_name` each passed it legitimately,
+# and #4618 then bought a sweep (2026-11-27T04:12:42, `worth=low size=small`,
+# parked) and an autotriage close (04:30:36, `stale`) against a decision its own
+# parent record had already refused. What was missing was never the child's shape:
+# `record["ruling"]` is in scope at the filing site and no gate read it.
+
+#: The `follow_up` object that answer carried, verbatim in shape. The first half of
+#: these nodes asserts the shape gates still PASS it, so every refusal below is the
+#: ruling's doing and not a shape test's.
+_DISOWNED_FOLLOW = {
+    "name": ("make a `djev`-backed pre-check that blocks an overreaching headline "
+             "before it reaches the board"),
+    "body": ("Scope (small): a pre-flight check, not a rewrite - add one guard that scores a "
+             "draft #2258-style headline (the artifact stdout plus the proposed headline "
+             "sentence) with djev_decide on the existing djev GPU-2 path, emitting two "
+             "yes/no questions."),
+}
+
+#: #4333's ruling, verbatim, the live witness for the class.
+_DISOWNING_RULING = (
+    "No follow_up filed: baseline_problem already refuses any N mismatch against the graded "
+    "M, cmd_baseline records n over that same intersection, and report --only's help has "
+    "named the landed count since 37a05b4f — one prose line is not worth re-gating a landed "
+    "round, which that round's own findings forbid.")
+
+#: The 13 spellings the same replay counted over `~/obsidian/backlog/*.md` on
+#: 2026-11-26 — 188 matches across the board, of which the snake_case literal the
+#: witness happens to use is 27. A check keyed to that literal covers a seventh.
+_DISOWNING_LEADS = ("No follow_up filed", "No follow-up filed", "No new item filed",
+                    "No item filed", "No follow-up is filed", "No item is filed",
+                    "No follow_up is filed", "No new item needed", "No new item is filed",
+                    "Nothing further to file", "No new item is warranted",
+                    "No new item is needed", "No follow-up needed")
+
+
+def _shape_passes(follow: dict) -> None:
+    """Pin that the child is refused by its ruling, not by a shape gate: asked the
+    same two reductions the filing site makes (`is_real_follow_up`, and
+    `is_derived_name` on `_text(name, 140)`), it passes both."""
+    assert O.is_real_follow_up(follow), \
+        "the child must stay shape-valid, or this is no longer the #4619 class"
+    assert not B.is_derived_name(O._text(follow["name"], 140)), \
+        "the child must not be the derived-witness shape either"
+
+
+def test_a_ruling_that_disowns_a_follow_up_files_no_child(isolated):
+    """Clause 1. The #4333 answer, replayed: a `ruling` outcome whose text opens with
+    its own verdict that nothing is being filed, beside a well-formed `follow_up`.
+
+    Nothing is created, and the settled record keeps no `follow_up` key — the shape
+    the live witness had no right to carry. The ruling itself is still recorded: the
+    entry is settled, only the child is refused.
+    """
+    _shape_passes(_DISOWNED_FOLLOW)
+    p, entries = _owing(isolated, 4333, ["reword report --only's help to the landed N semantics"])
+    before = sorted(x.name for x in isolated.glob("*.md"))
+    out = O.apply_verdict(p, entries, [
+        {"n": 1, "outcome": "ruling", "ruling": _DISOWNING_RULING,
+         "follow_up": _DISOWNED_FOLLOW}], item_id=4333)
+    assert out["filed"] == [], f"a disowned child was filed: {out['filed']}"
+    assert sorted(x.name for x in isolated.glob("*.md")) == before, \
+        "a refused child still put a file on the board"
+    rec = fm_of(p)["owed_settled"][0]
+    assert rec["outcome"] == "ruling" and rec["ruling"] == _DISOWNING_RULING, \
+        "the ruling has to be recorded even when its child is refused"
+    assert "follow_up" not in rec, f"the settled record still booked a child: {rec}"
+    assert any("follow-up not filed" in note and "no follow_up filed" in note
+               for note in out["notes"]), out["notes"]
+    assert O.ruling_disowns_follow_up(_DISOWNING_RULING) == "no follow_up filed"
+
+
+@pytest.mark.parametrize("lead", _DISOWNING_LEADS)
+def test_every_observed_disownment_phrasing_reads_as_one_verdict(lead):
+    """Clause 2. The arms are the corpus's vocabulary, not the witness's literal: the
+    snake_case spelling and `no new item filed` (36 occurrences on the live board, the
+    most common of the set) decide identically, as does the `is`-inserted and the
+    `needed`/`warranted` form, and a decoration wrapped around the verdict — markdown
+    emphasis, a quote, a list marker — does not hide it.
+    """
+    for text in (f"{lead}: the instrument is already correct and the guard is shipped.",
+                 f"**{lead}** — the deterministic arms cover it.",
+                 f'{lead}." The prior sentence closed the entry.',
+                 f"- {lead}: bullet form, same verdict.",
+                 f"Fixed the loader. {lead}: second sentence, same verdict."):
+        assert O.ruling_disowns_follow_up(text), text
+    assert O.ruling_disowns_follow_up(
+        "Nothing further to file: the sweep already parks this shape.") == "nothing further to file"
+    assert O.ruling_disowns_follow_up("") == ""
+    assert O.ruling_disowns_follow_up(None) == ""
+    assert O.ruling_disowns_follow_up(
+        "The guard is shipped and the measurement landed; nothing here needs another item."
+    ) == "", "a ruling that files nothing but says so without a disownment must not read as one"
+
+
+def test_a_ruling_quoting_an_earlier_disownment_still_files(isolated):
+    """Clause 3. Anchoring is the whole design: a ruling may REFER to a past pass's
+    `no item filed` while naming a real next step, and 28 of the 49 rulings that
+    contain such a phrasing put it somewhere other than a sentence head — an
+    unanchored substring test would have refused all 28 filings.
+    """
+    quoting = ("The 09-30 owed pass wrote no item filed and was wrong about this one: the "
+               "guard is still missing, so land it and pin it with a node in this file.")
+    assert O.ruling_disowns_follow_up(quoting) == "", "a mid-sentence reference is not a verdict"
+    hedged = ("The verdict stands: no item filed is what the last pass concluded, but the "
+              "help text still names the wrong count, so reword it and re-run the check.")
+    assert O.ruling_disowns_follow_up(hedged) == "", "a colon-introduced reference is not a verdict"
+    hyphenated = ("The 09-30 pass left a no-item-filed note that this pass supersedes; add "
+                  "the guard and assert it here.")
+    assert O.ruling_disowns_follow_up(hyphenated) == ""
+
+    p, entries = _owing(isolated, 44, ["the help text still names the wrong count"])
+    out = O.apply_verdict(p, entries, [{"n": 1, "outcome": "ruling", "ruling": quoting,
+                                        "follow_up": _DISOWNED_FOLLOW}], item_id=44)
+    assert len(out["filed"]) == 1, f"the anchor ate a real filing: {out['filed']}"
+    assert fm_of(p)["owed_settled"][0]["follow_up"] == out["filed"][0]
+
+
+def test_a_ruling_that_does_not_disown_files_the_same_child_unchanged(isolated):
+    """Clause 4. The guard is additive: the SAME name and body as the disowned child,
+    under a ruling that says nothing about filing, files exactly as it did before —
+    one draft, linked from the settled record, no refusal note. And a refused child
+    does not spend a `spawn_cap` slot: the disowning entry is skipped, the next one
+    still files.
+    """
+    plain = ("baseline_problem already refuses any N mismatch against the graded M, so the "
+             "residual is prose: reword report --only's help to name the landed count.")
+    assert O.ruling_disowns_follow_up(plain) == ""
+    p, entries = _owing(isolated, 45, ["the residual is prose only"])
+    out = O.apply_verdict(p, entries, [{"n": 1, "outcome": "ruling", "ruling": plain,
+                                        "follow_up": _DISOWNED_FOLLOW}], item_id=45)
+    assert len(out["filed"]) == 1, f"a non-disowning ruling stopped filing: {out['filed']}"
+    rec = fm_of(p)["owed_settled"][0]
+    assert rec["follow_up"] == out["filed"][0]
+    assert not any("follow-up not filed" in note for note in out["notes"]), out["notes"]
+
+    both = _owing(isolated, 46, ["rule on the disowning half", "rule on the fileable half"])[0]
+    out2 = O.apply_verdict(both, O.entries_of(fm_of(both)), [
+        {"n": 1, "outcome": "ruling", "ruling": _DISOWNING_RULING, "follow_up": _DISOWNED_FOLLOW},
+        {"n": 2, "outcome": "ruling", "ruling": plain, "follow_up": _DISOWNED_FOLLOW}],
+        item_id=46, spawn_cap=1)
+    assert len(out2["filed"]) == 1, f"the disowned entry spent the one slot: {out2['filed']}"
+    assert fm_of(both)["owed_settled"][1]["follow_up"] == out2["filed"][0], \
+        "the slot went to the disowning entry instead of the fileable one"
+
+
+def test_a_disowning_ruling_schedules_its_rearm_condition_on_the_parent(isolated):
+    """Clause 5. Refusing the child must not drop the condition: the RE-ARM arm and
+    its `add_owed` live INSIDE the filing branch, and for `out == "ruling"` there is no
+    `elif` fallthrough, so a naive "skip the file" is how #4185's condition became
+    permanent prose. Here the condition lands as a scheduled owed row on the PARENT,
+    with the disownment named on the item's activity log.
+
+    The row also has to survive the pass's own write: `updates` replaces the whole
+    `owed` list with `keep`, so a row appended during the loop is erased by it — which
+    is what `pending_rearm` is for, and this node is the only thing standing between a
+    refactor and #4185 again.
+    """
+    now = O._now()
+    ruling = ("No follow_up filed: the instrument is correct as it stands and one prose line "
+              "is not worth re-gating a landed round. RE-ARM only on a measured fire: >=1 "
+              "board item again carrying both a disowning ruling and a filed follow_up id in "
+              "one week of owed-check traffic.")
+    p, out = _ruled(isolated, ["does the filing gate still leak a disowned child"], ruling,
+                    follow=_DISOWNED_FOLLOW, now=now)
+    assert out["filed"] == [], f"the disowned child was filed: {out['filed']}"
+    assert "follow_up" not in fm_of(p)["owed_settled"][0]
+
+    rows = O.entries_of(fm_of(p))
+    assert len(rows) == 1, f"the parent carries {len(rows)} owed rows, expected the one condition"
+    row = rows[0]
+    assert O.REARM_MARKER in row["what"], row["what"]
+    assert "BENCH" not in row["what"] and "disowning ruling" in row["what"], \
+        f"the scheduled row is not the parent's own condition: {row['what']}"
+    assert row["kind"] == "check"
+    scheduled = row.get("recheck_after")
+    assert scheduled, f"the parent's row has no schedule at all: {row}"
+    at = datetime.fromisoformat(str(scheduled).replace("Z", "+00:00"))
+    assert at > now, f"recheck_after {scheduled} is not in the future"
+    assert at <= now + timedelta(days=O.MAX_RECHECK_DAYS), \
+        f"recheck_after {scheduled} sits past MAX_RECHECK_DAYS = {O.MAX_RECHECK_DAYS}"
+
+    assert any("re-arm condition from a disowning ruling" in note for note in out["notes"]), \
+        out["notes"]
+    activity = "; ".join(str(a) for a in (fm_of(p).get("activity_log") or []))
+    assert "disowned its own follow-up" in activity, \
+        "the item's own log has to name why nothing was filed"
+    assert "no follow_up filed" in activity, "the note must quote the disownment it read"
