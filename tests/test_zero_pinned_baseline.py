@@ -12,23 +12,33 @@ itself.
   * **max, not min.** A task with one 0.00 trial and one 0.50 trial can score; the
     invariant is about tasks whose BEST trial is nothing. A min reads the same fixture
     as a task that always fails, and inflates the count.
-  * **null is not zero.** 3,491 of the live ledger's 11,863 per-trial rows carry
-    ``"composite_score": null`` (the not-rankable shape of #416/#646/#698), and all of
-    them sit inside a default-length window. Coercing null to ``0.0`` is a one-token
-    bug that reports a far larger count than 9 and looks entirely reasonable.
-  * **the window is part of the number.** Measured over 30 days the live ledger gives
-    9 tasks; over 7 it gives 11. A module that carried a second window literal, or a
-    report line that printed a count without the window it came from, would let one of
+  * **null is not zero.** 8,225 of the live ledger's 30,460 per-trial rows carry
+    ``"composite_score": null`` (the not-rankable shape of #416/#646/#698) as measured
+    on 2026-11-27, and only 3,486 of those 8,225 sit inside a default-length window —
+    so the whole-file null rate and the window's not-rankable population are different
+    numbers and both are pinned below. Coercing null to ``0.0`` is a one-token bug that
+    reports a far larger count than the declared 2 and looks entirely reasonable.
+  * **the window is part of the number.** Anchored on 19 October 2026 the live ledger
+    gave 9 pinned tasks over 30 days and 11 over 7; anchored on 2026-11-27 it gives 2
+    either way, over 21 scored tasks. A module that carried a second window literal, or
+    a report line that printed a count without the window it came from, would let one of
     those be forwarded as the other — which is how #706's figure got separated from
     its definition the first time. The window is one literal in one constant, counted
     by AST below rather than trusted.
-  * **the declaration travels with its date and its command.** 9 was ruled on
-    2026-10-19 over the all-rows definition; the same filter restricted to
-    ``BASELINE*`` variants returned 10 that day. A constant of 9 whose comment does not
-    say which of the two produced it is a number nobody can re-check.
+  * **a task can leave the pinned list without learning to score.** Six of the nine
+    tasks the October ruling declared pinned had 581 in-window trials each on
+    2026-11-27 and not one numeric score among them, so the count fell to 2 while
+    nothing improved. The population printed beside the count exists for that, and the
+    nodes below pin that it is window-scoped, score-exclusive, and never confused with
+    the whole-file null counter.
+  * **the declaration travels with its date and its command.** 2 was ruled on
+    2026-11-27 over the all-rows definition, replacing the 9 that was ruled on 19
+    October 2026 over 31 scored tasks — when the same filter restricted to ``BASELINE*``
+    variants returned 10. A constant whose comment does not say which of the two
+    produced it is a number nobody can re-check.
 
 The CLI is driven as a subprocess with ``--ledger``/``--now``, because resolving the
-default ledger is the one thing a test must NOT do to the live 13 MB store, and
+default ledger is the one thing a test must NOT do to the live 36 MB store, and
 ``tests/conftest.py`` redirects ``LLOYD_DATA`` to a scratch root anyway — so the
 default is pinned as a PATH SHAPE (it ends with the research-ledger relpath), never as
 a read.
@@ -48,8 +58,9 @@ ROOT = Path(__file__).resolve().parent.parent
 SCRIPT = ROOT / "scripts" / "maintenance" / "zero_pinned_baseline.py"
 
 #: The window anchor every fixture is stamped against, so no node moves when the clock
-#: does. #706's constant was ruled on this date, over this instant's window.
-NOW = datetime(2026, 10, 19, 12, 0, 0, tzinfo=timezone.utc)
+#: does. The date the owed-check ruling re-declared the constant, over this instant's
+#: window; the stamps below are all relative to it, so any anchor would do.
+NOW = datetime(2026, 11, 27, 12, 0, 0, tzinfo=timezone.utc)
 
 
 @pytest.fixture(scope="module")
@@ -77,7 +88,7 @@ def _stamp(days_ago: float, moment: datetime = NOW) -> str:
 
 def _row(task_id: str, score, days_ago: float = 1.0, **extra) -> dict:
     """One per-trial ledger row: the keys a scoring reader touches, nothing else."""
-    row = {"round_id": "R_20261019_000000", "variant_id": "V_one", "task_id": task_id,
+    row = {"round_id": "R_20261127_000000", "variant_id": "V_one", "task_id": task_id,
            "created_at": _stamp(days_ago), "composite_score": score}
     row.update(extra)
     return row
@@ -85,7 +96,7 @@ def _row(task_id: str, score, days_ago: float = 1.0, **extra) -> dict:
 
 def _undated_row(task_id: str, **extra) -> dict:
     """A row with no ``composite_score`` key AT ALL — the other null shape."""
-    row = {"round_id": "R_20261019_000000", "variant_id": "V_one", "task_id": task_id,
+    row = {"round_id": "R_20261127_000000", "variant_id": "V_one", "task_id": task_id,
            "created_at": _stamp(2.0)}
     row.update(extra)
     return row
@@ -181,12 +192,97 @@ def test_event_rows_are_counted_and_never_scored(zpb):
     reader keyed on ``task_id`` alone would pull them in.
     """
     rows = [_row("bench_real", 0.0),
-            {"event": "decision", "round_id": "R_20261019_000000", "task_id": "bench_real",
+            {"event": "decision", "round_id": "R_20261127_000000", "task_id": "bench_real",
              "created_at": _stamp(1.0), "composite_score": 1.0, "should_promote": False}]
     m = zpb.measure(rows, window_days=30, now=NOW)
     assert list(m.pinned) == ["bench_real"]
     assert m.rows_event == 1
     assert m.trials_used == 1
+
+
+# ------------------------------------------ the not-rankable population (#4646) --
+def test_a_task_whose_in_window_trials_are_all_null_prints_beside_the_pinned_count(zpb):
+    """One null-only task and one scored task: the line names the first, with its
+    in-window row count, and never the second.
+
+    ``bench_all_null`` ran twice in the window and the judge scored it neither way (the
+    #416/#646/#698 not-rankable shape); ``bench_scores`` ran once at 0.50;
+    ``bench_pinned`` ran once at 0.00. The count is therefore one and the denominator is
+    two, and the task that belongs to NEITHER of those populations is ``bench_all_null``
+    — six real benches are in that shape right now, which is why the count alone fell
+    from 9 to 2 while nothing about them improved. A line that printed only
+    "measured 1 of 2 tasks" is the report that reads as a recovery.
+    """
+    rows = [_row("bench_all_null", None), _row("bench_all_null", None, days_ago=4.0),
+            _row("bench_scores", 0.5), _row("bench_pinned", 0.0)]
+    m = zpb.measure(rows, window_days=30, now=NOW)
+    assert m.pinned == ("bench_pinned",) and m.tasks_scored == 2
+    assert m.not_rankable == ("bench_all_null",)
+    assert m.not_rankable_rows_by_task == {"bench_all_null": 2}
+    assert m.not_rankable_count == 1 and m.not_rankable_rows == 2
+    assert "bench_all_null" not in m.pinned, "a task with no score is never pinned"
+    line = zpb.report_line(m)
+    assert "\n" not in line, "the population rides on the same line as the count"
+    assert "bench_all_null:2" in line, (
+        "named beside the count, with how many in-window rows carry no score")
+    assert "not-rankable in window: 1 task(s) / 2 rows" in line
+    assert "bench_scores" not in line, "a scored task is not part of the population"
+
+
+def test_the_not_rankable_population_is_window_scoped_and_score_exclusive(zpb):
+    """Null rows stamped outside the window attribute to nobody, and a task with both a
+    null and a numeric in-window trial is a scored task, never a population member.
+
+    Five tasks, one pass. ``bench_all_null`` has one in-window null row and nothing
+    else: named. ``bench_null_out`` has its only null row stamped 45 days back: not
+    named. ``bench_null_undated`` has a null row with no parseable stamp: not named.
+    ``bench_null_and_score`` has an in-window null row AND an in-window 0.75: it belongs
+    to ``tasks_scored`` alone, because "not-rankable" is a claim about every trial in
+    the window and one numeric score refutes it. ``bench_pinned`` is the pinned one.
+    """
+    rows = [_row("bench_all_null", None),
+            _row("bench_null_out", None, days_ago=45.0),
+            {**_row("bench_null_undated", None), "created_at": ""},
+            _row("bench_null_and_score", None), _row("bench_null_and_score", 0.75),
+            _row("bench_pinned", 0.0)]
+    m = zpb.measure(rows, window_days=30, now=NOW)
+    assert m.not_rankable == ("bench_all_null",), (
+        "only the task whose in-window trials are all null, and no others")
+    assert m.not_rankable_rows_by_task == {"bench_all_null": 1}
+    assert m.tasks_scored == 2 and list(m.pinned) == ["bench_pinned"]
+    assert "bench_null_and_score" not in m.not_rankable, (
+        "a task with one numeric in-window trial is in the scored denominator only")
+    assert m.rows_null_score == 4, "every null row in the file, whichever window it sits in"
+    assert m.rows_null_unplaced == 2, "the out-of-window null row and the undated one"
+    assert m.rows_undated == 0, (
+        "an undated null row is attributed to nobody, not also counted as an undated trial")
+
+
+def test_rows_null_score_stays_whole_file_while_the_population_counts_the_window(zpb):
+    """One null row inside the window and one outside it: the counter reports 2, the
+    population reports 1 task over 1 row, and neither task is pinned.
+
+    These two denominators measure DIFFERENT THINGS on purpose. ``rows_null_score`` is
+    the file's null rate and the number ``--json`` has published since #3022, so moving
+    the null branch below the window check would silently redefine a published figure —
+    and no other node here would catch it, because the older null fixtures place every
+    null row in-window and pass under either reading. This node is the one that cannot:
+    it puts a row on each side of the boundary and requires 2 and 1. The second half is
+    the coercion this whole module exists to refuse: a pile of null rows pins nothing.
+    """
+    m = zpb.measure([_row("bench_a", None), _row("bench_b", None, days_ago=45.0)],
+                    window_days=30, now=NOW)
+    assert m.rows_null_score == 2, "whole-file, unchanged by where the window fell"
+    assert m.not_rankable == ("bench_a",) and m.not_rankable_count == 1
+    assert m.not_rankable_rows == 1 and m.not_rankable_rows_by_task == {"bench_a": 1}
+    assert m.rows_null_unplaced == 1
+    assert m.pinned == () and m.tasks_scored == 0, "a null row is not a 0.00 trial"
+
+    heavy = zpb.measure([_row("bench_a", None, days_ago=float(day))
+                         for day in (1.0, 2.0, 3.0, 4.0)], window_days=30, now=NOW)
+    assert heavy.pinned == (), "four null rows pin nothing, however many the window holds"
+    assert heavy.rows_null_score == 4 and heavy.not_rankable == ("bench_a",)
+    assert heavy.not_rankable_rows == 4
 
 
 # ---------------------------------------------------------------- clause 3 --
@@ -260,15 +356,20 @@ def test_the_default_anchor_is_now_so_a_fresh_run_measures_a_fresh_window(zpb):
 
 
 # ---------------------------------------------------------------- clause 4 --
-def test_the_declared_baseline_constant_is_nine_and_its_comment_names_706_and_the_command(zpb):
-    """``DECLARED_BASELINE_ZERO_PINNED == 9``, and its comment can be re-checked.
+def test_the_declared_baseline_constant_is_two_and_its_comment_names_706_and_the_command(zpb):
+    """``DECLARED_BASELINE_ZERO_PINNED == 2``, and its comment can be re-checked.
 
-    9 is a dated ruling (#706, 2026-10-19), so the constant is only worth having if the
-    text beside it names the item it came from and the exact command that reproduces it
-    — a bare 9 in a module is the number that #706's owed entry found with no referent.
+    2 is a dated ruling: #706's constant, re-declared by the owed-check ruling of
+    2026-11-27 over 21 tasks with a scored trial in the window, replacing the 9 ruled on
+    19 October 2026 over 31, definition unchanged. The constant is only worth having
+    because the text beside it names the item it came from and the exact command that
+    reproduces it — a bare number in a module is the thing #706's owed entry found with
+    no referent — and pinning the number and its date as one pair is what makes a
+    re-declaration a change somebody has to notice, rather than an edit that quietly
+    agrees with whatever the sliding window measures today.
     """
-    assert zpb.DECLARED_BASELINE_ZERO_PINNED == 9
-    assert zpb.DECLARED_ON == "2026-10-19"
+    assert zpb.DECLARED_BASELINE_ZERO_PINNED == 2
+    assert zpb.DECLARED_ON == "2026-11-27"
 
     lines = SCRIPT.read_text(encoding="utf-8").splitlines()
     declared_at = next(i for i, line in enumerate(lines)
@@ -316,17 +417,26 @@ def test_the_report_line_carries_baseline_and_window_and_count_and_ids_on_one_li
 def test_a_moved_count_prints_drift_and_still_reads_as_a_measurement_not_an_alarm(zpb):
     """Measured != declared: the drift line names baseline and window and exits level.
 
-    The 9 was ruled on one day and the window slides daily, so a moved count is
+    The declared 2 was ruled on one day and the window slides daily, so a moved count is
     evidence for the next ruling. A report that alarmed on it would be crying wolf by
     arithmetic; one that stayed SILENT would hide the move.
+
+    The fixture measures THREE pinned tasks — deliberately not the declared two, because
+    a drift node whose fixture equals the constant can no longer fail — beside one task
+    whose only in-window trial is null, which pins that the population re-declared by
+    #4646 does not leak into the count the drift compares.
     """
-    rows = [_row("bench_a", 0.0), _row("bench_b", 0.0)]
+    rows = [_row("bench_a", 0.0), _row("bench_b", 0.0), _row("bench_c", 0.0),
+            _row("bench_all_null", None)]
     m = zpb.measure(rows, window_days=30, now=NOW)
+    assert m.pinned_count == 3, "three pinned, so the fixture still disagrees with a 2"
+    assert m.not_rankable == ("bench_all_null",), (
+        "the not-rankable task is named beside the count, not added to it")
     assert m.agrees_with_declaration is False
     drift = zpb.drift_line(m)
     assert drift is not None
     assert f"declared {zpb.DECLARED_BASELINE_ZERO_PINNED}" in drift
-    assert "30 days" in drift and "measured 2" in drift
+    assert "30 days" in drift and "measured 3" in drift
     assert zpb.drift_line(zpb.measure(
         [_row(f"bench_{i}", 0.0) for i in range(zpb.DECLARED_BASELINE_ZERO_PINNED)],
         window_days=30, now=NOW)) is None, "at the declared count, no drift sentence"
@@ -336,19 +446,26 @@ def test_a_moved_count_prints_drift_and_still_reads_as_a_measurement_not_an_alar
 def test_the_cli_prints_the_baseline_window_count_and_ids_on_one_line(zpb, tmp_path):
     """End to end across the process boundary: --ledger, --now, and the report line.
 
-    Five rows on disk — two tasks pinned, one scoring, one null, and one whose only
-    trial sits outside the window — driven through ``main`` as a subprocess, because the
-    CLI is what a person or a nightly report runs and the seam between argparse and the
-    counter has never been crossed by anything else.
+    Seven rows on disk — three tasks pinned, one scoring, one whose only in-window trial
+    is null, and one whose only trial sits outside the window — driven through ``main``
+    as a subprocess, because the CLI is what a person or a nightly report runs and the
+    seam between argparse and the counter has never been crossed by anything else.
+
+    Three pinned against a declared two is deliberate: a CLI node whose fixture agreed
+    with the constant could no longer print the drift sentence, and the drift line is
+    what tells a reader the declaration is stale rather than the corpus broken. The same
+    line has to carry the not-rankable task beside the count, because the text report is
+    the half a person pastes into a note.
     """
     ledger = _ledger(tmp_path, [
         _row("bench_pinned_one", 0.0),
         _row("bench_pinned_two", 0.0), _row("bench_pinned_two", 0.0),
+        _row("bench_pinned_three", 0.0),
         _row("bench_scoring", 0.6),
         _row("bench_null", None),
         _row("bench_out_of_window", 0.0, days_ago=45.0),
     ])
-    out = _run_cli("--ledger", str(ledger), "--now", "2026-10-19T12:00:00Z")
+    out = _run_cli("--ledger", str(ledger), "--now", "2026-11-27T12:00:00Z")
     assert out.returncode == 0, out.stderr
     report = [line for line in out.stdout.splitlines()
               if line.startswith("zero-pinned #706")]
@@ -356,40 +473,56 @@ def test_the_cli_prints_the_baseline_window_count_and_ids_on_one_line(zpb, tmp_p
     line = report[0]
     assert f"declared baseline {zpb.DECLARED_BASELINE_ZERO_PINNED}" in line
     assert "30 days" in line
-    assert "measured 2 of 3 tasks" in line
+    assert "measured 3 of 4 tasks" in line
     assert "bench_pinned_one" in line and "bench_pinned_two" in line
+    assert "bench_pinned_three" in line
     assert "bench_scoring" not in line and "bench_out_of_window" not in line
-    assert "#706 baseline moved" in out.stdout, "2 measured against a declared 9 is drift"
+    assert "not-rankable in window: 1 task(s) / 1 row" in line, (
+        "the task whose only in-window trial is null prints beside the count")
+    assert "bench_null:1" in line, "named with its in-window not-rankable row count"
+    assert "#706 baseline moved" in out.stdout, "3 measured against a declared 2 is drift"
 
 
 def test_the_cli_json_carries_the_same_count_and_the_row_denominators(zpb, tmp_path):
-    """``--json`` is stdout-pure and reports the drops, so a nightly row can be honest.
+    """``--json`` is stdout-pure and reports the drops and the not-rankable population,
+    so a nightly row can be honest.
 
-    The same fixture through ``--json``: the pinned list must agree with the text line's,
-    and the denominators must show the null row and the out-of-window row as DROPPED
-    counts rather than as tasks. A report whose stdout is not one parseable object is a
-    report no nightly job can read.
+    The same seven-row fixture through ``--json``: the pinned list must agree with the
+    text line's, the out-of-window row must show as a DROPPED count rather than a task,
+    and the null-only task must arrive as a named population with its in-window row
+    count — the machine-readable half of the same fact the text line prints, and the
+    half a scheduled report would read. A report whose stdout is not one parseable
+    object is a report no nightly job can read.
     """
     ledger = _ledger(tmp_path, [
         _row("bench_pinned_one", 0.0),
         _row("bench_pinned_two", 0.0), _row("bench_pinned_two", 0.0),
+        _row("bench_pinned_three", 0.0),
         _row("bench_scoring", 0.6),
         _row("bench_null", None),
         _row("bench_out_of_window", 0.0, days_ago=45.0),
     ])
-    out = _run_cli("--ledger", str(ledger), "--now", "2026-10-19T12:00:00Z", "--json")
+    out = _run_cli("--ledger", str(ledger), "--now", "2026-11-27T12:00:00Z", "--json")
     assert out.returncode == 0, out.stderr
     doc = json.loads(out.stdout)
-    assert doc["pinned"] == ["bench_pinned_one", "bench_pinned_two"]
-    assert doc["pinned_count"] == 2
-    assert doc["tasks_scored"] == 3
+    assert doc["pinned"] == ["bench_pinned_one", "bench_pinned_three",
+                             "bench_pinned_two"]
+    assert doc["pinned_count"] == 3, "three, so the drift stays a drift at a declared 2"
+    assert doc["tasks_scored"] == 4
     assert doc["window_days"] == zpb.DEFAULT_WINDOW_DAYS
     assert doc["declared_baseline"] == zpb.DECLARED_BASELINE_ZERO_PINNED
     assert doc["declared_on"] == zpb.DECLARED_ON
     assert doc["agrees_with_declaration"] is False
     assert doc["rows_null_score"] == 1
+    assert doc["rows_null_unplaced"] == 0, "the one null row is inside the window"
+    assert doc["tasks_not_rankable"] == 1
+    assert doc["not_rankable"] == ["bench_null"], (
+        "the null-only task is its own population, not a pinned task and not a scored one")
+    assert doc["not_rankable_rows"] == 1
+    assert doc["not_rankable_rows_by_task"] == {"bench_null": 1}
+    assert "bench_scoring" not in doc["not_rankable"], "a scored task is never in it"
     assert doc["rows_outside_window"] == 1
-    assert doc["rows_read"] == 6
+    assert doc["rows_read"] == 7
     assert doc["ledger"] == str(ledger)
 
 

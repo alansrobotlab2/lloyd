@@ -16,9 +16,10 @@ task and no gate, report or test would have anything to notice.
 WHAT A TASK HAS TO DO TO BE PINNED
     The unit is the per-trial row of the research ledger: one row is one trial of one
     task by one variant in one round (a row with no ``event`` key — the ``spec`` /
-    ``split`` / ``round_summary`` / ``decision`` rows are 929 of the file's 12,792 and
-    carry no score). A task is pinned when the MAXIMUM ``composite_score`` over its
-    trials stamped inside the trailing window is EXACTLY 0.00 — the best thing it
+    ``split`` / ``round_summary`` / ``decision`` rows are 2,357 of the file's 32,817 as
+    measured on the live ledger on 2026-11-27, and carry no score). A task is pinned when
+    the MAXIMUM ``composite_score`` over its trials stamped inside the trailing window is
+    EXACTLY 0.00 — the best thing it
     managed in the window is nothing, which is what "always fails" means. Max, not
     min: one 0.00 trial beside a 0.50 trial is a task that can score, and a min would
     file it as broken. Equality is exact and carries no epsilon, because the
@@ -26,28 +27,51 @@ WHAT A TASK HAS TO DO TO BE PINNED
     pinned and must not read as if it were.
 
 THE NULL ROWS ARE THE FILTER THAT DECIDES THE NUMBER
-    Of the ledger's 11,863 per-trial rows, 3,491 carry ``"composite_score": null`` —
-    the not-rankable shape ``scripts/autoresearch/judge.py`` writes for #416/#646/#698
-    — and every one of them sits inside a default-length window. A reader that coerced
-    null to ``0.0`` would report a far larger count than 9 and look plausible doing it,
-    so a null (or absent, or non-numeric) score is DROPPED, never read as zero. Same
-    selector as ``scripts/autoresearch/promotion_fp_rate.py::per_task_rows``:
+    Of the ledger's 30,460 per-trial rows (its 32,817 less the 2,357 event rows, all
+    measured on the live ledger on 2026-11-27), 8,225 carry ``"composite_score": null``
+    — the not-rankable shape ``scripts/autoresearch/judge.py`` writes for
+    #416/#646/#698 — and only 3,486 of those 8,225 sit inside a default-length window.
+    A reader that coerced null to ``0.0`` would report a far larger count than the
+    declared 2 and look plausible doing it, so a null (or absent, or non-numeric) score
+    is DROPPED, never read as zero. Same selector as
+    ``scripts/autoresearch/promotion_fp_rate.py::per_task_rows``:
     ``not row.get("event") and row.get("composite_score") is not None``.
 
-WHAT 9 IS, AND WHAT IT IS NOT
+THE NOT-RANKABLE POPULATION IS PART OF THE NUMBER, NOT A FOOTNOTE
+    A task can leave the pinned list without learning to score: its in-window trials may
+    all be null, which is neither a zero nor a score. Six of the nine tasks the October
+    ruling declared pinned did exactly that on 2026-11-27 — 581 in-window trials each,
+    every one of them null — and the count fell from 9 to 2 while nothing about those
+    benches improved. So a falling count is only readable beside the population: every
+    task with at least one in-window null row and NO in-window numeric score, with how
+    many such rows each has. That population is window-scoped (the same ``created_at``
+    and ``task_id`` checks the scored path applies) and score-exclusive (a task with one
+    numeric in-window trial belongs to the scored denominator, never here), and a member
+    of it is never in ``pinned`` — it has no score to take the max of.
+
+WHAT THE DECLARED NUMBER IS, AND WHAT IT IS NOT
     ``DECLARED_BASELINE_ZERO_PINNED`` below is a dated ruling, not a property of the
-    tree. The window slides every day, and the split file rotated two tasks on the day
-    the nine were counted — one of them, ``bench_005_replay_memory_update``, is itself
-    one of the nine. A measured count that no longer equals the declared one is a
-    re-declaration owed to a person (with its date and its definition), not a
-    regression this report alarms on, so it prints the drift and still exits 0. The
-    definition is the other half of the number: the same filter restricted to
-    ``variant_id.startswith("BASELINE")`` returned 10 on the day the constant was set,
-    because it adds ``bench_020_skill_inventory_coverage_gap``. #706's 2026-10-02
-    ruling used that BASELINE-only spelling; the 2026-10-19 ruling that chose the
-    constant chose all rows. This module is the all-rows definition, so the constant
-    and its command agree; a counter on the other one would disagree with its own
-    number.
+    tree. The window slides every day and the split file rotates tasks, so a measured
+    count that no longer equals the declared one is a re-declaration owed to a person or
+    the owed-check ruling (with its date and its definition), not a regression this
+    report alarms on — it prints the drift and still exits 0. Two rulings are in this
+    constant's history: 9 of 31 scored tasks, ruled on 19 October 2026; and 2 of 21,
+    ruled on 2026-11-27 — ``bench_019_skill_invocation_retired_schedule`` and
+    ``bench_020_skill_inventory_coverage_gap``. The 9→2 drop was NOT a recovery: six of
+    the nine went all-not-rankable in-window, three (``bench_016_audit_skill_dead_paths``,
+    ``bench_017_audit_unresolved_task_skills``, ``bench_026_contradiction_supersede_chain``)
+    have no in-window trial at all, and the two still pinned are different tasks — which
+    is why the population above prints beside the count rather than replacing it.
+    ``tasks_scored`` deliberately keeps its denominator meaning: a task named in the
+    population has no scored trial, so it is in neither denominator, and pinning the
+    share to a denominator that moves with the null flood is how the drop hid.
+    The definition is the other half of the number: the same filter restricted to
+    ``variant_id.startswith("BASELINE")`` returned 10 on the day the first constant was
+    set, because it adds ``bench_020_skill_inventory_coverage_gap``. #706's 2026-10-02
+    ruling used that BASELINE-only spelling; the ruling that chose the constant chose all
+    rows, and the 2026-11-27 ruling kept that definition unchanged. This module is the
+    all-rows definition, so the constant and its command agree; a counter on the other
+    one would disagree with its own number.
 
 NOT THIS MODULE
     ``scripts/autoresearch/coverage_leg.py`` prints a list of graded failures it calls
@@ -75,8 +99,10 @@ USAGE
                                                       [--window-days N] [--now ISO-8601]
                                                       [--json]
 
-    ``--json`` prints the measurement and its denominators as one object, for a
-    nightly report to read. There is deliberately no ``--record``: this report writes
+    ``--json`` prints the measurement and its denominators as one object — the pinned
+    ids, the tasks whose in-window trials are all not-rankable and how many such rows
+    each has, and the whole-file row drops — for a nightly report to read. There is
+    deliberately no ``--record``: this report writes
     nothing anywhere, so no run of it can become the input the next run measures
     against. Exit 0 whether or not the measurement agrees with the declaration — the
     only nonzero exit is a ledger that cannot be read or a stamp that cannot be
@@ -118,18 +144,23 @@ DEFAULT_LEDGER = PIPELINE_DIR / "research" / "ledger.jsonl"
 #: test_zero_pinned_baseline.py`` counts the numeric literals and fails on a second.
 DEFAULT_WINDOW_DAYS = 30
 
-#: #706's declared baseline: the number of bench tasks pinned at exactly 0.00 that a
-#: person ruled on 2026-10-19, over the all-rows definition above and a default-length
-#: trailing window — 9 of the 28 tasks with a scored trial in it. Recompute it with:
+#: #706's declared baseline: the number of bench tasks pinned at exactly 0.00 that the
+#: owed-check ruling of 2026-11-27 re-declared, over the all-rows definition above and a
+#: default-length trailing window — 2 of the 21 tasks with a scored trial in it
+#: (``bench_019_skill_invocation_retired_schedule``,
+#: ``bench_020_skill_inventory_coverage_gap``). Recompute it with:
 #:     python scripts/maintenance/zero_pinned_baseline.py
 #: which reads the live ledger over ``DEFAULT_WINDOW_DAYS`` and prints the ids beside
-#: this number. A measurement that disagrees is a re-declaration owed to a person with
-#: a new date, not a value for this constant to chase.
-DECLARED_BASELINE_ZERO_PINNED = 9
+#: this number. Read the not-rankable population printed with them before comparing two
+#: counts: the 9 this replaced (ruled on 19 October 2026 over 31 scored tasks) fell
+#: because six of those nine have no numeric in-window trial left, not because any of
+#: them learned to score. A measurement that disagrees is a re-declaration owed to a
+#: person or the owed-check ruling with a new date, not a value this constant chases.
+DECLARED_BASELINE_ZERO_PINNED = 2
 
 #: The date that ruling was made, printed beside every report so a reader can never
 #: mistake the dated measurement for a property of the tree.
-DECLARED_ON = "2026-10-19"
+DECLARED_ON = "2026-11-27"
 
 def default_ledger() -> Path:
     """The real ledger, resolved lazily so importing this module touches no disk.
@@ -182,7 +213,8 @@ def _score_of(row: Mapping[str, Any]) -> float | None:
     ``None``, an absent key, and a non-numeric value all land here together, and a
     boolean too — ``True`` is an ``int`` to Python and a score of 1 by accident is not
     a score. None of them is read as 0.00: that coercion is the single way this count
-    over-reports, and 3,491 of the live rows are null.
+    over-reports, and 8,225 of the live ledger's rows were null when it was measured on
+    2026-11-27.
     """
     raw = row.get("composite_score")
     if raw is None or isinstance(raw, bool):
@@ -199,10 +231,24 @@ class Measurement:
     ``tasks_scored`` is the population the count is a share OF: tasks with at least
     one usable trial in the window. Without it "9" has no scale, and a report that
     cannot print "9 of 28" cannot tell a corpus that grew from a corpus that rotted.
+
+    ``not_rankable`` is the other half of what makes a moving count readable: tasks
+    whose in-window trials are ALL not-rankable. A task can leave ``pinned`` because its
+    judge stopped scoring it rather than because it started passing, and a report that
+    prints only the count reads that as a recovery. It is window-scoped like the count,
+    and disjoint from ``tasks_scored`` by construction: a task with one numeric in-window
+    trial belongs to the scored denominator, not here.
     """
 
     #: Task ids whose best trial in the window is exactly 0.00, sorted.
     pinned: tuple[str, ...] = ()
+    #: Task ids with at least one not-rankable in-window trial and NO numeric in-window
+    #: trial — judged, never scored. Sorted, and never a member of ``pinned``.
+    not_rankable: tuple[str, ...] = ()
+    #: ``task_id ->`` its not-rankable IN-WINDOW row count, for the ids in
+    #: ``not_rankable`` only. Window-scoped, unlike :attr:`rows_null_score`.
+    not_rankable_rows_by_task: Mapping[str, int] = field(default_factory=dict,
+                                                         compare=False)
     window_days: int = DEFAULT_WINDOW_DAYS
     started_at: datetime | None = None
     ended_at: datetime | None = None
@@ -214,7 +260,16 @@ class Measurement:
     rows_event: int = 0
     #: Rows with no score at all — ``"composite_score": null`` or the key absent. The
     #: not-rankable shape, and the single largest way this count could be over-stated.
+    #: WHOLE-FILE by definition: this branch sits ahead of the stamp and window filters,
+    #: and #4646's ruling is that it stays there — it is the file's null rate, and the
+    #: window-scoped figure a reader wants beside the count is ``not_rankable_rows``, so
+    #: redefining this one to mean the window would silently change a published number.
     rows_null_score: int = 0
+    #: Of those null rows, the ones that could not be attributed to an in-window task:
+    #: undated, taskless, or stamped outside the window. ``rows_null_score`` minus the
+    #: :attr:`not_rankable_rows` total is this, and it is printed because otherwise the
+    #: whole-file figure beside a window figure looks like an arithmetic error.
+    rows_null_unplaced: int = 0
     #: Rows carrying a score that is not a number (a string, a bool): corrupt, dropped.
     rows_bad_score: int = 0
     rows_undated: int = 0
@@ -230,6 +285,16 @@ class Measurement:
     @property
     def pinned_count(self) -> int:
         return len(self.pinned)
+
+    @property
+    def not_rankable_count(self) -> int:
+        return len(self.not_rankable)
+
+    @property
+    def not_rankable_rows(self) -> int:
+        """Not-rankable IN-WINDOW rows across the tasks named above (whole-file is
+        :attr:`rows_null_score`; the two are different measures on purpose)."""
+        return sum(self.not_rankable_rows_by_task.values())
 
     @property
     def agrees_with_declaration(self) -> bool:
@@ -252,11 +317,19 @@ class Measurement:
             "pinned_count": self.pinned_count,
             "pinned": list(self.pinned),
             "tasks_scored": self.tasks_scored,
+            # The population a falling pinned_count has to be read against: tasks whose
+            # in-window trials are all not-rankable. Counted over the same window, and
+            # never overlapping ``pinned`` or ``tasks_scored``.
+            "tasks_not_rankable": self.not_rankable_count,
+            "not_rankable": list(self.not_rankable),
+            "not_rankable_rows": self.not_rankable_rows,
+            "not_rankable_rows_by_task": dict(self.not_rankable_rows_by_task),
             "trials_used": self.trials_used,
             "agrees_with_declaration": self.agrees_with_declaration,
             "rows_read": self.rows_read,
             "rows_event": self.rows_event,
             "rows_null_score": self.rows_null_score,
+            "rows_null_unplaced": self.rows_null_unplaced,
             "rows_bad_score": self.rows_bad_score,
             "rows_undated": self.rows_undated,
             "rows_no_task": self.rows_no_task,
@@ -279,14 +352,26 @@ def measure(rows: Iterable[Mapping[str, Any]], *,
     is stamped no more than ``window_days`` before ``now`` (default: this instant).
     Every rejection is counted in the returned denominators, because a count whose
     drops are invisible is the number that made #706 unsayable in the first place.
+
+    A not-rankable row is attributed to a task on the two conditions that would have
+    made it countable — a parseable ``created_at`` inside the window and a ``task_id`` —
+    and a task with such rows but no numeric in-window trial is returned in
+    ``not_rankable``. ``rows_null_score`` still counts every such row in the file,
+    in the window or not, exactly as it always has: that denominator is the file's null
+    rate, and :attr:`Measurement.rows_null_unplaced` is the part of it the window cannot
+    place.
     """
     moment = now or datetime.now(timezone.utc)
     if moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     cutoff = moment - timedelta(days=window_days)
     best: dict[str, list[float]] = defaultdict(list)
-    counts = {"read": 0, "event": 0, "null": 0, "bad": 0, "undated": 0, "no_task": 0,
-              "outside": 0}
+    #: task_id -> not-rankable IN-WINDOW rows. Its own accumulator, because
+    #: ``rows_null_score`` below stays whole-file; attribution here applies the same
+    #: ``created_at`` and ``task_id`` checks the scored path does, and nothing else.
+    null_rows: dict[str, int] = defaultdict(int)
+    counts = {"read": 0, "event": 0, "null": 0, "null_unplaced": 0, "bad": 0,
+              "undated": 0, "no_task": 0, "outside": 0}
     for row in rows:
         counts["read"] += 1
         if row.get("event"):
@@ -295,8 +380,17 @@ def measure(rows: Iterable[Mapping[str, Any]], *,
         if row.get("composite_score") is None:
             # No score recorded. The explicit null and the absent key are one fact to
             # this reader — both are the #416/#646/#698 not-rankable shape — and
-            # neither is 0.00.
+            # neither is 0.00. The counter stays ahead of the window filters (it is the
+            # file's null rate); the attribution beside it is what makes the count
+            # window-scoped without redefining the counter.
             counts["null"] += 1
+            null_stamp = parse_stamp(row.get("created_at"))
+            null_task = row.get("task_id")
+            if (null_stamp is not None and isinstance(null_task, str) and null_task
+                    and null_stamp >= cutoff):
+                null_rows[null_task] += 1
+            else:
+                counts["null_unplaced"] += 1
             continue
         score = _score_of(row)
         if score is None:
@@ -315,8 +409,15 @@ def measure(rows: Iterable[Mapping[str, Any]], *,
             continue
         best[task_id].append(score)
     pinned = sorted(task for task, scores in best.items() if max(scores) == 0.00)
+    # Score-exclusive by construction: ``best`` holds every task with a numeric
+    # in-window trial, so a task in it that also has null rows is a SCORED task with a
+    # not-rankable trial, and belongs to ``tasks_scored`` alone — never to the
+    # population, whose whole meaning is "judged and never scored in this window".
+    not_rankable = sorted(task for task in null_rows if task not in best)
     return Measurement(
         pinned=tuple(pinned),
+        not_rankable=tuple(not_rankable),
+        not_rankable_rows_by_task={task: null_rows[task] for task in not_rankable},
         window_days=window_days,
         started_at=cutoff,
         ended_at=moment,
@@ -325,6 +426,7 @@ def measure(rows: Iterable[Mapping[str, Any]], *,
         rows_read=counts["read"],
         rows_event=counts["event"],
         rows_null_score=counts["null"],
+        rows_null_unplaced=counts["null_unplaced"],
         rows_bad_score=counts["bad"],
         rows_undated=counts["undated"],
         rows_no_task=counts["no_task"],
@@ -385,17 +487,25 @@ def measure_from_ledger(path: Path, *, window_days: int = DEFAULT_WINDOW_DAYS,
 
 def report_line(m: Measurement, *, declared: int = DECLARED_BASELINE_ZERO_PINNED,
                 declared_on: str = DECLARED_ON) -> str:
-    """The one line the invariant is worth: declaration, window, count and ids together.
+    """The one line the invariant is worth: declaration, window, count, ids and the
+    not-rankable population together.
 
-    All four on a single line, so the count can never be forwarded without the window
-    it was measured over or the declaration it is being compared to — which is the
-    exact way #706's number got orphaned from its definition the first time.
+    All five on a single line, so the count can never be forwarded without the window it
+    was measured over, the declaration it is being compared to, or the population of
+    tasks that were judged and never scored in that window — which is what lets a count
+    that FELL read as a recovery when six tasks simply stopped being scored. Splitting
+    the population onto its own line is the same orphaning #706 already suffered, one
+    line closer to a pasted report.
     """
     ids = ", ".join(m.pinned) if m.pinned else "(none)"
+    nr_ids = (", ".join(f"{task}:{m.not_rankable_rows_by_task[task]}"
+                        for task in m.not_rankable) or "(none)")
     return (f"zero-pinned #706: declared baseline {declared} ({declared_on}, all "
             f"per-trial rows, max composite_score) | measured {m.pinned_count} of "
             f"{m.tasks_scored} tasks pinned at exactly 0.00 over the trailing "
-            f"{m.window_days} days | ids: {ids}")
+            f"{m.window_days} days | ids: {ids} | not-rankable in window: "
+            f"{m.not_rankable_count} task(s) / {m.not_rankable_rows} rows with no score "
+            f"at all | ids: {nr_ids}")
 
 
 def drift_line(m: Measurement, *, declared: int = DECLARED_BASELINE_ZERO_PINNED,
@@ -433,7 +543,7 @@ def parse_now(raw: str) -> datetime:
     parsed = parse_stamp(raw)
     if parsed is None:
         raise ValueError(f"unparseable --now stamp {raw!r}; use ISO-8601 UTC, "
-                         "e.g. 2026-10-19T12:00:00Z")
+                         "e.g. 2026-01-05T12:00:00Z")
     return parsed
 
 
@@ -481,7 +591,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(doc, indent=2, sort_keys=True))
         return 0
     print(f"ledger: {m.ledger} | rows read {m.rows_read} | per-trial scored {m.trials_used}"
-          f" | dropped: {m.rows_event} event, {m.rows_null_score} with no score, "
+          f" | dropped: {m.rows_event} event, {m.rows_null_score} with no score "
+          f"({m.rows_null_unplaced} of them unplaceable in the window), "
           f"{m.rows_bad_score} non-numeric score, {m.rows_undated} undated, "
           f"{m.rows_no_task} taskless, {m.rows_outside_window} outside the window, "
           f"{m.rows_unparsed} unparsed")
