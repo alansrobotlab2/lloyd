@@ -1048,8 +1048,9 @@ than to either job:
   the capability groups its own output needs (`SOURCE_CAPABILITIES`,
   `app/harness/capabilities.py`) and the envelope hands the turn that expansion
   as `allowed_tools`, so anything absent from it is refused before dispatch:
-  23 tools of the live 147-tool pool for `youtube-digest`, 20 for
-  `deep-research`, in `tests/fixtures/worker_capability_baseline.json`,
+  23 tools of the live pool for `youtube-digest`, 20 for `deep-research` (158
+  registered names measured 2026-11-27 against `tool_roster.REGISTERED_TOOLS`;
+  147 the day #2269 set the rule), in `tests/fixtures/worker_capability_baseline.json`,
   recomputed from the compile on every run of
   `tests/test_worker_capability_allowlist.py`. The per-source `DISALLOWED`
   tuples are still passed and still name refusals — the paper child's egress
@@ -1061,11 +1062,20 @@ than to either job:
   example attack does *not* close is worth stating, and since #3524 its two halves
   have different answers. **The read half is closed** — by a rule that is not a
   capability: `PROTECTED_READ_ROOTS` (`app/harness/protected_paths.py`, the one
-  owner of the table) names the credential files no digest, distill or research job
-  has a reason to read (`~/lloyd/.env`, `~/.ssh`, `~/.config/gh`, `~/.openclaw`),
+  owner of the table, resolved by `protected_read_roots()`) names the five entries
+  no digest, distill or research job has a reason to read (`~/lloyd/.env`,
+  `~/.ssh`, `~/.config/gh`, `~/.openclaw`, and since #3846 the credential
+  registry itself, `~/lloyd-data/secrets/credentials.json`),
   and `app/harness/secret_read_deny.py` arms a `PreToolUse` deny over `Read`,
-  `Grep` and `Glob` for a turn whose source is in
-  `capabilities.UNTRUSTED_INGEST_SOURCES` — these two plus `session-distill`. The
+  `Grep` and `Glob` on **every** turn since #3949 — `install_secret_read_deny`
+  now returns True unconditionally, because the old per-source arm left
+  `scheduled-task`, `autocode` and `autotriage` running with no read hook at all.
+  What `source` selects is now a *carve-out*, not the rail:
+  `CREDENTIAL_CARVE_OUT_LABELS` hands an attended turn back `the SSH private keys`
+  and `the GitHub CLI credentials` (the `github-auth` skill), and
+  `carve_out_roots` returns the empty set for every source in
+  `capabilities.UNTRUSTED_INGEST_SOURCES` — these two plus `session-distill` — so
+  this fleet keeps #3524's full five-entry deny. The
   envelope is deliberately unchanged by it: the video turn is still 23 tools with
   `READ_FILES` in it, because the measured census says the job needs the reader
   (2947 `Read` calls over the 458 retained transcripts, and 2666 of the 4217 read
@@ -1079,10 +1089,12 @@ than to either job:
   never refused. `attacker.example/?k=…` is therefore still reachable from both
   turns, and stays so until a human flips that flag (#628 closed with the flip
   explicitly delegated; `deep-research`'s whole job is fetching arbitrary hosts, so
-  the flip needs an allow list widened around it). It is owed, not open work. One
-  further deliberate limits: the read deny is armed per source, never fleet-wide —
-  an attended turn reads `~/.ssh` legitimately (the `github-auth` skill), so the
-  same rule there would be an operator outage rather than a fix — and it is a rule
+  the flip needs an allow list widened around it). It is owed, not open work, and
+  #3846 narrowed the payload rather than the destination: a Bash child inherits a
+  placeholder for every vaulted credential name, and the real value is put back
+  only at the `http_request` egress gate, for a destination that credential is
+  bound to — a lane neither turn holds. What the deny still is, unchanged since
+  #3524, is a rule
   over three *path-taking* verbs. `session-distill`, the third member, also holds
   `Bash`, whose command string no path rule reads (that is the fixture's
   `untrusted_ingest_sources_with_unmeasured_bash` residual, and `--ro-bind` makes a
@@ -1142,7 +1154,15 @@ there would improve Lloyd.
 
 The split is the design. `scripts/youtube_channel_monitor.py` is the
 deterministic half — the `CHANNELS` registry, `seen.json`, listing uploads,
-fetching the transcript and metadata into a bundle. This source is the
+fetching the transcript and metadata into a bundle. It also carries a keyframe
+leg that has not reached that design: `--frames` samples up to
+`MAX_FRAMES_PER_VIDEO` (24) frames and OCRs their on-screen text into
+`onscreen.jsonl` through loopback vision requests (`VISION_MODEL_ALIAS =
+"primary"`), which the digest prompt renders as its `onscreen:` field. Measured
+negative on 2026-11-26 — contamination 57 vs 0, missing 202 vs 196, +25 prompt
+tokens per bundle — and ruled for removal rather than tuning; nothing in the
+queue path calls the leg, but 14 production bundles carry a sidecar as of
+2026-11-27, so those re-digest carrying the field today. This source is the
 judgement half.
 
 - **The script owns the retry, not the queue.** A failed session is reported
@@ -1161,12 +1181,14 @@ judgement half.
   the whole browser surface is absent because `BROWSER_READ` is simply not
   declared. No shell, no `Edit`, no subagents, nothing that seeds queues or
   touches the self-modification loop. `Read`/`Write` stay because the note is
-  the job — which also means `Read` reaches any file under `$HOME`, the residue
-  #3524 is about.
-- **Priority 45, not the source default 60.** `scheduled-task` may hold both
-  slots with low/background work; at 60 three digests sat queued 25 minutes
-  behind two low-priority KG jobs. At 45 a digest beats those for a slot and an
-  `autocode` round (40) still goes first.
+  the job — which also means `Read` reaches any file under `$HOME` except the five
+  credential roots the read deny covers, the residue #3524 is about.
+- **Priority 45, not the source default 60** (`DEFAULT_PRIORITY` in
+  `workers/sources/youtube_digest.py`). `scheduled-task` may fill the pool's slots
+  with low/background work (its map is 10/20/30/50/70); at 60 three digests sat
+  queued 25 minutes behind two low-priority KG jobs. At 45 a digest beats those for
+  a slot — with `max_inflight: 1`, so it takes one, never more — and an `autocode`
+  round (40) still goes first.
 - The **eval rule is Alan's** and lives in the prompt: an open-source
   framework, tool or model may be proposed for direct adoption; a commercial
   product never is, only the aspects worth recreating locally are named.
@@ -1186,14 +1208,18 @@ judgement half.
   and `fail_rate` over the same window, and the per-kind totals sum to the
   source's `total`. A
   kind's rate divides by that kind's own total and never by the source's — over
-  the 7 days to 2026-11-07 `youtube-digest` reads 57 runs with 1 failed (1.8 %)
-  blended while the video half reads 50 with 1 (2.0 %) and the paper half 7 with
-  0 (0 %), so the split and the blended figure are different numbers and only
-  the blended one is ever the alarm. A run whose row carries no kind is counted
+  the 7 days to 2026-11-27 (unclamped) `youtube-digest` reads 24 runs with 2
+  failed (8.3 %) blended and 1.49 h GPU while the video half reads 17 with 2
+  (11.8 %) and the paper half 7 with 0 (0 %), so the split and the blended figure
+  are different numbers and only the blended one is ever the alarm. A run whose
+  row carries no kind is counted
   under `__none__` (`NO_KIND` in `workers/queue.py`), and that key is absent
   rather than zeroed for a source whose every run is classified —
-  `youtube-digest` has no `__none__` entry in that window, because all 57 of its
-  rows carry a kind. Where the 51 sit: 9 on 2026-10-21, 25 on 2026-10-22, 14 on
+  `youtube-digest` has no `__none__` entry in that window, because all 24 of its
+  rows carry a kind. That same read is what "closed" means here:
+  `last_failure` 2026-11-24 with `consecutive_failures: 0` and the most recent
+  completion 2026-11-26, so the burst below is history and the two failures
+  standing in the window are not it. Where the 51 sat: 9 on 2026-10-21, 25 on 2026-10-22, 14 on
   2026-10-26; 47 carry `meta_json.handoff_refusal` with a summary of
   `turn ended (stop, N iterations) without a note at <path>`, N between 3 and
   13, which is the two-stage `stage-a-reader`/`stage-b-writer` pilot's own
