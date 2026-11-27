@@ -520,10 +520,15 @@ def check_stale(skill_path: Path, fm: dict) -> tuple[bool, int]:
 def stale_context(ages: list[int], marked_active: int, total: int) -> dict:
     """What the STALE count cannot see, measured rather than asserted.
 
-    Two inert halves keep the bucket empty, and both are properties of the library
-    rather than of any skill: the `status: active` exemption above, and the fact
-    that no file in the tree is old enough to trip the threshold even where the
-    exemption does not apply. Reporting the count without these reads as "nothing
+    Why the bucket reads empty is a field of this dict, not a property of the
+    library: `check_stale` returns `(False, 0)` on `status: active` BEFORE the age
+    comparison, so `marked_active` of `total` scanned files never reach that
+    comparison at all and only the `unmarked` remainder can trip it. How old that
+    remainder is moves with the next file anyone writes, so nothing here states an
+    age or a threshold in either direction — `threshold_days`, `max_age_days` (the
+    oldest scanned file, exemption ignored) and `oldest_could_trip` are this run's
+    measurements, and anyone who wants the age verdict goes to them in the report
+    this dict is published into. Reporting the count without them reads as "nothing
     is stale", which is the falsest thing this report can say.
     """
     return {

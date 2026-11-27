@@ -15,9 +15,21 @@ import datetime as dt
 import importlib.util
 import inspect
 import re
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
+
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# The frozen-figure matcher is imported, never re-declared: #4617 is about ONE rot
+# living on two write surfaces (this function's docstring, and the nightly skill that
+# tells a job how to read the dict), and a ban written twice is a ban one surface can
+# walk past. `tests/test_skill_lint_stale_prose.py` holds it and grades the vault half.
+from tests.test_skill_lint_stale_prose import (  # noqa: E402
+    STALE_CONTEXT_FIELDS, frozen_age_figures)
+
 
 
 def _load():
@@ -255,6 +267,86 @@ def test_stale_context_measures_both_halves_from_the_walk_not_from_prose():
         assert age is not None and age > sl.STALE_DAYS, (
             f"exemption hid the measurement too (age={age}): the report prints this "
             "number precisely because check_stale never reads it")
+
+
+#: The two claims #4617 found still standing in `stale_context`'s own docstring, kept
+#: here so the nodes below can prove their absence test bites on the text it replaced.
+RETIRED_AGE_CEILING_CLAIMS = ("inert halves", "old enough to trip")
+
+
+def test_the_stale_context_docstring_states_no_age_ceiling():
+    """#4617 clause 1: the docstring of the function that PUBLISHES `oldest_could_trip`
+    used to assert that no scanned file could ever reach it.
+
+    That sentence was falsified by the report the same function writes — a run whose
+    oldest scanned file sat past `threshold_days` with `oldest_could_trip: True` — and
+    it survived #4614 and #4615 because each of those rounds fixed a neighbour (the
+    rendered section, the `CATEGORY_TRUST` reason, the skill-lint SKILL.md row) and
+    neither opened this docstring. So the ban is pinned to the object itself, read off
+    `__doc__`: a round that edits prose cannot quietly re-assert the ceiling somewhere
+    the tests never looked.
+
+    The absence assertions are worthless if the phrase list is empty or the matcher is
+    broken, so the positive control runs first, on the retired wording kept above.
+    """
+    doc = inspect.getdoc(sl.stale_context) or ""
+    assert doc, (
+        "`stale_context` lost its docstring, so every `not in doc` below passes on "
+        "empty text — the field is published into the report and needs a reader-facing "
+        "explanation")
+    assert len(RETIRED_AGE_CEILING_CLAIMS) == 2, RETIRED_AGE_CEILING_CLAIMS
+
+    retired = ("Two inert halves keep the bucket empty, and both are properties of the "
+               "library rather than of any skill: the `status: active` exemption above, "
+               "and the fact that no file in the tree is old enough to trip the "
+               "threshold even where the exemption does not apply.")
+    for claim in RETIRED_AGE_CEILING_CLAIMS:
+        assert claim in retired, f"the control text no longer carries {claim!r}"
+    for claim in RETIRED_AGE_CEILING_CLAIMS:
+        assert claim not in doc, (
+            f"`stale_context.__doc__` asserts {claim!r} again: the age arm is a "
+            "measurement this dict publishes, not a property of the library")
+
+    # And no figure in either direction: `67`, `90-day`, `95 days` and a number beside
+    # `threshold` are the same rot in four spellings, so the matcher is the shared one
+    # (`tests/test_skill_lint_stale_prose.py`), whose own control proves it bites.
+    assert frozen_age_figures(doc) == [], (
+        f"`stale_context.__doc__` carries {frozen_age_figures(doc)}: a landed age figure "
+        "is a claim the next file's mtime can falsify, and this function is the one "
+        "that measures the age it would misstate")
+
+
+def test_the_stale_context_docstring_names_the_exemption_and_points_at_its_own_fields():
+    """#4617 clause 2: the other half of the same sentence — an absence test alone would
+    be satisfied by deleting the paragraph, and the paragraph is the only place the
+    exemption is explained to whoever edits `check_stale` next.
+
+    So it has to keep saying WHY the bucket is empty (`status: active` returns before
+    the age comparison) and where the age actually lives, and the field names it points
+    at have to be the field names the function actually returns — prose and payload are
+    two surfaces of one claim, which is how #4614's fix stayed right while this
+    docstring stayed wrong.
+    """
+    doc = inspect.getdoc(sl.stale_context) or ""
+    assert "status: active" in doc, doc
+    assert "check_stale" in doc, (
+        "the docstring no longer names the function whose early return holds the count")
+    assert "before" in doc.lower(), (
+        "the order is the whole explanation: the exemption returns before the age "
+        "comparison runs, so the count is not a measurement of age")
+    for field in ("oldest_could_trip", "max_age_days", "marked_active"):
+        assert field in doc, (
+            f"`{field}` is the run's own answer and the docstring no longer names it")
+    assert re.search(r"report|published", doc, re.IGNORECASE), (
+        "the reader is not sent anywhere: the age verdict exists only in the report "
+        "this dict is published into")
+
+    published = sl.stale_context([1, 2], 1, 3)
+    assert set(published) == set(STALE_CONTEXT_FIELDS), published
+    for field in STALE_CONTEXT_FIELDS:
+        if field != "unmarked":
+            assert field in doc, f"the payload publishes `{field}` and the doc hides it"
+    assert "unmarked" in doc, doc
 
 
 def test_the_walk_itself_produces_the_two_stale_measurements(tmp_path):
