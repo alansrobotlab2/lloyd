@@ -237,11 +237,47 @@ def validate_run_spec(spec: dict[str, Any]) -> str | None:
     return None
 
 
+def _promoted_variant_meta(variant_id: str, variants_dir: Path | None) -> dict[str, Any]:
+    """One candidate parent, enriched from its own `variant.json` if that is on disk.
+
+    #860/#794 put hypothesis text in `variants_dir/<id>/variant.json` because
+    nowhere else keeps it readable, so the parent's actual proposal rides along
+    here and reaches the proposer.
+    """
+    description = ""
+    hypothesis = ""
+    if variants_dir:
+        meta_path = variants_dir / variant_id / "variant.json"
+        if meta_path.exists():
+            try:
+                meta = json.loads(meta_path.read_text(encoding="utf-8"))
+                description = meta.get("description", "")
+                hypothesis = meta.get("hypothesis", "")
+            except Exception:
+                pass
+    return {"variant_id": variant_id, "description": description, "hypothesis": hypothesis}
+
+
 def find_last_promoted_variant(ledger_path: Path, variants_dir: Path | None = None) -> dict[str, Any] | None:
     """Find the most recently promoted variant from the ledger.
 
     Reads variant meta from variants_dir to get description/hypothesis.
     Returns dict with variant_id, description, hypothesis if found, else None.
+
+    #4633: a `promoted: true` decision row is the round's own claim, and for two live
+    rounds the claim was false — `promote()` returned a refusal and the flag was
+    derived from the decision rather than the landing. The round's own
+    `round_summary` row is the landing: `post_promotion.record_round_summary` fills
+    its `snapshot_dir` only through `post_promotion.promotion_landed`, so a summary
+    row that exists for the round and records a null `snapshot_dir` is that round
+    stating that nothing was written, and its variant must not be handed to the next
+    round as a parent. Between the 2026-11-12 refusal and the 2026-11-16 landing 36
+    decision rows did exactly that, and the enrichment above returned the phantom's
+    real hypothesis text as the parent's — the one consumer of a phantom promotion
+    that silently changed what later variants proposed. A promoted row with no
+    summary row beside it is accepted unchanged: rounds predating #429 promoted
+    without ever writing one, and absence there is a gap in the record, not a
+    refutation of it.
     """
     if not ledger_path.exists():
         return None
@@ -250,33 +286,29 @@ def find_last_promoted_variant(ledger_path: Path, variants_dir: Path | None = No
     except Exception:
         return None
 
-    # Walk backwards looking for a decision where promoted=true
+    # Walk backwards looking for a decision where promoted=true, and settle the first
+    # one found against its own round's landing record. `record_round_summary` runs
+    # before the decision rows are appended, so the row that answers for a round is
+    # always at or before it in the file — which is what lets this walk stop at the
+    # round's own summary instead of holding every row in memory.
+    pending: dict[str, Any] | None = None
     for line in reversed(lines):
         try:
             entry = json.loads(line)
         except Exception:
             continue
-        if entry.get("event") != "decision":
+        event = entry.get("event")
+        if event == "round_summary":
+            if pending is None or entry.get("round_id") != pending.get("round_id"):
+                continue
+            if entry.get("snapshot_dir"):
+                return _promoted_variant_meta(pending.get("variant_id", ""), variants_dir)
+            pending = None
             continue
-        if entry.get("promoted") is True:
-            vid = entry.get("variant_id", "")
-            description = ""
-            hypothesis = ""
-            # Try to enrich from variant meta
-            if variants_dir:
-                meta_path = variants_dir / vid / "variant.json"
-                if meta_path.exists():
-                    try:
-                        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-                        description = meta.get("description", "")
-                        hypothesis = meta.get("hypothesis", "")
-                    except Exception:
-                        pass
-            return {
-                "variant_id": vid,
-                "description": description,
-                "hypothesis": hypothesis,
-            }
+        if event == "decision" and entry.get("promoted") is True and pending is None:
+            pending = entry
+    if pending is not None:
+        return _promoted_variant_meta(pending.get("variant_id", ""), variants_dir)
     return None
 
 

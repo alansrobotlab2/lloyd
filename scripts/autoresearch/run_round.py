@@ -2760,13 +2760,41 @@ async def run(
         for vid, validity in validity_sections:
             lines.append(f"- variant `{vid}`:")
             lines += [f"  {line}" for line in validity_report_lines(validity)]
-    if promotion_result:
+    if post_promotion.promotion_landed(promotion_result):
         lines.append("")
         lines.append("## Promoted")
         lines.append(f"- variant: `{promotion_result['variant_id']}`")
         lines.append(f"- snapshot_dir: `{promotion_result.get('snapshot_dir')}`")
         lines.append(f"- applied_files: {promotion_result.get('applied_files')}")
         lines.append(f"- experiment_fact: `{promotion_result.get('experiment_fact')}`")
+    elif promotion_result and promotion_result.get("refused"):
+        # #4633: this branch used to fall into the one above and print a `## Promoted`
+        # block whose `snapshot_dir` line read `None`, because `if promotion_result:`
+        # cannot tell a landing from a refusal — a refusal is a truthy dict carrying
+        # the same `variant_id`. That block is not decoration: `post_promotion`
+        # parses it back as the landing record, so a promotion that wrote no file
+        # became the promotion `last_promotion` points `auto_restore` at, and rounds
+        # R_20261113_030927 onward spent four runs refusing to undo a write that
+        # never happened. What belongs here is the refusal, in the words promote()
+        # actually returned: `refused` is the only refusal key on a promote result
+        # (`reason`/`refusal_class` are fields of the `decision` row, not of this
+        # dict), so the sentence is built from it or it says nothing. The predicate's
+        # own verdict is already in `## Promotion decisions` above, and a round that
+        # is refused by `promote()` has already applied nothing.
+        lines.append("")
+        lines.append("## Promotion refused")
+        lines.append(
+            f"- variant `{promotion_result['variant_id']}` was decided PROMOTE above, "
+            f"but `promote()` wrote no file: "
+            + "; ".join(str(r) for r in promotion_result["refused"]))
+        # The heading name is deliberately not spelled out in this section's own body:
+        # "no `## Promoted` heading in the report" is the clause under test, and a
+        # report that names the heading while disclaiming it would fail every grep that
+        # checks for it — including the one in tests/test_autoresearch_round_report.py.
+        lines.append(
+            "- nothing is on record for this round: no promotion block, no "
+            "`round_summary` promotion fields, and no rollback point for "
+            "`auto_restore` to look for.")
     # #1549: the behavioural scorecard, REPORT-ONLY. Nothing here feeds a verdict —
     # `evaluate_promotion` is called above and never sees this artifact, so a
     # `guardrail_hit: true` changes no decision and no reason on this page. Wiring it
@@ -2805,7 +2833,20 @@ async def run(
     summary_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # Patch ledger with final promotion decisions (cheap second pass — append another entry)
-    promoted_vid = promotion_result["variant_id"] if promotion_result and not dry_run else None
+    # #4633: `promoted` on the decision row is a fact about the LANDING, so it is read
+    # from the same predicate the `round_summary` row and the `## Promoted` block above
+    # are read from. The old test was `promotion_result and not dry_run` — truthiness,
+    # which a refusal passes — so `decision_ledger_row`'s
+    # `promoted_variant_id == decision["variant_id"]` matched for a round whose
+    # `promote()` returned `refused` and wrote nothing, and the row then said
+    # `promoted: true` beside `should_promote: true` while the vault held no promote
+    # commit. `common.find_last_promoted_variant` walks the ledger on that flag to
+    # pick each round's parent, so 36 decision rows written between the 2026-11-12 and
+    # 2026-11-16 landings took a never-landed variant as their parent and were handed
+    # that variant's real hypothesis text as the parent's.
+    promoted_vid = (promotion_result["variant_id"]
+                    if post_promotion.promotion_landed(promotion_result) and not dry_run
+                    else None)
     variants_by_id = {v.get("variant_id"): v for v in variants}
     for d in decisions:
         ledger_append(cfg.paths.ledger_path,

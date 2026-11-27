@@ -21,6 +21,7 @@ so nothing here can write to `~/obsidian/lloyd/`. The two tests that need to
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import subprocess
@@ -28,9 +29,9 @@ from pathlib import Path
 
 import pytest
 
-from scripts.autoresearch import behavioural, promote
+from scripts.autoresearch import behavioural, post_promotion, promote
 from scripts.autoresearch.common import (
-    AutoresearchConfig, AutoresearchPaths, load_bench_tasks)
+    AutoresearchConfig, AutoresearchPaths, find_last_promoted_variant, load_bench_tasks)
 
 # For the test that reads the gate's own prose (#1060): the comment above the win
 # leg is behaviour pinned by the file it documents, so it is asserted from disk.
@@ -3465,3 +3466,293 @@ def test_the_round_and_the_promoter_agree_on_the_unscorable_key() -> None:
     from scripts.autoresearch import run_round
     assert run_round.UNSCORABLE_WRITES_KEY == promote.UNSCORABLE_WRITES_KEY
     assert run_round.UNSCORABLE_HEAD == promote.UNSCORABLE_HEAD
+
+
+# ── #4633: a refused promote is booked as a refusal, not as a promotion ───────
+#
+# Two of the round's own surfaces said "promoted" about a write that never happened.
+# `run_round.run` derived the `decision` row's `promoted` flag from
+# `promoted_variant_id == decision["variant_id"]`, and `promoted_variant_id` was
+# `promotion_result["variant_id"]` whenever a promote result was merely truthy. A
+# refusal IS truthy: `promote()` builds one `result` dict whose `snapshot_dir` starts
+# as `None` (promote.py:1331) and returns that same dict with `result["refused"] = ...`
+# on each of its three refusal paths — :1358 contract refusals, :1370 a snapshot that
+# failed, :1410 a vault land that failed. The round report made the same mistake one
+# surface later, writing a `## Promoted` block from any truthy result, which is why the
+# two phantom reports on disk read `- snapshot_dir: `None`` and `- applied_files: []`.
+# `post_promotion.promotion_record_from_report` parses that block back as the landing
+# record, and that is how a promotion with no rollback point became the promotion
+# `last_promotion` hands to `auto_restore`. Measured 2026-11-27 over the live ledger:
+# 5 `promoted: true` decision rows since the 2026-09-16 re-arm, three of them with a
+# snapshot directory and a vault promote commit, R_20261112_200024 and
+# R_20261115_111538 with neither and no promote commit in `~/obsidian` for either; and
+# 4 `promotion_restored` rows of `status: no_snapshot`, one of them R_20261115_111538
+# chasing its own phantom.
+#
+# Both surfaces are written inside `run_round.run`, so the witness has to be a round.
+# The substitution in `drive_promote_round` is the one
+# `tests/test_post_promotion.py::test_run_round_records_and_surfaces_on_the_live_path`
+# already uses for the LANDED case: the model calls, the materialiser and `promote`
+# itself are replaced — the half that costs a GPU-minute and rewrites a live prompt
+# file — while the split bookkeeping, the report assembly and both ledger appends are
+# the real ones. `evaluate_promotion` is pinned to PROMOTE because this section is not
+# a test of its arithmetic, which `scored()` and `base()` pin above; the state under
+# test is the one only a PROMOTE decision reaches — a round that decided to promote and
+# then could not write it.
+
+REFUSAL_TEXT = ("SOUL.md gate stack 0.7100 exceeds the absolute ceiling 0.6000 (#789)")
+REFUSED_VARIANT = "V_refused_promote"
+SNAP_LANDED = "/tmp/autoresearch-test/snapshots/20261127_040000"
+
+
+def refused_promote_result(variant_id: str = REFUSED_VARIANT) -> dict:
+    """One of `promote()`'s refusal returns, field for field.
+
+    The shape is the contract path's (`promote.py:1358`): the initialiser's
+    `snapshot_dir: None` and `applied_files: []` are untouched, and `refused` is the
+    only refusal key a promote result ever carries — `reason` and `refusal_class` are
+    fields of the `decision` row, written from the predicate's verdict, never of this
+    dict. So any report line about a refusal has to be built from `refused` or it
+    renders an empty sentence.
+    """
+    return {"variant_id": variant_id, "dry_run": False, "snapshot_dir": None,
+            "applied_files": [], "experiment_fact": None, "refused": [REFUSAL_TEXT]}
+
+
+def landed_promote_result(variant_id: str) -> dict:
+    """A landing whose canonical prompts sit outside a git repo: applied, snapshotted,
+    and no `vault_commit` key at all (`promote.py:1399-1404` takes this path when the
+    applied files are not in the vault, which is where the variant sandbox and the
+    unit tests both redirect `CANONICAL_PROMPTS`).
+    """
+    return {"variant_id": variant_id, "dry_run": False, "snapshot_dir": SNAP_LANDED,
+            "applied_files": ["SOUL.md"], "experiment_fact": None}
+
+
+def drive_promote_round(cfg: AutoresearchConfig, monkeypatch, promote_result: dict,
+                        rid: str | None = None) -> dict:
+    """Run one real round to a `promote()` call that returns `promote_result`.
+
+    The bench carries both halves of the #549 split because `compute_split` refuses a
+    bench with no veto tasks, so anything driving `run_round.run` needs the two
+    categories. What the round writes — its report, its `decision` rows, and the
+    `round_summary` row `post_promotion.record_round_summary` appends — is the real
+    thing, which is the point: the flag and the block are the artifacts under test.
+
+    `rid` pins the round id: `common.round_id()` has one-second resolution and a driven
+    round takes milliseconds, so two rounds driven in one test otherwise share an id and
+    their ledger rows become inseparable.
+    """
+    from scripts.autoresearch import run_round
+
+    if rid:
+        monkeypatch.setattr(run_round, "round_id", lambda: rid)
+    cfg.paths.research_root.mkdir(parents=True, exist_ok=True)
+    cfg.paths.rounds_dir.mkdir(parents=True, exist_ok=True)
+    cfg.paths.variants_dir.mkdir(parents=True, exist_ok=True)
+    cfg.paths.bench_dir.mkdir(parents=True, exist_ok=True)
+    (cfg.paths.bench_dir / "bench_a.md").write_text(
+        "---\nid: bench_a\ncategory: replay\n---\nbody\n", encoding="utf-8")
+    (cfg.paths.bench_dir / "bench_b.md").write_text(
+        "---\nid: bench_b\ncategory: adversarial\n---\nbody\n", encoding="utf-8")
+    overlay = cfg.paths.research_root / "overlay_variant"
+    overlay.mkdir(parents=True, exist_ok=True)
+    (overlay / "SOUL.md").write_text("variant contract\n", encoding="utf-8")
+
+    async def fake_trials(cfg_, variant_pairs, tasks, model, harness, max_parallel, **_kw):
+        traces = [{"variant_id": vid, "task_id": t["id"], "status": "ok",
+                   "task_category": "c", "turns": 1, "tool_calls": [], "denied_calls": [],
+                   "duration_seconds": 1.0}
+                  for vid, _ in variant_pairs for t in tasks]
+        # (direct_traces, sdk_traces, arm_seconds) — #1605's return shape, and {} is
+        # what a double that ran no arm and timed nothing can honestly report.
+        return traces, [], {}
+
+    def fake_promote(cfg_, variant, overlay_dir, variant_summary, baseline_summary,
+                     dry_run=False):
+        return dict(promote_result, variant_id=variant["variant_id"])
+
+    monkeypatch.setattr(run_round, "load_config", lambda *a, **k: cfg)
+    monkeypatch.setattr(run_round, "propose_variants", lambda *a, **k: [
+        {"variant_id": promote_result["variant_id"], "description": "d", "hypothesis": "h"}])
+    monkeypatch.setattr(run_round, "_run_trials", fake_trials)
+    monkeypatch.setattr(run_round, "judge_trace",
+                        lambda task, t, rubric_model=None, **_kw: {
+                            "composite_score": 0.5, "objective_score": 1.0,
+                            "rubric_overall": 0.5, "safety_critical": False,
+                            "safety_passed": True})
+    monkeypatch.setattr(run_round, "aggregate_variant", lambda vid, pairs: {
+        "mean_composite": 0.4364 if vid.startswith("BASELINE") else 0.7000,
+        "per_task": [], "task_count": len(pairs), "safety_passed": True})
+    monkeypatch.setattr(run_round, "evaluate_promotion",
+                        lambda c, b, v, **kw: (True, "promote (delta=+0.2636, win_frac=1.00)"))
+    monkeypatch.setattr(run_round, "materialize_baseline",
+                        lambda c: ("BASELINE_fixture", c.paths.variants_dir))
+    monkeypatch.setattr(run_round, "materialize", lambda c, v: overlay)
+    monkeypatch.setattr(run_round, "promote", fake_promote)
+    return asyncio.run(run_round.run(targets=["prompts"], bench_limit=1))
+
+
+def _round_rows(cfg: AutoresearchConfig, round_id: str) -> list[dict]:
+    return [r for r in (json.loads(line) for line in
+                        cfg.paths.ledger_path.read_text(encoding="utf-8").splitlines()
+                        if line.strip())
+            if r.get("round_id") == round_id]
+
+
+def _decision_rows(cfg: AutoresearchConfig, round_id: str) -> list[dict]:
+    return [r for r in _round_rows(cfg, round_id) if r.get("event") == "decision"]
+
+
+def test_a_refused_promote_books_its_decision_row_as_not_promoted(tmp_path, monkeypatch):
+    """Clause 1: `should_promote` stays true and `promoted` goes false.
+
+    The predicate decided PROMOTE and the write was refused; those are two facts and
+    the row carries both. The live phantoms carry `promoted: true` on exactly this
+    state, and `common.find_last_promoted_variant` walks that flag to pick a parent —
+    so the flag is not bookkeeping, it is lineage.
+    """
+    cfg = make_cfg(tmp_path)
+    result = drive_promote_round(cfg, monkeypatch, refused_promote_result())
+    decisions = _decision_rows(cfg, result["round_id"])
+    assert decisions, "a round that reached promote() writes its decision row"
+    assert [(r["variant_id"], r["should_promote"], r["promoted"]) for r in decisions] == [
+        (REFUSED_VARIANT, True, False)], decisions
+
+    # The item's own acceptance census, over the rows this round just appended: no
+    # `promoted: true` decision row whose `round_summary` row records no snapshot.
+    summary = [r for r in _round_rows(cfg, result["round_id"])
+               if r.get("event") == post_promotion.ROUND_SUMMARY_EVENT]
+    assert len(summary) == 1, "the round summary row is written per round, promotion or not"
+    assert summary[0]["promoted_variant_id"] is None
+    assert summary[0]["snapshot_dir"] is None
+    phantom = [r for r in decisions if r["promoted"] is True
+               and not summary[0].get("snapshot_dir")]
+    assert phantom == [], "a promoted:true row beside a snapshot-less summary is the bug"
+
+    # Nothing hid the refusal either: the round result still carries what promote()
+    # returned, refusal text included.
+    assert result["promoted"]["refused"] == [REFUSAL_TEXT]
+    assert result["promoted"]["snapshot_dir"] is None
+
+
+def test_a_landing_with_no_vault_commit_is_still_a_landing(tmp_path, monkeypatch):
+    """Clause 3: `vault_commit` is not a term of landed-ness.
+
+    `promote()` applies files, takes its snapshot, and commits nothing when the
+    applied files are not in a git repo (`promote.py:1399-1404`) — the variant sandbox
+    and these tests both redirect `CANONICAL_PROMPTS` there. A predicate that read
+    "landed iff `snapshot_dir` AND `vault_commit`" would book that real write as a
+    non-write, which is the mirror image of what #4633 is about. Landed-ness is
+    therefore read from `post_promotion.promotion_landed`, the same test
+    `record_round_summary` applies, on both surfaces: the row books the promotion and
+    the report keeps its `## Promoted` block with the snapshot path in it.
+    """
+    cfg = make_cfg(tmp_path)
+    result = drive_promote_round(cfg, monkeypatch, landed_promote_result("V_no_commit"))
+    assert "vault_commit" not in result["promoted"]
+    assert [(r["variant_id"], r["should_promote"], r["promoted"])
+            for r in _decision_rows(cfg, result["round_id"])] == [
+                ("V_no_commit", True, True)]
+    report = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+    assert "## Promoted" in report
+    assert f"- snapshot_dir: `{SNAP_LANDED}`" in report
+    assert "## Promotion refused" not in report
+
+
+def test_parent_lineage_skips_a_round_that_failed_to_land(tmp_path, monkeypatch):
+    """Clause 4: one landed round and one refused round in the same ledger, and the
+    refused round is the LATER one on purpose.
+
+    That order is the live 2026-11-12 → 2026-11-16 window in miniature: the ledger
+    tail's only `promoted: true` row was a phantom, and 36 decision rows written in
+    that window resolved a never-landed variant as their parent — 21 of them after the
+    2026-11-15 phantom. Both phantom variant directories are still on disk under
+    `variants/`, so the enrichment returned the phantom's real hypothesis text as the
+    parent's, and `propose_variants` was steered by a variant that wrote no file. That
+    is why this reads the round's own recorded `parent_variant_id` and not just the
+    helper's return: the lineage is an input to the next round's proposals.
+    """
+    cfg = make_cfg(tmp_path)
+    landed = drive_promote_round(cfg, monkeypatch, landed_promote_result("V_landed"),
+                                 rid="R_20261127_040000")
+    assert landed["parent_variant_id"] is None, "the first round had no promotion to descend from"
+
+    refused = drive_promote_round(cfg, monkeypatch, refused_promote_result(),
+                                  rid="R_20261127_050000")
+    assert refused["parent_variant_id"] == "V_landed", (
+        "the round after a phantom must descend from the landing, not the phantom")
+    parent = find_last_promoted_variant(cfg.paths.ledger_path, cfg.paths.variants_dir)
+    assert parent["variant_id"] == "V_landed"
+    assert [(r["variant_id"], r["promoted"]) for r in _decision_rows(cfg, refused["round_id"])] \
+        == [(REFUSED_VARIANT, False)]
+
+
+def test_a_phantom_promoted_row_does_not_win_the_lineage_walk(tmp_path):
+    """The reader-side guard in `find_last_promoted_variant`, pinned on the row shape
+    the live ledger already holds and will hold forever.
+
+    The ledger is append-only, so the two phantom `decision` rows written before this
+    fix stay in it: R_20261112_200024 and R_20261115_111538, each with
+    `promoted: true` and a `round_summary` row whose `snapshot_dir` is null, with no
+    promote commit for either in `~/obsidian`. Whenever one of those is the most recent
+    promoted row the walk returns a variant that wrote nothing — which is what the live
+    ledger looked like from 2026-11-12T20:00 until the 2026-11-16 landing. So the flag
+    alone cannot be trusted even now, and this ledger is that window: a landed round,
+    then a phantom decision row at the tail, both written by the real writers (the
+    phantom's row by passing `promoted_vid` the way the pre-fix writer did, from a
+    truthy result).
+    """
+    cfg = make_cfg(tmp_path)
+    cfg.paths.rounds_dir.mkdir(parents=True, exist_ok=True)
+    cfg.paths.variants_dir.mkdir(parents=True, exist_ok=True)
+    for vid, hypothesis in (("V_landed_for_real", "the landing's own proposal"),
+                            (REFUSED_VARIANT, "the phantom's proposal")):
+        (cfg.paths.variants_dir / vid).mkdir(parents=True)
+        (cfg.paths.variants_dir / vid / "variant.json").write_text(
+            json.dumps({"variant_id": vid, "description": "d", "hypothesis": hypothesis}),
+            encoding="utf-8")
+
+    from scripts.autoresearch import run_round
+    run_round.ledger_append(cfg.paths.ledger_path, post_promotion.record_round_summary(
+        cfg, "R_20261111_190451", 0.4364, landed_promote_result("V_landed_for_real"),
+        {"mean_composite": 0.7000}))
+    run_round.ledger_append(cfg.paths.ledger_path, run_round.decision_ledger_row(
+        "R_20261111_190451",
+        {"variant_id": "V_landed_for_real", "should_promote": True,
+         "reason": "promote (delta=+0.2636, win_frac=1.00)"},
+        promoted_variant_id="V_landed_for_real"))
+    # The phantom: a refused promote, and the row as the old writer booked it.
+    run_round.ledger_append(cfg.paths.ledger_path, post_promotion.record_round_summary(
+        cfg, "R_20261112_200024", 0.4364, refused_promote_result(), {"mean_composite": 0.7000}))
+    run_round.ledger_append(cfg.paths.ledger_path, run_round.decision_ledger_row(
+        "R_20261112_200024",
+        {"variant_id": REFUSED_VARIANT, "should_promote": True,
+         "reason": "promote (delta=+0.2636, win_frac=1.00)"},
+        promoted_variant_id=REFUSED_VARIANT))
+
+    parent = find_last_promoted_variant(cfg.paths.ledger_path, cfg.paths.variants_dir)
+    assert parent["variant_id"] == "V_landed_for_real"
+    assert parent["hypothesis"] == "the landing's own proposal"
+
+
+def test_a_promoted_row_with_no_round_summary_row_at_all_still_resolves(tmp_path):
+    """The other arm of the same guard, so the guard cannot be "require a summary row".
+
+    `post_promotion.record_round_summary` only exists since #429, and every promotion
+    before it — including the 65 that landed before that module was introduced — wrote
+    no `round_summary` row at all. Absence there is a gap in the record, not a
+    refutation of the promotion, so a promoted decision row with no summary row beside
+    it is accepted unchanged.
+    """
+    cfg = make_cfg(tmp_path)
+    cfg.paths.variants_dir.mkdir(parents=True, exist_ok=True)
+    from scripts.autoresearch import run_round
+    run_round.ledger_append(cfg.paths.ledger_path, run_round.decision_ledger_row(
+        "R_20260916_060000",
+        {"variant_id": "V_old_landing", "should_promote": True,
+         "reason": "promote (delta=+0.2636, win_frac=1.00)"},
+        promoted_variant_id="V_old_landing"))
+    assert post_promotion.round_summary_rows(cfg.paths.ledger_path) == []
+    parent = find_last_promoted_variant(cfg.paths.ledger_path, cfg.paths.variants_dir)
+    assert parent == {"variant_id": "V_old_landing", "description": "", "hypothesis": ""}

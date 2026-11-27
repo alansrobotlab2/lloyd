@@ -1670,3 +1670,40 @@ def _rows_all(cfg, round_id: str) -> list[dict]:
     return [r for r in (json.loads(line) for line in
                         cfg.paths.ledger_path.read_text(encoding="utf-8").splitlines())
             if r.get("round_id") == round_id]
+
+
+# ── #4633: what the report says when promote() refuses ────────────────────────
+
+def test_a_refused_promotion_is_reported_as_a_refusal_and_not_as_a_landing(
+        tmp_path, monkeypatch):
+    """A round whose `promote()` returned `refused` writes no `## Promoted` heading, and
+    says out loud that the promotion was refused.
+
+    The block is not decoration on this page: `post_promotion._PROMOTED_VID_RE` reads
+    it back as THE landing record, so a block written from a refusal became the record
+    `last_promotion` hands to `auto_restore` — which then refuses to undo a write that
+    never happened. Two live reports carry the artifact verbatim, `rounds/R_20261112_200024.md`
+    and `rounds/R_20261115_111538.md`, each printing a variant line whose
+    `snapshot_dir` is `None` beside `- applied_files: []`, while the vault holds a
+    promote commit for three other rounds and none for these two.
+
+    The decision itself stays on the page (`## Promotion decisions` still records the
+    PROMOTE, because the predicate really did decide to promote); what changes is that
+    the write it could not perform is stated as a refusal, naming the variant and
+    quoting the `refused` strings `promote()` returned — the only refusal text a promote
+    result carries, since `reason` and `refusal_class` are fields of the `decision` row.
+    """
+    from tests.test_autoresearch_promotion import (
+        REFUSAL_TEXT, REFUSED_VARIANT, drive_promote_round, make_cfg, refused_promote_result)
+
+    cfg = make_cfg(tmp_path)
+    result = drive_promote_round(cfg, monkeypatch, refused_promote_result())
+    report = (cfg.paths.rounds_dir / f"{result['round_id']}.md").read_text(encoding="utf-8")
+
+    assert "## Promoted" not in report
+    assert "- snapshot_dir: `None`" not in report, "the phantom's own line"
+    assert "## Promotion refused" in report
+    assert REFUSED_VARIANT in report
+    assert REFUSAL_TEXT in report, "the refusal is quoted, not summarised into nothing"
+    assert "wrote no file" in report
+    assert f"- `{REFUSED_VARIANT}`: PROMOTE" in report, "the decision is still recorded"

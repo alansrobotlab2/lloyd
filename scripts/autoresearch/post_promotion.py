@@ -257,12 +257,55 @@ def promoted_variant_mean(ledger_path: Path, variant_id: str) -> float | None:
     return None
 
 
+def promotion_landed(promotion_result: dict[str, Any] | None) -> bool:
+    """Whether a `promote()` result describes a promotion that actually wrote files.
+
+    #4633 made this the one test of landed-ness, and every surface that says "this
+    round promoted" reads it rather than re-deriving it: `record_round_summary`
+    below (the `round_summary` ledger half) and `run_round.run` (the `decision`
+    row's `promoted` flag and the `## Promoted` report block, which is read back as
+    the landing record by :func:`promotion_record_from_report`). Before that,
+    `run_round` derived `promoted` from the *decision* — `promoted_variant_id ==
+    decision["variant_id"]`, where `promoted_variant_id` came from
+    `promotion_result["variant_id"]` whenever a promote result was merely truthy —
+    so a round whose `promote()` returned a refusal booked `promoted: true` and
+    printed a block naming a variant with `snapshot_dir: None`. Two live rounds did
+    exactly that (R_20261112_200024, R_20261115_111538, with no promote commit for
+    either in the vault), and `auto_restore` has since spent four rounds trying to
+    undo a write that never happened.
+
+    Truthiness is not the test, because a refusal is truthy and carries
+    `variant_id`; a non-empty `snapshot_dir` alone is not the test either, because
+    the third of `promote()`'s three refusal paths — a vault-land failure — has
+    already taken its snapshot by the time it refuses. `refused` is the only
+    refusal key a promote result carries at all: `reason` and `refusal_class` are
+    fields of the `decision` row, written by `decision_ledger_row` from the
+    predicate's own verdict, never of the promote result — so a report line about a
+    refusal has to be built from `refused` or it renders an empty sentence.
+
+    `vault_commit` is deliberately NOT a term of this test. `promote()` legitimately
+    applies files and commits nothing when the canonical prompts sit outside a git
+    repo — the variant sandbox and the unit tests both redirect
+    `CANONICAL_PROMPTS` there — and such a promotion wrote real files and left a
+    real rollback point. A predicate that also asked for a sha would book that
+    landing as a non-landing, which is the mirror image of the bug above.
+    """
+    return bool(
+        promotion_result
+        and not promotion_result.get("refused")
+        and promotion_result.get("snapshot_dir")
+    )
+
+
 def promotion_record_from_report(path: Path) -> dict[str, Any] | None:
     """The landing record inside one `rounds/R_<id>.md`, or None if it promoted nothing.
 
     Exists so the check is not stranded behind its own introduction date: the 65
     promotions that landed before this module are readable from their reports,
     which is also what lets a test replay a real round instead of running one.
+
+    A block with no snapshot directory is not a landing record (#4633): see the
+    refusal below.
     """
     text = path.read_text(encoding="utf-8", errors="replace")
     promoted = _PROMOTED_VID_RE.search(text)
@@ -274,6 +317,20 @@ def promotion_record_from_report(path: Path) -> dict[str, Any] | None:
     snap_dir = snapshot.group("dir").strip() if snapshot else ""
     if snap_dir in {"None", "null"}:
         snap_dir = ""
+    if not snap_dir:
+        # A `## Promoted` block with no snapshot directory is a round that booked a
+        # promotion it did not perform: the two phantom reports on disk print
+        # `- snapshot_dir: `None``, and the writer that emitted them now refuses to
+        # (#4633). The snapshot is the only fact in the block that makes the claim
+        # checkable — it is the rollback point — so without one this report is not a
+        # landing record and must not become one. `promotion_records` would otherwise
+        # leave the report-derived record standing, because the overwrite that
+        # normally supersedes it skips a `round_summary` row with a null
+        # `promoted_variant_id`, and `last_promotion` would hand `auto_restore` a
+        # variant with nothing to restore — the four `no_snapshot` rows in the live
+        # ledger are that dead end, taken over rounds R_20261113_030927,
+        # R_20261115_035809, R_20261115_071503 and R_20261115_111538.
+        return None
     means = {m.group("vid"): float(m.group("mean")) for m in _VARIANT_MEAN_RE.finditer(text)}
     return {
         "source": "report",
@@ -462,11 +519,7 @@ def record_round_summary(
     series the cross-round ratchet reads; a second file would be a second series that
     can silently diverge from this one.
     """
-    landed = bool(
-        promotion_result
-        and not promotion_result.get("refused")
-        and promotion_result.get("snapshot_dir")
-    )
+    landed = promotion_landed(promotion_result)
     variant_id = promotion_result["variant_id"] if landed else None
     mean = None
     if landed and variant_summary is not None:

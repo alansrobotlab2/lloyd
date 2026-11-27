@@ -1235,3 +1235,94 @@ def test_4281_round_cause_picks_the_class_a_cited_row_carries():
         "cause_class": "unknown", "cause_rows": [unknown]}
     assert AP.round_cause("x", f"cause unknown, row {unknown}") == {}
     assert AP.round_cause("x", f"grader_defect {defect}x") == {}, "a case id is whole-token"
+
+
+# ── #4633 clause 5: a `## Promoted` block with no snapshot is not a landing record ──
+#
+# The writer that emitted those blocks is pinned in
+# `tests/test_autoresearch_promotion.py` / `test_autoresearch_round_report.py`, but
+# fixing the writer does not clean the reader: the two phantom reports stay on disk in
+# an append-only corpus, `promotion_record_from_report` still finds a variant line in
+# them, and `promotion_records` only overwrites a report-derived record when the round's
+# `round_summary` row carries a `promoted_variant_id` — which a refused promote does
+# not write. So the report half had to refuse on the same terms the writer does, or
+# `last_promotion` goes on handing `auto_restore` a promotion with no rollback point:
+# the live ledger's 4 `promotion_restored` rows of `status: no_snapshot` all read "the
+# promotion has no snapshot directory on record, so no rollback point exists", and one
+# of them, R_20261115_111538, is chasing its own phantom report.
+
+PHANTOM_SNAPSHOT_LINE = "- snapshot_dir: `None`"
+
+
+def _phantom_report_bytes() -> str:
+    """The shipped landed report with ONE line changed: the snapshot becomes `None`, the
+    way `rounds/R_20261112_200024.md` and `rounds/R_20261115_111538.md` print it. The
+    variant line stays, because that is what the old parser keyed on.
+    """
+    return R_20260908_165252.replace(f"- snapshot_dir: `{SNAPSHOT_DIR}`",
+                                     PHANTOM_SNAPSHOT_LINE)
+
+
+def test_a_promoted_block_with_no_snapshot_is_not_a_landing_record(world):
+    """The reader refuses a report that claims a promotion and names no rollback point."""
+    cfg = world
+    phantom = cfg.paths.rounds_dir / "R_20261112_200024.md"
+    phantom.write_text(_phantom_report_bytes(), encoding="utf-8")
+
+    assert post_promotion.promotion_record_from_report(phantom) is None
+    records = post_promotion.promotion_records(cfg.paths.ledger_path, cfg.paths.rounds_dir)
+    assert [r["round_id"] for r in records] == ["R_20260908_165252"], records
+    assert all(r["snapshot_dir"] for r in records), \
+        "promotion_records must never return a promotion with an empty snapshot_dir"
+    # And the phantom cannot win by being the later round, which is what made
+    # `auto_restore` spend a round on it: R_20261112_200024 sorts after R_20260908_165252.
+    assert post_promotion.last_promotion(
+        cfg.paths.ledger_path, cfg.paths.rounds_dir)["round_id"] == "R_20260908_165252"
+
+
+def test_a_refused_round_with_both_record_halves_still_names_no_promotion(world):
+    """The live shape exactly: a phantom report AND a `round_summary` row for the same
+    round whose `promoted_variant_id` is null.
+
+    That pairing is the step one level downstream from what the item was filed on.
+    `promotion_records` skips a summary row with no variant id rather than treating it
+    as a refutation, so the report-derived record is never overwritten and stands as
+    the promotion on record — which is why the reader needed the same rule the writer
+    got, not only a corrected writer.
+    """
+    cfg = world
+    phantom_round = "R_20261115_111538"
+    refused = {"variant_id": PROMOTED, "snapshot_dir": None, "applied_files": [],
+               "refused": ["SOUL.md gate stack exceeds the ceiling"]}
+    (cfg.paths.rounds_dir / f"{phantom_round}.md").write_text(
+        _phantom_report_bytes(), encoding="utf-8")
+    row = post_promotion.record_round_summary(
+        cfg, phantom_round, 0.3542, refused, {"mean_composite": 0.3382})
+    assert row["promoted_variant_id"] is None and row["snapshot_dir"] is None
+
+    records = post_promotion.promotion_records(cfg.paths.ledger_path, cfg.paths.rounds_dir)
+    assert [r["round_id"] for r in records] == ["R_20260908_165252"], records
+    assert post_promotion.last_promotion(
+        cfg.paths.ledger_path, cfg.paths.rounds_dir)["round_id"] == "R_20260908_165252"
+
+
+def test_landedness_is_one_predicate_and_a_snapshot_is_not_enough():
+    """`promotion_landed` is the single test every surface reads, pinned at its edges.
+
+    The arm that a snapshot-only test would get wrong is promote()'s third refusal
+    path: a vault-land failure (`promote.py:1405-1412`) happens AFTER
+    `result["snapshot_dir"] = str(snap)` is set, and clears `applied_files` while
+    leaving the snapshot in place. A round in that state applied nothing that survived
+    and must not be a landing, so `refused` — the only key all three of promote()'s
+    refusal returns set — is what rules it out. The opposite edge is the one #4633's
+    proposed predicate would have broken: a landing whose prompts sit outside a git
+    repo has a snapshot and no `vault_commit` at all, and is a landing.
+    """
+    vault_land_failed = {"variant_id": PROMOTED, "snapshot_dir": SNAPSHOT_DIR,
+                         "applied_files": [], "refused": ["VaultRoundError: probe failed"]}
+    contract_refused = {"variant_id": PROMOTED, "snapshot_dir": None,
+                        "applied_files": [], "refused": ["SOUL.md gate stack exceeds the ceiling"]}
+    assert post_promotion.promotion_landed(vault_land_failed) is False
+    assert post_promotion.promotion_landed(contract_refused) is False
+    assert post_promotion.promotion_landed(landed()) is True, "no vault_commit, still landed"
+    assert post_promotion.promotion_landed(None) is False
