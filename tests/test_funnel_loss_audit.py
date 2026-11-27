@@ -22,6 +22,11 @@ The process boundaries the audit crosses, and the node across each:
                            inside the checkout is refused (`test_default_write_dir…`)
   audit → #552 hand labels the header disclaims them in the same block as
                            `labeled_by` (`test_header_declares_agent_labelled…`)
+  CLI → clock              `--now` pins the instant, so the artifact name,
+                           `measured_at` and `labeled_by` all answer to one injected
+                           UTC value and these nodes hold on any calendar date
+                           (`test_the_pinned_now_drives…`,
+                           `test_now_is_read_as_utc…`)
   labels → action          nothing under a skills root changes, and no dollar figure
                            is emitted (`test_nothing_under_a_skills_root_changes…`)
 """
@@ -173,6 +178,13 @@ def _run(tmp_path: Path, frame: dict, *, seed: int = 4238, cases: int = 24,
          extra: list[str] | None = None) -> tuple[int, str, Path]:
     out_dir = tmp_path / "out"
     argv = ["--seed", str(seed), "--cases", str(cases),
+            # `NOW` is the frame's own instant, and `DAY` is its date. Without pinning,
+            # `build_audit` stamps live UTC today while these nodes assert `DAY`, so
+            # this file was green for exactly one calendar day — the day it was
+            # written — and red on every date after it (#4612). Pinning through `--now`
+            # reaches the `build_audit(now=…)` seam through the CLI, which is the
+            # boundary these nodes exist to cross.
+            "--now", NOW.isoformat(),
             "--out-dir", str(out_dir),
             "--event-root", str(frame["event_root"]),
             "--sessions-dir", str(frame["sessions_dir"]),
@@ -244,6 +256,10 @@ def test_run_writes_exactly_one_dated_artifact_and_nothing_in_the_checkout(tmp_p
     frame = _frame(tmp_path)
     out_dir = tmp_path / "out"
     rc = audit.main(["--seed", "4238",
+                     # Pinned like `_run`: this node asserts `DAY` below, and an
+                     # unpinned run stamps live UTC today, which stopped being
+                     # `DAY` on 2026-11-27 (#4612).
+                     "--now", NOW.isoformat(),
                      "--out-dir", str(out_dir),
                      "--event-root", str(frame["event_root"]),
                      "--sessions-dir", str(frame["sessions_dir"]),
@@ -753,3 +769,69 @@ def test_frame_shape_fixture_matches_the_measured_live_shape(tmp_path):
     assert payload["contradiction"]["counts"] == {}, (
         "a frame with no rendered-but-unlanded row must report the contradiction as "
         "empty, which is the live measurement rather than a silence")
+
+
+# ── #4612: the clock the stamps come from, pinned rather than assumed ─────────
+#
+# `build_audit` already took `now=`, but `main()` exposed no way to reach it, so
+# every node that crossed the CLI had to assert against whatever date it happened
+# to be run on. `DAY` was the day this file was written and `NOW` was dead — a
+# constant declared and used by nothing — so the two nodes below passed on
+# 2026-11-26 and failed on 2026-11-27 onward, red at base `47ef73dd` with no
+# round's diff present. `--now` is how the rest of the repo pins a run
+# (`scripts/maintenance/corpus_shape.py:740`, `scripts/eval_instrument_index.py:1269`),
+# and these two nodes are what keep it honest.
+
+def test_the_pinned_now_drives_the_artifact_name_and_label_not_the_wall_clock(tmp_path):
+    """The date in the name, in `measured_at` and in `labeled_by` comes from `--now`.
+
+    Run at a date years from the live one: a stamp that ignored `--now` would
+    publish today's date and fail here, and an assertion on today's date would
+    rot again in a year. All three views are read from the one artifact, because
+    the clause is that ONE clock answers for all of them —
+    `write_artifact` names the file from `measured_at`, and `build_audit` derives
+    `labeled_by`'s suffix from the same `now` (`scripts/funnel_loss_audit.py:588`,
+    `:615`, `:618`, `:705`).
+    """
+    frame = _frame(tmp_path)
+    rc, out, out_dir = _run(tmp_path, frame, extra=["--now", "2027-03-14T09:00:00+00:00"])
+    assert rc == 0, out
+    written = sorted(p.name for p in out_dir.iterdir())
+    assert written == ["loss-audit-2027-03-14.json"], written
+    payload = json.loads(next(out_dir.glob("loss-audit-*.json")).read_text())
+    assert payload["measured_at"].startswith("2027-03-14"), payload["measured_at"]
+    assert payload["labeling"]["labeled_by"] == (
+        "agent:lloyd-transcript-audit-2027-03-14"), payload["labeling"]["labeled_by"]
+
+
+def test_now_is_read_as_utc_so_the_stamp_never_splits_across_a_meridian(tmp_path):
+    """A naive `--now` means UTC, and an offset is converted before the date is taken.
+
+    The name is a key: `eval_instrument_index._newest_dated_file` picks the newest
+    artifact by the date IN THE NAME, so a stamp that resolved through the machine's
+    local zone would file the same run under two different days depending on where
+    it ran. The offset case is the one that can actually split: 2027-03-15T02:00
+    +08:00 is still 2027-03-14 in UTC, so a local-zone read names 2027-03-15 and a
+    UTC read names 2027-03-14. Same convention `corpus_shape.py:751-754` applies.
+    """
+    frame = _frame(tmp_path)
+    # Two spellings of the same UTC instant, both of which must land on 2027-03-14:
+    # a naive value taken as UTC, and one whose offset crosses the date backwards.
+    for n, (stamp, want) in enumerate([("2027-03-14T23:30:00", "2027-03-14"),
+                                       ("2027-03-15T02:00:00+08:00", "2027-03-14")]):
+        # `_run` writes to tmp_path/"out"; a later `--out-dir` wins in argparse, so
+        # each arm gets its own directory and the two cannot shadow each other.
+        out_dir = tmp_path / f"arm-{n}"
+        rc, out, _ = _run(tmp_path, frame,
+                         extra=["--now", stamp, "--out-dir", str(out_dir)])
+        assert rc == 0, f"`--now {stamp}`: {out}"
+        written = sorted(p.name for p in out_dir.iterdir())
+        assert written == [f"loss-audit-{want}.json"], (
+            f"`--now {stamp}` named the artifact {written}; the date in the name is "
+            f"the key `_newest_dated_file` ranks artifacts by, so it must be UTC")
+        payload = json.loads(next(out_dir.glob("loss-audit-*.json")).read_text())
+        assert payload["measured_at"].startswith(want), (
+            f"`--now {stamp}` must resolve in UTC, not the machine's zone: "
+            f"{payload['measured_at']}")
+        assert payload["labeling"]["labeled_by"] == (
+            f"agent:lloyd-transcript-audit-{want}"), payload["labeling"]["labeled_by"]

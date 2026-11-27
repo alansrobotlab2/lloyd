@@ -98,7 +98,7 @@ from scripts import uptake_hand_audit as uha
 __all__ = ["LABELS", "MIN_CASES", "MIN_SESSIONS", "QUOTE_MAX", "ARTIFACT_PREFIX",
            "CENSUS_GLOB", "LossAuditRefused", "artifact_name", "build_audit",
            "choose_quote", "main", "matches_census_glob", "render_text",
-           "resolve_out_dir", "scan_loss_rows", "write_artifact"]
+           "resolve_now", "resolve_out_dir", "scan_loss_rows", "write_artifact"]
 
 ARTIFACT = "funnel-loss-audit"
 VERSION = 1
@@ -760,6 +760,24 @@ def resolve_out_dir(cli_value: str | None = None, *, data_root: Path | None = No
     return fc.resolve_out_dir(cli_value, data_root=data_root, code_root=code_root)
 
 
+def resolve_now(cli_value: str | None = None) -> datetime:
+    """The instant this run stamps itself with; `--now` pins it, else live UTC.
+
+    Naive means UTC and an offset is converted to UTC, the convention
+    `scripts/maintenance/corpus_shape.py:751-754` already applies. The rule matters
+    here more than most: the date is in the artifact's NAME, and
+    `eval_instrument_index._newest_dated_file` ranks that directory's artifacts by
+    the date in the name, so a stamp resolved through the machine's local zone would
+    file one run under two different days depending on where it ran (#4612).
+    """
+    if not cli_value:
+        return datetime.now(timezone.utc)
+    now = datetime.fromisoformat(cli_value)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    return now.astimezone(timezone.utc)
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="python -m scripts.funnel_loss_audit",
@@ -788,6 +806,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--skills-root", action="append", default=None, metavar="DIR",
                     help="skill root for the cohort; repeatable (default "
                          "agent_mcp.skills.SKILLS_DIRS)")
+    ap.add_argument("--now", default=None, metavar="ISO-8601",
+                    help="ISO timestamp to pin the run (UTC if naive); the artifact "
+                         "name, `measured_at` and `labeled_by` all take their date "
+                         "from it. Default is the live clock")
     args = ap.parse_args(argv)
 
     try:
@@ -802,7 +824,8 @@ def main(argv: list[str] | None = None) -> int:
             sessions_dir=Path(args.sessions_dir) if args.sessions_dir else None,
             skills_roots=[Path(p) for p in args.skills_root] if args.skills_root
             else None,
-            uptake_root=Path(args.uptake_root) if args.uptake_root else None)
+            uptake_root=Path(args.uptake_root) if args.uptake_root else None,
+            now=resolve_now(args.now))
     except LossAuditRefused as exc:
         print(f"funnel loss audit REFUSED: {exc}")
         return 2
