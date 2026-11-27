@@ -1774,9 +1774,74 @@ def test_a_ledger_far_smaller_than_the_calibration_reddens_the_drift_check(
     assert "FOLD THE STORE" in message and "do not raise the budget" in message, message
 
 
-def _folded_store_pair(tmp_path: Path, now: float, *,
-                       omit_rounds_a_truncate_would_lose: bool = False) -> tuple[Path, Path]:
-    """A live store and the rotation the fold made from it, both in `tmp_path`.
+def _fold_clock(mod, rows: list[tuple[bytes, dict | None]]) -> float:
+    """The clock at which the fold over `rows` has a real job on BOTH sides of its boundary.
+
+    The fixture used to ask its question at `time.time()`, and what a store answers there is
+    a fact about the hour, not about the store. A fold that has just run leaves the live file
+    holding exactly two kinds of row — the `young` ones inside the window, and one
+    `newest-of-round` row for every round it rotated — and the next pass keeps BOTH kinds
+    back, so its drop side is empty BY CONSTRUCTION until the boundary advances past a row
+    that is nobody's newest row. Measured on the live store at 2026-11-27T06:30Z, inside one
+    fold-cycle of the sweep that wrote `promotions-archive-202611.jsonl.gz`: `_archive_plan`
+    returned an empty drop side with 15,081 rows kept `young` and all 2,676 rows older than
+    the boundary kept as `newest-of-round`, and the three nodes that build their fixture here
+    reddened together (backlog #4620, filed off round `SM_20261127_054731`'s `tests` rung;
+    `test_the_fold_fixture_clock_armed_a_store_a_real_fold_had_just_emptied` is the node that
+    reproduces that state on a clock of its own).
+
+    So the clock is derived from the corpus rather than waited for, which is what this file
+    already does for the two other hour-dependent facts it holds — #4153's "built here so it
+    exists at every hour", and `tests/test_retention_sweep.py:6803`, whose witness nodes pass
+    `as_of = max(row seconds)` to the same `_archive_plan` instead of the wall clock. Three
+    steps, each of which buys one thing the nodes then assert:
+
+    * the archivable population is read from `_archive_plan` ITSELF, over a clock past every
+      row's age, where no row is `young` — so every index it returns is archivable and every
+      index it keeps back is protected for good by one of its own rules (a round's newest
+      row, an undated row, a malformed line). Restating that keep rule here would be the
+      second spelling #4153 names as where a helper and the fold drift apart.
+    * the boundary is the byte-median of those rows' dates, which puts at least half their
+      bytes — and so at least one row — on the drop side.
+    * the boundary is then clamped to one second below the newest dated row, so the newest
+      row is always inside the window. Without the clamp a store whose median date IS its
+      newest date (one enormous row) would leave `in_window_rows == 0`, and the accept-side
+      node needs that number above 0.
+
+    Returns the clock to ask at; the boundary itself is
+    `now - LEDGER_ARCHIVE_AGE_DAYS * 86400`, which is where it lands by construction. The
+    residual case the clamp cannot buy — a store in which the cut would leave nothing at all
+    to move — is asserted at the one call site, with the clock in the message.
+    """
+    horizon = mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    stamps = [mod._ledger_row_seconds(row) for _line, row in rows if row]
+    dated = [s for s in stamps if s is not None]
+    assert dated, (
+        "no dated row in this store, so no clock can arm the fold: every row is `no-age`, "
+        "which `_archive_plan` keeps back at any clock whatever")
+    newest = max(dated)
+    archivable = mod._archive_plan(rows, newest + horizon + 1.0)[0]
+    assert archivable, (
+        f"the fold could move no row at ANY clock: every one of these {len(rows):,} rows is "
+        f"either some round's newest row, undated or malformed, so no clock yields a "
+        f"live/rotation pair — `young` and `newest-of-round` are the only keep reasons left")
+    movable = sorted((mod._ledger_row_seconds(rows[i][1]), len(rows[i][0]))
+                     for i in archivable)
+    half = sum(n for _stamp, n in movable) / 2
+    running = 0
+    boundary = movable[-1][0]
+    for stamp, size in movable:
+        running += size
+        if running >= half:
+            boundary = stamp
+            break
+    return min(boundary, newest - 1.0) + horizon
+
+
+def _folded_store_pair(tmp_path: Path, *,
+                       omit_rounds_a_truncate_would_lose: bool = False,
+                       store: Path | None = None) -> tuple[Path, Path, float]:
+    """A live store and the rotation the fold made from it, both in `tmp_path`, plus the clock.
 
     Built by running the sweep's own `_archive_plan` over the real live store and
     writing both halves out — the keep side as `promotions.jsonl`, the drop side as
@@ -1786,6 +1851,18 @@ def _folded_store_pair(tmp_path: Path, now: float, *,
     accepted-on case is only worth something if it is what the fold actually leaves,
     and then the arrival rate, the protected-row count and the round population are
     the live store's, not invented. The live store is read, never written.
+
+    Returns the clock the fold was run at, and the caller has to read the pair back at
+    that same clock: it is `_fold_clock`'s, not `time.time()`, because a store a fold has
+    just passed over has nothing for the NEXT fold to move and the wall clock would then
+    ask the question at an hour that has no answer (#4620). A pair is only a pair if the
+    boundary that made it is the boundary the witness is read against, so the clock leaves
+    the helper with the pair rather than being recomputed by each caller.
+
+    `store` is the source, defaulting to the live store behind `board_presence.live_ledger()`
+    — the seam that module exists for. A caller may point it at a store of its own, which is
+    how the just-folded state that #4620 turned up gets built at all: the live store is only
+    in that state for a few hours after a fold, and a node cannot wait for one.
 
     `omit_rounds_a_truncate_would_lose` drops whole rounds from the source read before
     the fold runs over it — the rounds `_rounds_a_truncate_loses` says a truncate that
@@ -1797,23 +1874,112 @@ def _folded_store_pair(tmp_path: Path, now: float, *,
     straddling round leaves, and every other round's classification is untouched because
     `_archive_plan` decides per `round_id`. Computed and applied over ONE read of the
     store: the live file is being appended to under this test, and a second read would
-    let a row land between the prediction and the fold.
+    let a row land between the prediction and the fold. One clock for the prediction and
+    the plan, from the pre-drop read both of them see: two clocks here, or a clock taken
+    after the drop, is where the prediction and the fold would disagree and the truncate
+    node would report a round loss it did not cause.
     """
     mod = _sweep_module()
-    rows = _ledger_lines(board_presence.live_ledger())
-    assert len(rows) > 1000, f"{board_presence.live_ledger()} is not a store"
+    source = board_presence.live_ledger() if store is None else store
+    rows = _ledger_lines(source)
+    assert len(rows) > 1000, f"{source} is not a store"
+    now = _fold_clock(mod, rows)
     if omit_rounds_a_truncate_would_lose:
         doomed = _rounds_a_truncate_loses(mod, rows, now)
         rows = [pair for pair in rows
                 if not (pair[1] and str(pair[1].get("round_id") or "") in doomed)]
     archive_idx, kept_idx = mod._archive_plan(rows, now)
-    assert archive_idx, "the live store has nothing for the fold to move"
+    assert archive_idx, (
+        f"the fold moved no row from {source} at the clock `_fold_clock` derived "
+        f"({time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now))}, boundary "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(now - mod.LEDGER_ARCHIVE_AGE_DAYS * 86400))})"
+        f"{' after dropping the rounds a truncate would lose' if omit_rounds_a_truncate_would_lose else ''}"
+        f", so there is no pair to write and no node below can fail")
     live = tmp_path / "promotions.jsonl"
     live.write_bytes(b"".join(rows[i][0] for i in sorted(kept_idx)))
     archive = tmp_path / "promotions-archive-202610.jsonl.gz"
     with gzip.open(archive, "wb") as handle:
         handle.write(b"".join(rows[i][0] for i in sorted(archive_idx)))
-    return live, archive
+    return live, archive, now
+
+
+def _a_just_folded_store(path: Path, now: float, *, rounds: int = 67,
+                         rows_per_round: int = 15, span_days: float = 3.0) -> Path:
+    """A store in the state a fold leaves behind, written to `path`: every row young.
+
+    `rounds x rows_per_round` rows laid out in `round_id` order over the last `span_days`,
+    every one of them inside the `LEDGER_ARCHIVE_AGE_DAYS` window at `now` — which is what a
+    fold's own keep side looks like immediately after it runs, and the state that reddened
+    #4620. Written at 1,005 rows rather than a handful because `_folded_store_pair` refuses
+    anything smaller: below 1,000 rows the source is a stub and not a store, and a fixture
+    that dodged that guard would certify a fold over a file the real check declines to read.
+    Rows carry `ts` and `round_id`, the two fields `_archive_plan` reads, the same shape
+    `test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round` writes;
+    rounds are chronological so that the ones the cut falls below are SETTLED rounds, whose
+    newest row is what keeps them out of the rotation.
+    """
+    total = rounds * rows_per_round
+    step = span_days * 86400 / (total - 1)
+    with path.open("wb") as handle:
+        for index in range(total):
+            row = {"ts": now - span_days * 86400 + index * step,
+                   "round_id": f"SM_JUST_FOLDED_{index // rows_per_round:03d}"}
+            handle.write(json.dumps(row).encode("utf-8") + b"\n")
+    return path
+
+
+def test_the_fold_fixture_clock_armed_a_store_a_real_fold_had_just_emptied(tmp_path, capsys):
+    """A store with nothing left for the fold to move at the real clock still yields a pair.
+
+    The regression this pins is #4620: three nodes in this file went red together because the
+    fixture that builds their store asserted the fold had something to move, and at that hour
+    it had nothing to move — the sweep had run within the hour and every row older than its
+    boundary was somebody's newest row, which the next pass keeps back too. `_fold_clock`
+    exists so the fixture stops depending on the hour, and this is the node that would fail
+    if it were removed: on a store built to be exactly that post-fold state, the wall clock
+    gets an empty drop side and the derived clock gets a pair the low-side check accepts.
+
+    The rows here are hand-written on the live store's shape rather than the live store's own,
+    for the reason #4153 already states: the state lasts a few hours after a fold and a node
+    cannot wait for one. The live population stays certified by the three nodes below, which
+    read the real store and lose nothing by the change — only the hour at which they ask
+    became the fixture's rather than the machine's.
+    """
+    mod = _sweep_module()
+    horizon = mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
+    store = _a_just_folded_store(tmp_path / "just-folded.jsonl", time.time())
+    rows = _ledger_lines(store)
+
+    # The premise first, as an assertion and not a comment: at the clock these nodes used to
+    # ask at, this store has NO drop side. If that ever stops holding, the rest of this node
+    # is measuring an ordinary store and #4620's shape is unpinned.
+    assert mod._archive_plan(rows, time.time())[0] == [], (
+        "the fixture store is no longer one a fold has just emptied — at the real clock some "
+        "row sits past the window, so the clock derived below is not being asked to do the "
+        "job #4620 needs done and this node proves nothing about it")
+
+    live, archive, now = _folded_store_pair(tmp_path, store=store)
+    stamps = sorted(s for s in (mod._ledger_row_seconds(r) for _line, r in rows if r)
+                    if s is not None)
+    boundary = now - horizon
+    assert stamps[0] <= boundary < stamps[-1], (
+        f"the derived clock put the fold's boundary at "
+        f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(boundary))}, outside the store's "
+        f"own dated span {_stamp(stamps[0])}..{_stamp(stamps[-1])} — inside it is what makes "
+        f"both halves non-empty, and the clamp against the newest row is the second half of "
+        f"that guarantee")
+    assert _ledger_lines(archive), "the rotation the fold wrote holds no rows"
+    assert _ledger_lines(live), "the keep side the fold wrote holds no rows"
+
+    fold = ledger_fold_witness(live, now)
+    assert archive in fold.archives, fold.describe()
+    assert fold.in_window_rows > 0, fold.describe()
+    assert fold.protected_rows > 0, fold.describe()
+    assert fold.missing_rounds == (), fold.describe()
+    assert fold.deficit_problems() == [], fold.deficit_problems()
+    assert_ledger_within_calibration_drift(fold.live_bytes, fold)
+    printed = capsys.readouterr().out
+    assert "accepted on its fold witness" in printed, printed
 
 
 def test_a_folding_store_below_the_byte_floor_is_accepted_on_its_fold_witness(
@@ -1833,9 +1999,13 @@ def test_a_folding_store_below_the_byte_floor_is_accepted_on_its_fold_witness(
     low side and prints nothing is the false green #2127 was filed against, so the
     witness line — which rotations, how many rows of each kind — has to be in the
     output for this to count.
+
+    Read back at the clock the helper derived, the one boundary that produced both halves:
+    the rows, the rounds and the arrival rate are the live store's, and only the hour is the
+    fixture's, because an hour chosen by the wall clock is an hour at which the fold may
+    legitimately have nothing left to move (#4620).
     """
-    now = time.time()
-    live, archive = _folded_store_pair(tmp_path, now)
+    live, archive, now = _folded_store_pair(tmp_path)
     fold = ledger_fold_witness(live, now)
     low, high = ledger_drift_band()
 
@@ -1888,9 +2058,8 @@ def test_a_truncated_store_with_every_rotation_present_reddens_and_names_the_row
     pinned where it can be constructed, in
     `test_a_truncate_that_drops_a_straddling_rounds_only_young_rows_names_that_round`.
     """
-    now = time.time()
-    live, archive = _folded_store_pair(
-        tmp_path, now, omit_rounds_a_truncate_would_lose=True)
+    live, archive, now = _folded_store_pair(
+        tmp_path, omit_rounds_a_truncate_would_lose=True)
     mod = _sweep_module()
     rows = _ledger_lines(live)
     window_start = now - mod.LEDGER_ARCHIVE_AGE_DAYS * 86400
@@ -2137,8 +2306,7 @@ def test_a_store_with_no_rotation_beside_it_is_never_accepted_below_the_floor(
     and because no rotation proves the fold ran, the low-side branch keeps the original
     advice instead of claiming `THIS IS NOT THE FOLD`.
     """
-    now = time.time()
-    live, _archive = _folded_store_pair(tmp_path, now)
+    live, _archive, now = _folded_store_pair(tmp_path)
     fold = ledger_fold_witness(live, now, archives=[])
     low, _high = ledger_drift_band()
     assert fold.live_bytes < low, fold.describe()
