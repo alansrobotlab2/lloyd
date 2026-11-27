@@ -44,7 +44,9 @@ either moved. Since #1627 it has a third duty, which is the one that bites:
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import json
 import re
 import shlex
@@ -8372,6 +8374,385 @@ def test_section_10_carries_exactly_one_2026_10_28_bullet_and_its_stall_test_is_
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# #4616: the one guard that decides when a re-derive arm can no longer run
+# ─────────────────────────────────────────────────────────────────────────────
+# Three nodes re-run the canonical invocation over the engine log rotation as a witness that
+# the committed bytes can still be produced: 2026-11-11 (#4100), 2026-11-18 (#4256) and
+# 2026-11-26 (#4613). All three asked the PROCESS whether it had failed — `returncode`, or
+# whether the file it wrote exists — and neither question can ever report an expired day:
+# the script's `main` writes the extract and returns 0 whatever the surviving tape yielded, so a day that has
+# slipped off the rotation produces rc 0 and a SHORTER extract, and the byte comparison below
+# each arm then reddens the suite for a fact about log rotation. Measured on 2026-11-26 by
+# re-deriving 2026-11-11 with `agent-llm-primary.log.10` withheld from a scratch copy of
+# `logs/services`: rc 0, 45,708 bytes against the committed 131,790, `kv_samples` 1,201
+# against 4,683, `turns` and `misses` unchanged at 314 and 54.
+#
+# The one state where the exit code IS nonzero, measured the same day against an empty data root,
+# is a box with no `usage.db` to open: rc 1 and no extract written at all. That is a broken
+# invocation and stays RED, and it is not the case the deleted skip was written for — on such a
+# box every one of the three arms has already skipped at the daily-copy check above its re-derive.
+#
+# The reference has to be the committed extract's own sample span, and NOT window arithmetic —
+# which is what the item originally asked for and what these helpers refuse. `extract` accepts
+# stamps from `window_start - LOOKBACK_S` up to `window_end + STATUS_INTERVAL_S`, and that same
+# truncated reading's first and last samples (1794420800 and 1794441601) both sit inside those
+# limits, so a guard bounded on them calls a quarter of a day a whole one and leaves the byte
+# assert red anyway. The committed span is the only reference that knows what the day looked
+# like when the daily job cut it.
+
+#: One retained piece of the engine log rotation: its file name and the UTC day its last byte
+#: was written. A rotated file's mtime is exactly that, so the pair says which end of the tape
+#: is about to go and where the surviving tape stops.
+RotationFile = namedtuple("RotationFile", ["name", "last_written"])
+
+
+def _sample_span(extract: dict) -> tuple[int, int] | None:
+    """The first and last KV sample stamp an extract holds, or None when it holds none."""
+    samples = extract["kv_samples"]
+    return None if not samples else (samples[0][0], samples[-1][0])
+
+
+def _rederive_covers_committed(committed: dict, fresh: dict) -> bool:
+    """Whether a freshly re-derived extract still spans the whole day the committed one has.
+
+    The single test all three re-derive arms share (#4616 clause 1). It reads two extracts and
+    nothing else — never a returncode, never whether the file exists, never stdout or stderr.
+    Fresh covers committed when it holds samples at all and its span reaches at least as far
+    back and at least as far forward as the committed span, so the three ways the tape loses a
+    day all fail it: nothing left of the day (no samples), the head gone (fresh first is LATER
+    than committed first), the tail gone (fresh last is EARLIER than committed last). A day the
+    tape still holds re-derives to the same span, or to a superset of it, and passes.
+    """
+    want = _sample_span(committed)
+    assert want is not None, (
+        "the committed extract holds no KV samples, so there is no span for a re-derive to "
+        "cover and this guard can decide nothing; every tracked day in this family has samples, "
+        "so that is a corrupted fixture and not a rotated tape")
+    got = _sample_span(fresh)
+    return got is not None and got[0] <= want[0] and got[1] >= want[1]
+
+
+def _rederived_extract(out: Path, written: "subprocess.CompletedProcess[str]") -> dict:
+    """Read back the extract a re-derive invocation just wrote.
+
+    An unreadable file stays RED. That is the one state the old `returncode`/`exists` skip could
+    reach, and it is not an expired day: `--write-extract` writes the file for any window whose
+    store it can open (measured: an empty data root exits 1 and writes nothing, a tape that lost
+    half the day exits 0 and writes a short extract). A run that left no extract is a broken
+    invocation and has to read as one. The output tail is quoted for diagnosis only — no branch
+    here reads it, and a skip is never decided from process output (#4616 clause 4).
+    """
+    try:
+        return json.loads(out.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        raise AssertionError(
+            f"the canonical invocation left no readable extract at {out}, which is a broken "
+            "invocation and not an expired tape; the output it produced is: "
+            f"{(written.stderr or written.stdout or '(nothing)')[-400:]!r}") from exc
+
+
+def _bytes_are_the_witness(fresh: Path, committed: Path | bytes) -> bool:
+    """The byte comparison every re-derive arm performs once the guard says the day is covered.
+
+    Shared for one reason (#4616 clause 3): so the control that proves the comparison still bites
+    is the same comparison, not a restatement of it. Coverage and identity are different
+    questions — a reading can span the committed day exactly and still be different bytes, and
+    that is the case this witness exists to fail. `committed` is a Path for the fixture-rooted
+    arms' committed file and bytes for the arms that already hold the daily job's copy in hand.
+    """
+    return fresh.read_bytes() == (committed if isinstance(committed, bytes)
+                                 else committed.read_bytes())
+
+
+def _production_data_root() -> Path:
+    """The root the script's `--data-root` defaults to, read where the script reads it.
+
+    `main` imports it from `app.paths` inside itself, so this module reaches the same object the
+    same way rather than inventing a path: the arms re-derive against that rotation, and the
+    reproduction below has to withhold files from the same directory or it proves nothing.
+    """
+    from app.paths import PRODUCTION_DATA_ROOT
+    return Path(PRODUCTION_DATA_ROOT)
+
+
+def _rotation_inventory(data_root: Path | None = None) -> list[RotationFile]:
+    """Every retained `agent-llm-primary.log*`, oldest last-written first.
+
+    Read from the root the script's `--data-root` defaults to, because that is the rotation the
+    arms re-derive against — and read at the moment of the skip, which is why the expiry is
+    published by the message instead of being dated into a comment where it would rot.
+    """
+    from datetime import timezone
+
+    root = (_production_data_root() if data_root is None else data_root) / "logs" / "services"
+    # Ordered by mtime FIRST, then stable-sorted by UTC day: two rotations landing in one UTC day
+    # keep their mtime order, so the live log stays last and the next file to be dropped stays
+    # first. A name tie-break would put the live log BEFORE `agent-llm-primary.log.1` and make
+    # the skip message name the wrong end of the tape; the message node's positive control is
+    # what catches that if this ordering is ever changed back.
+    paths = sorted(root.glob("agent-llm-primary.log*"), key=lambda p: p.stat().st_mtime)
+    files = []
+    for path in paths:
+        day = _Moment.fromtimestamp(path.stat().st_mtime, tz=timezone.utc).date().isoformat()
+        files.append(RotationFile(path.name, day))
+    return sorted(files, key=lambda f: f.last_written)
+
+
+def _rederive_expiry_message(day: str, committed: dict, fresh: dict,
+                             inventory: list[RotationFile]) -> str:
+    """Build the skip text for a re-derive arm whose fresh extract no longer spans the day.
+
+    A skip here has to read as expiry and never as a pass (#4616 clause 5), so the helper states
+    what expired (the day), how much of the committed span the fresh reading actually covers,
+    which rotation is now the oldest on disk and where its tape stops, and which arms still pin
+    the bytes — the sha256 digest, the byte-count pin and the compare against the daily job's own
+    copy all still run above every one of these guards.
+    """
+    want = _sample_span(committed)
+    got = _sample_span(fresh)
+    oldest = inventory[0] if inventory else RotationFile("(none retained)", "(unknown)")
+    newest = inventory[-1] if inventory else oldest
+    return (
+        f"re-deriving {day} from this box's tape is no longer possible, and that is the day "
+        "expiring out of re-derivability rather than a regression: the extract just written "
+        f"spans {'nothing' if got is None else f'{got[0]} to {got[1]}'} of the committed "
+        f"extract's own sample span {want[0]} to {want[1]} "
+        f"({len(committed['kv_samples']):,} sample rows committed, "
+        f"{len(fresh['kv_samples']):,} re-derived; boot lines re-derived "
+        f"{fresh.get('pool_tokens', [])!r} against the committed "
+        f"{committed.get('pool_tokens', [])!r}). Oldest retained rotation "
+        f"`{oldest.name}`, last written {oldest.last_written}; newest `{newest.name}`, last "
+        "written "
+        f"{newest.last_written}. The witness that survives this is above the guard: the sha256 "
+        "digest of the day the daily job wrote, its byte count, and the compare against the "
+        "job's own copy — only this re-derive arm has expired, so do not chase it.")
+
+
+#: The rotation signature #4616 measured, planted: 2026-11-11 re-derived on 2026-11-26 with
+#: `agent-llm-primary.log.10` withheld from a scratch copy of `logs/services`. `kv_samples`
+#: carries the two ENDPOINTS of the 1,201-row span the run produced (it held 1,201 rows between
+#: them; the guard reads only the endpoints), and `turns`/`misses` are the measured counts 314
+#: and 54 as repeated rows of the shapes `extract` writes, because those fields are what makes
+#: the reading look healthy: `derive`'s turn and miss figures are byte-identical to the
+#: committed day's, and only the sample span says the tape lost the head of the window.
+#: `pool_tokens` came back empty — all three of that day's boot lines sit in the withheld file.
+_ROTATION_HEAD_LOST_2026_11_11 = {
+    "window": ["2026-11-11", "2026-11-12"],
+    "engine_tz": "America/Los_Angeles",
+    "year": 2026,
+    "pool_tokens": [],
+    "turns": [["2026-11-11T02:56:24", "chat", 0, 0]] * 314,
+    "misses": [[1794378520.258, 52501, 15, 115781, 0, "autonomy", 1794378467.632]] * 54,
+    "kv_samples": [[1794420800, 0.0, 0, 0], [1794441601, 0.0, 0, 0]],
+}
+
+
+def test_the_rederive_guard_reads_the_committed_extract_span_not_the_window(
+        fifteenth_raw, tmp_path):
+    """#4616 clauses 2 and 3: the shared guard fires on the rotation signature this box actually
+    produces, stays silent on a complete re-derive, and leaves the byte assert behind it armed.
+
+    Clause 2, the expiry case. The measured 2026-11-11 head-loss signature spans
+    `1794420800 → 1794441601` while the committed extract spans `1794356183 → 1794441601`, so
+    the fresh reading starts 64,617 s later than the day the job cut: NOT covered, even though
+    both fresh stamps lie inside the limits `extract`'s own `in_window` accepts
+    (`window_start - LOOKBACK_S` to `window_end + STATUS_INTERVAL_S`). That last assert is the
+    reason the guard compares spans: written against window arithmetic, the guard would call
+    this truncated reading a whole day and the byte assert behind it would fire red, which is
+    the bug #4616 exists to fix.
+
+    Clause 3, the non-expiry case. A reading with the committed span exactly is COVERED, and
+    with spans equal the byte comparison still moves on one added byte — so the new skip cannot
+    quietly void the witness it sits in front of.
+    """
+    committed_span = _sample_span(fifteenth_raw)
+    assert committed_span == (1794356183, 1794441601), (
+        f"the committed 2026-11-11 extract now spans {committed_span}, not the span #4616 "
+        "measured on 2026-11-26, so the signature below is no longer the one this guard has to "
+        "catch and both figures need re-measuring from the file")
+    assert len(fifteenth_raw["kv_samples"]) == FIFTEENTH_RAW_KV_ROWS, (
+        f"the committed extract holds {len(fifteenth_raw['kv_samples'])} sample rows, not the "
+        f"{FIFTEENTH_RAW_KV_ROWS} this node quotes")
+
+    fresh_span = _sample_span(_ROTATION_HEAD_LOST_2026_11_11)
+    assert fresh_span == (1794420800, 1794441601), (
+        f"the planted rotation signature spans {fresh_span}, not the measured 1794420800 → "
+        "1794441601, so a pass below would be a pass about some other reading")
+    from datetime import timezone
+
+    window_start = _Moment(2026, 11, 11, tzinfo=timezone.utc).timestamp()
+    window_end = _Moment(2026, 11, 12, tzinfo=timezone.utc).timestamp()
+    lo, hi = window_start - W.LOOKBACK_S, window_end + W.STATUS_INTERVAL_S
+    assert lo <= fresh_span[0] < hi and lo <= fresh_span[1] < hi, (
+        f"both measured stamps are inside neither [{lo}, {hi}) any more, so this node's whole "
+        "point — that window arithmetic cannot see the truncation — has to be re-measured")
+    assert not _rederive_covers_committed(fifteenth_raw, _ROTATION_HEAD_LOST_2026_11_11), (
+        "the guard called a reading that lost 64,617 s of the day's head a covered day, which "
+        "means the byte assert behind it goes red on the next rotation exactly as #4616 found")
+
+    # The other two ways the tape takes a day: no samples left at all (the measured 2026-10-28
+    # off-tape reading), and the tail gone rather than the head.
+    assert not _rederive_covers_committed(
+        fifteenth_raw, dict(_ROTATION_HEAD_LOST_2026_11_11, kv_samples=[])), (
+        "the guard reported an extract with no samples as covered, so it is not deciding the "
+        "empty case #4616 measured")
+    assert not _rederive_covers_committed(
+        fifteenth_raw,
+        dict(_ROTATION_HEAD_LOST_2026_11_11,
+             kv_samples=[[committed_span[0], 0.0, 0, 0], [committed_span[1] - 10, 0.0, 0, 0]])), (
+        "the guard reported a reading one interval short at the tail as covered")
+
+    # Clause 3: equal spans are covered, and the byte assert the guard protects still bites.
+    same_span = dict(_ROTATION_HEAD_LOST_2026_11_11,
+                     kv_samples=[[committed_span[0], 0.0, 0, 0], [committed_span[1], 0.0, 0, 0]])
+    assert _rederive_covers_committed(fifteenth_raw, same_span), (
+        "the guard refused a reading whose span equals the committed one, so it would skip the "
+        "re-derive witness on a day the tape still holds and void it silently")
+    # The byte half, through the comparison the arms actually run (`_bytes_are_the_witness`), on
+    # an extract whose span is the committed one and whose bytes are not: coverage says proceed,
+    # the witness says differ. `json.dumps` with the script's own separators round-trips the
+    # committed file byte for byte, so the only change here is one boot-line token count — a
+    # reading off a tape that still spans the day but is not the day's bytes.
+    same_span_bytes = json.dumps(
+        {**fifteenth_raw, "pool_tokens": [fifteenth_raw["pool_tokens"][0] + 1,
+                                          *fifteenth_raw["pool_tokens"][1:]]},
+        indent=None, separators=(",", ":"), sort_keys=True).encode("utf-8") + b"\n"
+    altered = tmp_path / FIFTEENTH_EXTRACT.name
+    altered.write_bytes(same_span_bytes)
+    assert _rederive_covers_committed(fifteenth_raw, json.loads(same_span_bytes)), (
+        "the guard did not report an extract whose samples are the committed ones as covered, so "
+        "the byte witness behind it would never be reached on a full day")
+    assert not _bytes_are_the_witness(altered, FIFTEENTH_EXTRACT), (
+        "the comparison the guard sits in front of called a one-token-count difference the "
+        "committed bytes, so past the guard there would be nothing left to fail")
+    # Control for the falsifier "the shared witness always reports False": a faithful copy of the
+    # committed file has to compare equal, or the assert above would pass on any bytes at all.
+    faithful = tmp_path / "faithful.json"
+    faithful.write_bytes(FIFTEENTH_EXTRACT.read_bytes())
+    assert _bytes_are_the_witness(faithful, FIFTEENTH_EXTRACT), (
+        "the shared witness reports a byte-for-byte copy of the committed extract as different, "
+        "so it would fail every re-derive arm whatever the tape holds")
+
+
+def test_withholding_the_oldest_rotation_leaves_the_script_happy_and_the_guard_unfooled(
+        fifteenth_raw, tmp_path):
+    """#4616's premise, reproduced rather than quoted: dropping one rotation file makes the
+    canonical invocation return 0 with a truncated extract, so the arms could never learn from
+    the process that the day had gone, and only the span comparison can.
+
+    This is the same 13-second reproduction #4616's triage ran: a scratch data root holding the
+    box's real `usage.db` and `event_logs` and every retained `agent-llm-primary.log*` EXCEPT the
+    oldest last-written one, then 2026-11-11 re-derived into a file. Two outcomes are possible and
+    both are graded, because which end of the day sits in which rotation file is a fact about the
+    box that moves as the tape turns:
+
+    * the withheld file held none of this window, so the reading still covers the committed span
+      — and then it must reproduce the committed bytes exactly, which is the witness in full;
+    * or it held part of the day, so the guard reports it uncovered — and then the file must be
+      strictly smaller than the committed extract while the process exited 0.
+
+    The second branch is the item's finding, stated the right way round: `assert
+    written.returncode == 0` below is a node proving that the exit code cannot report a
+    rotated-away day. It is not a licence for any arm to ask; the three arms are forbidden from
+    asking at all by `test_every_rederive_extract_arm_asks_the_shared_guard_and_never_the_process`.
+    """
+    inventory = _rotation_inventory()
+    assert len(inventory) >= 2, (
+        f"only {len(inventory)} rotation file(s) on this box, so there is no oldest file to "
+        "withhold and the reproduction has nothing to say")
+    withheld = inventory[0]
+    tape = tmp_path / "logs" / "services"
+    tape.mkdir(parents=True)
+    live_root = _production_data_root()
+    (tmp_path / "usage.db").symlink_to(live_root / "usage.db")
+    (tmp_path / "event_logs").symlink_to(live_root / "event_logs")
+    kept = 0
+    for entry in sorted((live_root / "logs" / "services").glob("agent-llm-primary.log*")):
+        if entry.name == withheld.name:
+            continue
+        (tape / entry.name).symlink_to(entry)
+        kept += 1
+    assert kept == len(inventory) - 1, (
+        f"the scratch tape holds {kept} of {len(inventory)} rotation files, not every file but "
+        f"the withheld `{withheld.name}`, so this is not the reproduction it claims to be")
+    out = tmp_path / FIFTEENTH_EXTRACT.name
+    written = subprocess.run(
+        [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
+         "--start", "2026-11-11", "--end", "2026-11-12",
+         "--data-root", str(tmp_path), "--write-extract", str(out)],
+        cwd=str(ROOT), capture_output=True, text=True)
+    fresh = _rederived_extract(out, written)
+    committed_bytes = FIFTEENTH_EXTRACT.read_bytes()
+    assert written.returncode == 0, (
+        "with one rotation file withheld the script exited NONZERO, so #4616's premise — that "
+        "the process stays silent about a half-swallowed day and only the span comparison "
+        "notices — has stopped holding and the arms' old skip would start firing")
+    if _rederive_covers_committed(fifteenth_raw, fresh):
+        assert out.read_bytes() == committed_bytes, (
+            f"the tape minus `{withheld.name}` still spans the committed day, so this should "
+            "reproduce its committed bytes exactly; it did not, which means the witness is "
+            "diverging for some reason other than rotation")
+    else:
+        fresh_bytes = out.read_bytes()
+        assert len(fresh_bytes) < len(committed_bytes), (
+            f"the guard reported the reading uncovered but it is {len(fresh_bytes):,} bytes "
+            f"against the committed {len(committed_bytes):,}, so the guard and the bytes "
+            "disagree about what came off the tape")
+        msg = _rederive_expiry_message("2026-11-11", fifteenth_raw, fresh, inventory)
+        assert withheld.name in msg, (
+            "the guard caught the truncation but the message it would print does not name a "
+            f"retained rotation file, so a reader could not tell which end of the tape went. "
+            f"Built message:\n{msg}")
+
+
+def test_the_rotation_expiry_skip_message_names_the_day_the_oldest_rotation_and_the_byte_pin(
+        fifteenth_raw):
+    """#4616 clause 5: the skip text is assembled by the shared helper from the rotation
+    inventory it is handed, so what it names is measured when the skip happens.
+
+    The inventory below is the shape the box has after the rotation that takes the fifteenth's
+    day: the file standing at `agent-llm-primary.log.10` is then the one that was `.9`, last
+    written 2026-11-15, and that is the name owed-check expects to read in the skip. Four things
+    have to be in the message: the day, the oldest retained rotation file, its last-written day,
+    and the fact that the digest and byte-count arms still pin the bytes.
+
+    The positive control is the inventory source itself: `_rotation_inventory` on this box is
+    non-empty, reads as ISO days in ascending order, and ends at the live log — the file names
+    the message will carry.
+    """
+    inventory = [RotationFile("agent-llm-primary.log.10", "2026-11-15"),
+                 RotationFile("agent-llm-primary.log.9", "2026-11-16"),
+                 RotationFile("agent-llm-primary.log.8", "2026-11-18"),
+                 RotationFile("agent-llm-primary.log", "2026-11-27")]
+    msg = _rederive_expiry_message("2026-11-11", fifteenth_raw,
+                                   _ROTATION_HEAD_LOST_2026_11_11, inventory)
+    for want, why in (
+            ("2026-11-11", "the message does not name the day that expired"),
+            ("agent-llm-primary.log.10", "the message does not name the oldest retained "
+                                        "rotation file, which is what owed-check reads"),
+            ("2026-11-15", "the message does not give that file's last-written day"),
+            ("sha256", "the message does not say the digest arm still pins the bytes"),
+            ("byte count", "the message does not say the byte-count arm still pins the bytes"),
+            ("rather than a regression", "the message does not say a skip is expiry")):
+        assert want in msg, f"{why}. The message built was:\n{msg}"
+    assert "1794420800" in msg and "1794356183" in msg, (
+        "the message does not quote the two spans, so a reader cannot tell how much of the day "
+        "the tape lost. The message built was:\n" + msg)
+
+    live = _rotation_inventory()
+    assert live, (
+        "no `agent-llm-primary.log*` under the script's default data root, so no re-derive arm "
+        "could run here and the skip message would name nothing")
+    days = [f.last_written for f in live]
+    assert days == sorted(days), f"the inventory is not oldest-first: {live}"
+    assert all(re.fullmatch(r"\d{4}-\d{2}-\d{2}", f.last_written) for f in live), (
+        f"an inventory stamp is not an ISO UTC day: {live}")
+    assert live[-1].name == "agent-llm-primary.log", (
+        f"the newest entry in the inventory is {live[-1].name}, not the live log, so the "
+        "message would name the wrong end of the tape")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # The fifteenth committed extract: 2026-11-11 (#4100)
 # ─────────────────────────────────────────────────────────────────────────────
 # The day the standing daily job counted next, and the day that moved the headline: 2026-11-11
@@ -8434,11 +8815,13 @@ def test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_b
     job's file is what the family has asked for since #2248: it pins that nobody re-cut the
     numbers between the job that found the day and the round that committed it. Re-running
     `--write-extract` is asked of this day specifically because the item's Step 1 asks for it
-    and the tape still holds 2026-11-11 — rotation is 11 files with the oldest
-    (`agent-llm-primary.log.10`) at 2026-10-29 as measured on 2026-11-12, roughly ten more days
-    of re-extractability. That clause therefore stops being runnable on its own schedule, not
-    this file's, and it skips rather than silently passing: the digest and byte count below are
-    the halves that survive the tape.
+    and the tape still held 2026-11-11 when #4100 landed. Whether it still does is a fact about
+    this box and not about this file, and #4616 measured that the PROCESS cannot answer it — the
+    script exits 0 whatever the surviving tape yields — so the arm below asks
+    `_rederive_covers_committed` instead, and the skip it raises names the rotation it found
+    rather than a date copied in here. The clause therefore stops being runnable on its own
+    schedule, not this file's, and it skips rather than silently passing: the digest and byte
+    count below are the halves that survive the tape.
     """
     assert fifteenth_raw["window"] == ["2026-11-11", "2026-11-12"], (
         "the committed day is not the [2026-11-11, 2026-11-12) UTC window the item quotes")
@@ -8477,21 +8860,22 @@ def test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_b
         "the committed day differs from the job's bytes, and the gap between the two is the "
         "unauditable one: someone re-cut the day between finding it and committing it")
     # Step 1's own witness: the canonical invocation, run into a scratch path, reproduces the
-    # committed bytes. Skips when the tape has moved past the day, which is a fact about log
-    # rotation and not a licence to believe the file.
+    # committed bytes. What ends this witness is a fact about log rotation, and the process
+    # cannot report it — `main` writes the extract and returns 0 for a day the tape has half
+    # swallowed, which is exactly what #4616 measured on 2026-11-26 — so the arm asks the shared
+    # guard whether the extract just written still spans the committed extract's own samples.
+    # Span coverage is the test; `in_window`'s limits would pass a truncated day.
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / FIFTEENTH_EXTRACT.name
-        run = subprocess.run(
+        written = subprocess.run(
             [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
              "--start", "2026-11-11", "--end", "2026-11-12", "--write-extract", str(out)],
             cwd=str(ROOT), capture_output=True, text=True)
-        if run.returncode != 0 or not out.exists():
-            pytest.skip(
-                "the tape no longer holds 2026-11-11 (rotation, as measured on 2026-11-12: 11 "
-                f"files, oldest `agent-llm-primary.log.10` at 2026-10-29), so the invocation "
-                f"cannot be re-run: rc={run.returncode} "
-                f"{run.stderr[-300:] if run.stderr else ''}")
-        assert out.read_bytes() == FIFTEENTH_EXTRACT.read_bytes(), (
+        fresh = _rederived_extract(out, written)
+        if not _rederive_covers_committed(fifteenth_raw, fresh):
+            pytest.skip(_rederive_expiry_message("2026-11-11", fifteenth_raw, fresh,
+                                                 _rotation_inventory()))
+        assert _bytes_are_the_witness(out, FIFTEENTH_EXTRACT), (
             "re-running the canonical invocation for this window produces bytes that differ "
             "from the committed extract, so the committed day is not what the script derives "
             "from the logs the item's figures came from")
@@ -8718,29 +9102,32 @@ def test_the_sixteenth_extract_is_committed_byte_identical_to_the_daily_jobs_cop
         pytest.skip(
             f"this box has no {SIXTEENTH_EXTRACT.name} under {DAILY_EXTRACT_DIR}; the daily "
             "job's copy is the evidence this arm needs. The digest above is the surviving "
-            "arm. The re-derive arm below begins skipping once the rotation passes "
-            "2026-11-18, and that skip is the expected state, not a regression (#4256's "
-            "owed-check clause).")
+            "arm. The re-derive arm below is decided by `_rederive_covers_committed`, which "
+            "asks whether the extract it just wrote still spans the committed extract's own "
+            "samples — #4616 removed the branch that asked the process, which could never "
+            "answer, and whatever that guard reports when the day goes off the tape is the "
+            "expected state, not a regression (#4256's owed-check clause).")
     assert living.read_bytes() == committed, (
         f"the committed extract differs from the daily job's own {living}: one of them was "
         "edited, and #3507's case for byte-level agreement — an extract whose KV sample list "
         "held 2026-09-24's data under a 2026-09-25 label — is exactly this difference")
     fresh = tmp_path / SIXTEENTH_EXTRACT.name
-    proc = subprocess.run(
+    written = subprocess.run(
         [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
          "--start", "2026-11-18", "--end", "2026-11-19", "--gate", "0.6",
          "--write-extract", str(fresh)],
         cwd=str(ROOT), capture_output=True, text=True)
-    if proc.returncode != 0:
-        tail = (proc.stderr or proc.stdout).strip().splitlines()
-        if "no service log" in " ".join(tail).lower():
-            pytest.skip(
-                "this checkout has no agent-llm-primary log covering 2026-11-18, so the "
-                "re-derive arm cannot run here; the committed bytes and the digest above "
-                "still stand. On the live box the invocation is exact and exits 0.")
-        raise AssertionError(
-            f"`--write-extract` exited {proc.returncode}: {tail[-3:] if tail else '(no output)'}")
-    assert fresh.read_bytes() == committed, (
+    # #4616: this arm used to ask the process — first a nonzero exit, then a grep of its output
+    # — and both of those tests were dead code. `main` writes the extract and returns 0 for any
+    # window it can open, and the string the deleted branch grepped for is printed by nothing
+    # under `scripts/` or `app/`: at HEAD the only occurrence of it in the repository was the
+    # grep itself. The shared guard is now the only skip this arm can take, and it takes it on
+    # the span the extract just written covers, never on an exit code or on output text.
+    fresh_extract = _rederived_extract(fresh, written)
+    if not _rederive_covers_committed(sixteenth_raw, fresh_extract):
+        pytest.skip(_rederive_expiry_message("2026-11-18", sixteenth_raw, fresh_extract,
+                                             _rotation_inventory()))
+    assert _bytes_are_the_witness(fresh, committed), (
         "`--write-extract` reproduced 2026-11-18 differently from the committed bytes, so the "
         "derivation and the job's extract are no longer the same computation — which, given "
         "#3507's mislabelled-sample-list case, has to be read as a discrepancy in the data "
@@ -9271,14 +9658,17 @@ def seventeenth(seventeenth_raw):
 
 
 def test_the_seventeenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy(
-        tmp_path):
+        tmp_path, seventeenth_raw):
     """The committed bytes, and only the committed bytes, are the evidence (§10's rule since
     #3341), so the committed bytes have to be the job's bytes — the node #4051 cut for
     2026-11-10, #4100 for 2026-11-11 and #4256 for 2026-11-18, run on 2026-11-26.
 
     Byte identity, not "the same window". A fixture re-derived after the tape moved would
     reproduce the counts while being different evidence, and `--gate 0.6` is not the same
-    command the standing job runs either.
+    command the standing job runs either. #4616 measured exactly that pair on a day that had
+    half gone off the tape: `turns` and `misses` byte-identical to the committed day, a quarter
+    of its sample rows, and rc 0 — which is why the re-derive arm below is decided by the span
+    the fresh extract covers rather than by the process.
     """
     assert SEVENTEENTH_EXTRACT.name in {p.name for p in _tracked_extracts()}, (
         f"{SEVENTEENTH_EXTRACT.name} is not tracked under tests/fixtures, so the byte-identity "
@@ -9308,26 +9698,148 @@ def test_the_seventeenth_extract_is_committed_byte_identical_to_the_daily_jobs_c
     fresh.write_bytes(committed + b"\n")
     assert committed != fresh.read_bytes(), (
         "the comparison did not move on a one-byte change, so it is not comparing bytes")
-    # Step 1's own witness, as #4100 added for 2026-11-11: the canonical invocation, run into
-    # a scratch path, reproduces the committed bytes from the logs. Skips when the tape has
-    # rotated past the day — measured on 2026-11-27, 11 files with the oldest,
-    # `agent-llm-primary.log.10`, last written 2026-11-11, which puts 2026-11-26 about 15 days
-    # inside a window that holds roughly 11 days of tape. That is the day this extract expires
-    # out of re-derivation, so this arm is a witness for now and not a standing guarantee.
+    # Step 1's own witness, as #4100 added for 2026-11-11: the canonical invocation, run into a
+    # scratch path, reproduces the committed bytes from the logs. What ends it is the tape, and
+    # the process cannot report the tape — #4616 measured the old `returncode`/`exists` skip
+    # firing on nothing while the extract it protected came back a quarter of its size, so the
+    # arm asks `_rederive_covers_committed` instead and that guard compares the fresh extract's
+    # sample span with the committed extract's own. Which day is still on the tape is published
+    # by the skip message from the rotation it reads at the time, never dated into this comment
+    # where it would rot: 2026-11-26 sits inside roughly the eleven days of rotation this box
+    # retains, so this arm is a witness for now and not a standing guarantee.
     with tempfile.TemporaryDirectory() as td:
         out = Path(td) / SEVENTEENTH_EXTRACT.name
-        run = subprocess.run(
+        written = subprocess.run(
             [sys.executable, "-m", "scripts.vllm_prefix_miss_window",
              "--start", "2026-11-26", "--end", "2026-11-27", "--write-extract", str(out)],
             cwd=str(ROOT), capture_output=True, text=True)
-        if run.returncode != 0 or not out.exists():
-            pytest.skip(
-                "the tape no longer holds 2026-11-26, so the invocation cannot be re-run: "
-                f"rc={run.returncode} {run.stderr[-300:] if run.stderr else ''}")
-        assert out.read_bytes() == committed, (
+        fresh = _rederived_extract(out, written)
+        if not _rederive_covers_committed(seventeenth_raw, fresh):
+            pytest.skip(_rederive_expiry_message("2026-11-26", seventeenth_raw, fresh,
+                                                 _rotation_inventory()))
+        assert _bytes_are_the_witness(out, committed), (
             "re-running the canonical invocation for this window produces bytes that differ "
             "from the committed extract, so the committed day is not what the script derives "
             "from the logs the item's figures came from")
+
+
+def _process_and_temp_probes(src: str) -> list[str]:
+    """Every place a snippet asks a derivation process, or a scratch extract file, whether it
+    worked — found by the name each handle was BOUND to, not by a list of likely names.
+
+    #4616's own review rung pointed out that a ban listing `run.`/`proc.`/`written.` is evaded by
+    renaming the handle, so this resolves the bindings first: any name bound to
+    `subprocess.run(...)` is a process handle (except one bound on a line naming `git`, which is
+    the tracked-archaeology handle the fifteenth legitimately asks), and any name bound from
+    `tmp_path` / `TemporaryDirectory` / `Path(td)` is a scratch extract file. Those two kinds are
+    exactly what clause 1 forbids an arm to consult; the daily job's copy under
+    `DAILY_EXTRACT_DIR` is neither, so asking whether that file exists stays legal.
+    """
+    tree = ast.parse(src)
+    proc, scratch = set(), set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        targets = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if not targets:
+            continue
+        text = ast.get_source_segment(src, node) or ""
+        func = getattr(node.value, "func", None)
+        is_run = (getattr(func, "attr", "") == "run"
+                  and getattr(getattr(func, "value", None), "id", "") == "subprocess")
+        if is_run:
+            # A probe of git is a different witness and does answer its question, so it is exempt
+            # — decided from the whole call's source, because the argv list is routinely on its own
+            # line and a line-local check would miss it and reddens the tracked-archaeology probe.
+            if '"git"' not in text and "'git'" not in text:
+                proc.update(targets)
+        elif re.search(r"\b(tmp_path|TemporaryDirectory|Path\(td\))\b", text):
+            scratch.update(targets)
+    offenders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Attribute) or not isinstance(node.value, ast.Name):
+            continue
+        if node.attr in ("returncode", "stderr", "stdout") and node.value.id in proc:
+            offenders.append(f"{node.value.id}.{node.attr}")
+        elif node.attr == "exists" and node.value.id in scratch:
+            offenders.append(f"{node.value.id}.exists()")
+    return offenders
+
+
+#: The three nodes that re-run the canonical invocation over the rotation as a witness.
+_REDERIVE_ARMS = (
+    test_the_fifteenth_extract_is_committed_and_matches_the_daily_job_byte_for_byte,
+    test_the_sixteenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy,
+    test_the_seventeenth_extract_is_committed_byte_identical_to_the_daily_jobs_copy,
+)
+
+
+def test_every_rederive_extract_arm_asks_the_shared_guard_and_never_the_process():
+    """#4616 clauses 1, 4 and 5, read off the three arms' own source.
+
+    One guard, three callers, no other exit. Each arm that re-runs the canonical invocation has
+    to reach `_rederive_covers_committed` for its skip and build that skip with
+    `_rederive_expiry_message`, and must not consult the process it just ran — not its exit
+    code, not whether the file it wrote is there, not its output. The git handle in the
+    fifteenth's tracked-check is exempt: it asks a question of git, which does answer.
+
+    The removed branch is named here by construction rather than by literal, because clause 4 is
+    an absence grep over this file and the file must not itself contain what it removes.
+    """
+    removed_branch = "no " + "service log"
+    whole_file = Path(__file__).resolve().read_text(encoding="utf-8")
+    assert removed_branch not in whole_file, (
+        "the branch #4616 deleted is back in this file somewhere: clause 4's check is a grep "
+        "for that string over `tests/`, so its text may not appear even in a comment about it")
+    for arm in _REDERIVE_ARMS:
+        src = inspect.getsource(arm)
+        assert "scripts.vllm_prefix_miss_window" in src, (
+            f"{arm.__name__} no longer runs the canonical invocation, so it is not one of the "
+            "re-derive arms and does not belong in `_REDERIVE_ARMS`")
+        assert "_rederive_covers_committed(" in src, (
+            f"{arm.__name__} decides its re-derive skip somewhere other than the shared guard, "
+            "which is the divergence #4616 clause 1 exists to prevent")
+        assert "_rederive_expiry_message(" in src, (
+            f"{arm.__name__} skips with an ad-hoc message instead of the one the shared helper "
+            "assembles from the rotation inventory, so its skip would not name the tape")
+        probes = _process_and_temp_probes(src)
+        assert not probes, (
+            f"{arm.__name__} decides on the derivation process or on whether the scratch extract "
+            f"exists — {', '.join(sorted(set(probes)))}. #4616 measured that the script exits 0 "
+            "and writes the extract whatever the tape holds, so neither question can report a "
+            "rotated-away day, and an absent scratch file is a broken invocation: RED, not a "
+            "skip.")
+        assert removed_branch not in src, f"{arm.__name__} still greps the derivation's output"
+        for stale in ("Skips when the tape has", "the tape no longer holds",
+                      "begins skipping once the rotation"):
+            assert stale not in src, (
+                f"{arm.__name__} still carries the comment ({stale!r}) that promised a skip the "
+                "process could never produce; the guard, not a date in a comment, decides this "
+                "arm's expiry")
+    calls = sum(inspect.getsource(a).count("_rederive_covers_committed(") for a in _REDERIVE_ARMS)
+    assert calls == 3, (
+        f"the shared guard is called {calls} times across the three arms, not once each, so one "
+        "arm is either double-deciding or deciding somewhere the guard cannot see")
+
+    # Falsifier for the scanner itself, since the clause above is only as wide as it is: a handle
+    # under a name nobody listed has to be caught, and the two legal questions have to stay legal
+    # or the clause would be enforcing a skip on a box that merely has no daily copy.
+    planted = '\n'.join([
+        "def arm():",
+        "    res = subprocess.run([sys.executable], capture_output=True)",
+        "    scratch = tmp_path / 'extract.json'",
+        "    if res.returncode != 0 or scratch.exists():",
+        "        pytest.skip(res.stderr)",
+        "    git = subprocess.run(['git', 'rev-parse', 'HEAD'], capture_output=True)",
+        "    living = Path(DAILY_EXTRACT_DIR) / 'x.json'",
+        "    if git.returncode != 0 or not living.exists():",
+        "        pytest.skip('no record')",
+    ])
+    caught = sorted(set(_process_and_temp_probes(planted)))
+    assert caught == ["res.returncode", "res.stderr", "scratch.exists()"], (
+        f"the scanner caught {caught} in a snippet planted to contain exactly "
+        "res.returncode, res.stderr and scratch.exists(), so the ban above is narrower than "
+        "clause 1 — renaming a handle would revive the dead skip")
 
 
 def test_no_tracked_extract_is_committed_under_a_window_that_disagrees_with_its_filename(
