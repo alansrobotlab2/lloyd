@@ -399,7 +399,7 @@ what is wrong
 ```
 
 `board-steward` and `owed-check` are not stages of that chain, and neither is
-the family's ninth member, `frontend-probe-canary`: it judges no board and
+`frontend-probe-canary`: it judges no board and
 touches no code, it checks that one gate rung's instrument still catches a
 broken build. The two judgment services each run beside the state machine —
 on the primary, one turn per tick or per item, with an `apply` flag that
@@ -510,26 +510,37 @@ in two of five dry-runs and its live tick died at `max_turns` on tool reads
 with no answer; a two-minute judgment every fifteen minutes is a cost the
 primary carries, and the round hold keeps it off the engine while a round runs.
 
-**Writes** to the board since 2026-11-16T00:06Z, when #4147 flipped `apply` to
-`true` on the gate's own cleared reading (`config.yaml` carries the figures:
-summed judged 140, agree 136, disagree 3, rate 0.9714, 93 ticks, truncated
-false — both over the rolling 7-day window). For the ten weeks before that
-minute it ran `apply: false` and recorded only how far its answer agrees with
-what the state machine would have done, and that record is what decided the
-flip. The state machine in `scripts/automod/backlog.py` is still a writer beside
+**Writes to the board only while `apply` stands true, and it does not today**:
+`workers.sources.board-steward.apply` is `false` again (#4409, `138961ce`,
+2026-11-21). #4147 flipped it to `true` at 2026-11-16T00:06Z on the gate's own
+cleared reading (`config.yaml` carries the figures: summed judged 140, agree
+136, disagree 3, rate 0.9714, 93 ticks, truncated false — both over the rolling
+7-day window), and the stop condition written beside that flip fired inside its
+own seven days: six `board_steward_disagreement` firings from 2026-11-16T18:54Z
+to 2026-11-20T07:27Z, two of whose `reverted_moves` pairs were genuine. So the
+flag was true for five days, the tick wrote moves for those five days, and it is
+back to recording only how far its answer agrees with what the state machine
+would have done — the state of the ten weeks before the flip and of the week
+since the revert, and the record each flip was decided on. The state machine in
+`scripts/automod/backlog.py` is still a writer beside
 it — the module docstring's "the replacement" is the plan, not the present — and
 with the flag true one mechanical writer applies its moves while
 `select_confirmed` takes its pick; the `steward_move` row and the abstention
 below are what stop the two fighting over one item.
 
 **How a move will reach the board is decided** (2026-11-02, #3467), and the
-mechanism was landed fourteen days before the flag that lets it run — from #4147
-it is the live route, not the reserved one. Every status the steward
+mechanism was landed fourteen days before the flag that lets it run — it was the
+live route for the five days #4147's flip held, and is the reserved one again.
+Every status the steward
 actually applies appends its own `steward_move` ledger row — item, the status
 it moved from, the status it moved to, the note, the tick — and
 `desired_statuses` then answers that item with the row and abstains from its
-own verdict until a `promoted`, `item_landed` or confirmed-triage row is
-stamped after it. The applied move therefore **outranks the machine until a
+own verdict until one of **four** machine rows is stamped after it: `promoted`,
+`item_landed`, a confirmed verdict, or the re-triage mark `backlog_retriage`
+(`_machine_event_ts`, `scripts/automod/backlog.py`; the fourth arm is #4591, and
+it was needed — #4276's claim outranked its own re-triage by 3.5 days and held an
+item with no `triage:` key in `up_next`, 12 of the 21 disagreement rows in the
+window that filed #4591). The applied move therefore **outranks the machine until a
 later machine event**, which expires the claim instead of leaving a permanent
 park; a tick's aggregate `board_steward` row could not carry this, since its
 `moves` are proposals and its `applied` list is empty while `apply: false`.
@@ -560,8 +571,12 @@ finalizer and `ConnectTimeout`). So at that reading `apply: false` was no
 longer an unmade decision waiting on an unmeasured quantity; it was the reading
 of a bar that week did not clear. #4147 flipped it eight days later on the same
 bar with both numbers unchanged — judged 140, rate 0.9714 — and the block's stop
-condition puts it back if the disagreement alarm fires within 7 days of that
-minute.
+condition then put it back: it fired within the flip's own seven days (#4409,
+above). Re-measured 2026-11-27 over the rolling 7 d (`/api/workers/health`,
+window unclamped), `judgement` on this source reads judged 410, agree 167,
+disagree 21 — **rate 0.4073**, four fifths of the bar short — on 118 ticks (109
+ok, 4 failed, 5 skipped). The floor has therefore not been cleared since the
+flip, and the flag cannot be argued back on from the rate.
 
 **Below the floor, the disagreement now has a reader** (#3519). A measured fail
 is actionable in a way an unmeasured one is not, and until now the 26 disagreeing
@@ -572,7 +587,9 @@ items, `owed-check` answers owed entries, `arch-review` reads docs. So
 row): it asks `judgement_aggregate` — the same function this section's `judgement`
 figures come from — and only when the window is **measured and under the floor**
 (summed `judged` ≥ 50 with agree `rate` < 0.90, and not `truncated`) does it file
-**one** draft item on the `lloyd` board, tagged `board-steward-disagreement`. Its
+**one** draft item on the `lloyd` board, tagged `board-steward-disagreement` —
+and, since `5ce6d634`, only once the same disagreement has stood on **two
+consecutive ticks**: a one-tick divergence earns no row. Its
 rows name both sides of each disagreement — the status the steward proposed, from
 its parsed moves, and the status `desired_statuses` wants, with that rule's
 `why` — and it names **the whole window's** disagreeing ids, not the ones this
@@ -647,7 +664,9 @@ steward now is the alarm's post-flip leg: `reverted_moves` pairs an applied
 `steward_move` row with a LATER `status_moved` row on the same item inside the
 window, and `below_floor` fires on that pair naming the item and both statuses —
 the machine undoing an applied move is the one disagreement the rate can never
-score again, and it is the trigger #4147's stop condition watches.
+score again, and it is the trigger #4147's stop condition watches — and it fired:
+six firings in the flip's first five days, two of them on a genuine pair, which
+is what set `apply` back to `false`.
 
 **It may never set `done`.** Closing is gated on a settled promotion whose
 outcome said `met` and stays mechanical in `close_settled_items`: a closed
@@ -793,10 +812,10 @@ abort. Landing runs detached, exactly as when a human drives it.
   whether a round may start, so the interval's only job is to ask them
   often enough. At an hour it did not — one round settled at 19:16 and the next
   poll was 19:50, with four confirmed items waiting.
-- The longest-running job in the pool: ~1810 s mean over its 350 completed runs
-  (measured 2026-10-27), though its last ten ok runs averaged ~800 s. Over the 7 d
-  to 2026-10-27: 280 of 301 runs ok (13 failed, 8 skipped) for 152.8 GPU-hours —
-  just over half the pool's 295.2 measured hours.
+- The longest-running job in the pool: ~2280 s mean over its 317 completed runs,
+  its last ten ok runs averaging ~1950 s (measured 2026-11-27). Over the 7 d to
+  2026-11-27: 253 of 317 runs ok (0 failed, 11 skipped) for 187.19 GPU-hours —
+  just under two thirds of the pool's 288.8 measured hours.
 
 ### `automod-regression` — did the landing make anything worse?
 
@@ -812,8 +831,8 @@ owed a measurement from the **ledger**, not from `last_settled.json`: every
 `regression_check` row that measured anything, oldest first, behind
 `regression.lock`. That is what makes "one check per promotion" true at any
 landing rate; measuring "the latest promotion" lost them whenever two landed
-inside one check. Measured 2026-09-27: zero runs in the 7 d window, which is
-what a safety net that has not had to fire looks like.
+inside one check. Measured 2026-11-27: 2 runs in the 7 d window, both ok, 0.0
+GPU-hours, which is what a safety net that has barely had to fire looks like.
 
 - **It is a paired A/B on identical data, and that shape is the whole point.**
   Check the promotion's **parent** out into a scratch worktree, point both arms
@@ -860,7 +879,7 @@ sets no `LLOYD_AUTOMOD_STATE`, so the artifact lands at
   measured numbers. 2, a crash, a timeout, or an exit 0 with no artifact from
   this run is a returned failure that says "not measured" and carries no rate —
   `latest.json` may still hold an older run.
-- **Measured state exists** (2026-10-27): 7 runs over the 7 d, all ok, and
+- **Measured state exists** (re-measured 2026-11-27): 7 runs over the 7 d, all ok, and
   `latest.json` reads
   `seeds_measured: 16`, `detected: 16`, `rate: 1.0` with one blind seed
   (`rate_counting_blind_as_misses` 0.94) — clear of the script's 90% bar. That is
@@ -940,16 +959,30 @@ success / 35 failed, all 35 the pre-#1546 shape —
 `TimeoutError: exceeded max_duration_seconds=1800`, the last of them at 05:46Z
 on 09-27. That failure mode is closed: over the 7 d to 2026-10-27 the source is
 41 runs, 41 ok, 0 failed, 6.18 GPU-hours, every round `stopped at deadline: no`
-at 212–849 s and reporting `3 variants evaluated, 0 promotable, winner=none`.
-It still promotes nothing, and the reason has moved off the cap twice over. The
+at 212–849 s and reporting `3 variants evaluated, 0 promotable, winner=none`; the
+7 d to 2026-11-27 reads the same shape — 36 runs, 36 ok, 0 failed, 3.96
+GPU-hours. **It promotes now.** Five ledger decisions carry `promoted: true`
+since the re-arm and three landed a real edit: the operating contract in force at
+this review is one of them, vault `92cb931942e0` (2026-11-19), and
+`auto_restore` has since undone two promotions after a post-promotion decline —
+#429's check, not the gate — and burned four further rounds on `no_snapshot`
+before #4633 explained why. So the question this section used to answer, why
+nothing is ever promoted, now has a different answer, and the reason it promotes
+so rarely has moved off the cap twice over. The
 projection (#1605, below) shrinks the matrix on 40 of those 41 rounds
 (`matrix_shrunk` 40, `deadline_cut` 0), and separately at least one task in the
 round's targeted or held-out split scores on no arm — the 2026-10-27 22:13Z
 round's held-out `bench_005_replay_memory_update` is "not mechanically
 checkable", so all three variants end `HOLD — partial_heldout_coverage` before
-any delta is read (#549 / #416). Over the 176 rounds since 2026-09-26 the
-ledger holds 513 decisions and zero promotions: 309 `partial_heldout_coverage`,
-121 `partial_targeted_coverage`, 61 `safety_regression`, 22 `deadline_stopped`.
+any delta is read (#549 / #416). The whole ledger, measured 2026-11-27, is 339
+rounds and 1024 decisions: 366 `partial_heldout_coverage`, 173
+`partial_targeted_coverage`, 161 `targeted_no_gain`, 55
+`insufficient_win_fraction`, 52 `heldout_tie`, 52 `heldout_decline`, 36
+`safety_regression`, 124 carrying no class, and the 5 `promoted: true` above —
+two of which booked a promotion that wrote no file: their own `round_summary`
+row says `promoted_variant_id`, `snapshot_dir` and `vault_commit` are all null
+and the vault holds no promote commit for them, while the decision says the
+round promoted (#4633).
 Read that as the doc's older sentence being wrong: the gate **is** exercised on
 finished rounds now, and what refuses is coverage, not the floors doing their
 job. Every round does
