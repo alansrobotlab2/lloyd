@@ -12,15 +12,21 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
+import pwd
 import re
+import sqlite3
 import subprocess
 import sys
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 import yaml
 
 import workers.sources as sources
+
+from tests._live_data import require_live_data
 
 ROOT = Path(__file__).resolve().parent.parent
 ARCH = ROOT / "architecture"
@@ -1414,6 +1420,245 @@ def test_section2_stamps_its_read_and_keeps_the_remeasure_order():
     assert not stamp.group(1).startswith(SECTION2_WINDOW_END), (
         f"§2's read stamp ({stamp.group(1)}) is the window end, which is a claim "
         "about when the read happened being replaced by a claim about the window")
+
+
+#: §2's store-start bullet as #4626 found it, restated with a synthetic stamp so
+#: this file pins no real measurement. The live sentence opened "The store on this
+#: box begins 2026-09-22T20:03Z (the 2026-09-22 data wipe) … and a '7 days' window
+#: here has never been shortened by pruning", and it was 36 days stale when the item
+#: was filed because a daily prune moves that floor one day per day. The year is
+#: deliberately not this one: the defect was a SHAPE — an undated value asserted as a
+#: permanent fact — and a fixture carrying a real date ages into the thing it tests.
+_STORE_START_BULLET_BEFORE_4626 = (
+    "- **The store on this box begins 1999-01-02T03:04Z** (the 1999-01-02 data "
+    'wipe), so no window `runs` can show holds the old names §7 lists, and a "7 '
+    'days" window here has never been shortened by pruning.'
+)
+
+#: A bullet asserting where the store starts: a begin/start verb followed directly by
+#: an ISO instant. Year-free — the pattern is the claim, not the date.
+_STORE_START_CLAIM = re.compile(
+    r"\b(?:begins?|beginning|starts?|starting)\s+`?\d{4}-\d{2}-\d{2}T\d{2}:\d{2}")
+
+#: The three things that turn a store-start value into a measurement, plus the two
+#: attributions that were false in the sentence being replaced. `_READ_STAMP` is the
+#: same shape `test_section2_stamps_its_read_and_keeps_the_remeasure_order` requires of
+#: §2's header, applied to a bullet that had never been held to it.
+_READ_STAMP = re.compile(r"\bread\s+`?(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})\s*Z")
+_STORE_START_INSTRUMENTS = ("min(started_at)", "oldest_input")
+_STORE_START_TRIM_OWNERS = ("sweep_worker_runs", "WORKER_RUN_MAX_AGE_DAYS")
+_STORE_START_FALSE_ATTRIBUTIONS = ("data wipe", "never been shortened")
+
+
+def _sec2_store_start_bullets() -> list[str]:
+    """§2's prose bullets that assert where the `runs` store begins."""
+    return [b for blk in _sec2_prose().split("\n\n")
+            for b in blk.split("\n- ")[1:]
+            if _STORE_START_CLAIM.search(b)]
+
+
+def _runs_store() -> Path:
+    """The account's real `runs` store — the one §2's sentence is a claim about.
+
+    Two roots are deliberately NOT used. `LLOYD_DATA` is, because `tests/conftest.py`
+    redirects it to a scratch dir for every run and refuses the suite when it names the
+    live root, so honouring it here would skip this node on every box where the store it
+    is about exists — a leg that can never fail. And `$HOME`, because inside an automod
+    gate it is the round's symlink farm, which carries no `lloyd-data`
+    (`worktree.py::HOME_LINK_SKIP`), so a `~/lloyd-data` citation expanded against it
+    reports a present store as missing: the red
+    `tests/test_architecture_coverage_doc_claims.py::_resolve` exists to avoid. The
+    passwd entry is the account home, which is what a doc writing `~/lloyd-data` has
+    ever meant on this box. Read-only access only, and `require_live_data` is the named
+    answer when the store genuinely is not there.
+    """
+    return Path(pwd.getpwuid(os.getuid()).pw_dir) / "lloyd-data" / "workers.db"
+
+
+def _store_start_defects(bullet: str) -> list[str]:
+    """Why a bullet asserting a `runs` store start is not a re-runnable measurement.
+
+    One predicate, shared by §2 and by the fixture control below, so the control
+    cannot pass while the live check has been quietly loosened.
+    """
+    b = " ".join(bullet.split())
+    defects: list[str] = []
+    if not _READ_STAMP.search(b):
+        defects.append("states no `read <YYYY-MM-DDTHH:MM>Z` stamp, so the value "
+                       "reads as a permanent fact — which is how the last one aged "
+                       "36 days")
+    if not any(k in b for k in _STORE_START_INSTRUMENTS):
+        defects.append("names no instrument: neither the read-only SQL over "
+                       "`workers.db` nor `/api/workers/health`'s `oldest_input`, so "
+                       "no reader can re-derive the number")
+    if not any(k in b for k in _STORE_START_TRIM_OWNERS):
+        defects.append("does not name the job that owns the trim, leaving a floor "
+                       "that moves daily without a cause on the page")
+    for banned in _STORE_START_FALSE_ATTRIBUTIONS:
+        if banned in b.lower():
+            defects.append(f"still carries the false attribution {banned!r}")
+    return defects
+
+
+def test_section2_states_its_store_floor_as_a_stamped_prune_boundary():
+    """#4626: §2's store-start bullet must be a measurement, with an instrument and an owner.
+
+    Written as a shape because the clause is a shape. The node pins no date, and
+    asserts its own body carries no `YYYY-MM-DD` literal: a node that pinned today's
+    floor would age exactly like the bullet it replaced, and the last three defects in
+    this section were all of that kind.
+
+    The control runs before the doc is read. `test_section2_carries_no_undated_count`
+    already names this bullet in its docstring — "the bullet this clause was filed
+    against opened 'The store on this box begins …' … A wipe date is not a measurement
+    window" — and passed over it, because its `bare` pattern needs a member of `UNITS`
+    after the digits and a `…T20:03Z` stamp ends in a non-unit. Prose describing a
+    defect is not a check on it, so the fixture here is asserted to be REJECTED by the
+    predicate that grades §2. No real date is written into this node's body, which the
+    assert at the bottom enforces on this node's own source text.
+    """
+    assert _STORE_START_CLAIM.search(_STORE_START_BULLET_BEFORE_4626), (
+        "the fixture no longer matches the shape this node scans for, so the scan "
+        "below grades nothing — fix the fixture or the pattern, never §2")
+    fixture_defects = _store_start_defects(_STORE_START_BULLET_BEFORE_4626)
+    assert len(fixture_defects) >= 3, (
+        f"the pre-#4626 bullet raises only {fixture_defects}: if the sentence this "
+        "item was filed against now passes, the predicate has been loosened until "
+        "the defect it exists to catch fits through it")
+
+    graded = _sec2_store_start_bullets()
+    assert graded, (
+        "§2 states no store start anywhere, so this node has nothing to grade: the "
+        "section has to say where the store begins — as a stamped measurement, which "
+        "is what #4626's clause 1 asks for")
+    for bullet in graded:
+        defects = _store_start_defects(bullet)
+        assert not defects, (
+            f"§2's store-start bullet is not a re-runnable measurement: "
+            f"{'; '.join(defects)}. Bullet head: "
+            f"{' '.join(bullet.split())[:110]!r}")
+
+    # Clause 3's instrument, section-wide: past the surviving span the health route
+    # silently answers with a shorter window than was asked, and only these two keys
+    # in its payload say so.
+    flat = " ".join(_section(SEC2).split())
+    assert "window_clamped_to_hours" in flat and "oldest_input" in flat, (
+        "§2 no longer names the clamp instrument, so a figure labelled '30-day' off "
+        "`/api/workers/health` reads as a 30-day span even when the store held less")
+
+    # Clause 4's second half, graded on this node's own text: the shape check must
+    # hold no real date, or it rots on the same clock as the sentence it replaced.
+    src = Path(__file__).resolve().read_text(encoding="utf-8")
+    node = src[src.index("def test_section2_states_its_store_floor"):]
+    node = node[:node.index("\ndef ")]
+    assert not re.search(r"\b20\d{2}-\d{2}-\d{2}\b", node), (
+        "this node pins a real calendar date, so it ages into the same wrong claim "
+        "as the bullet it replaced")
+
+
+def test_section2_stated_floor_is_the_prune_boundary_it_claims():
+    """#4626: the bullet's number has to match the code and the store it names.
+
+    The shape node above proves the bullet is stamped. This is the seam across the
+    other side: a stamped sentence can still state a value that is nobody's
+    measurement. Two legs, and neither ages on the calendar, which is the point —
+    the last bullet did not fail loudly, it quietly stopped being true:
+
+    (a) DOC -> CODE. A floor a daily prune owns sits exactly `WORKER_RUN_MAX_AGE_DAYS`
+        before the instant it is read, so the gap between the bullet's own two dates
+        has to equal that constant — read out of the sweep script, not hard-coded
+        here, and `def sweep_worker_runs()` has to still exist for the bullet's naming
+        of it to mean anything. Re-stating the floor without re-reading the stamp,
+        which is the restatement #4626 was filed against, breaks the gap. A bullet
+        that merely ages stays green on purpose: both dates are in the doc, and a
+        dated snapshot that says so is what the clause asks for.
+    (b) DOC -> STORE, opened read-only. The real floor only moves forward (a prune
+        advances it, a rebuild advances it further), so a doc claiming a start LATER
+        than `min(started_at)` states a horizon the data does not have — and a sweep
+        that silently stopped, leaving `runs` deeper than the doc admits, is how that
+        becomes true.
+    """
+    bullets = _sec2_store_start_bullets()
+    assert len(bullets) == 1, (
+        f"§2 has {len(bullets)} store-start bullets, and a gap check needs the floor "
+        "and the stamp that produced it to sit in one sentence")
+    b = " ".join(bullets[0].split())
+
+    floor = re.search(r"begins\s+`(\d{4}-\d{2}-\d{2}T\d{2}:\d{2})", b)
+    stamp = _READ_STAMP.search(b)
+    assert floor and stamp, (
+        "the store-start bullet no longer states a floor and a read stamp in one "
+        "sentence, so there is nothing here to compare")
+
+    sweep = (ROOT / "scripts" / "groundskeeper" / "retention-sweep.py").read_text(
+        encoding="utf-8")
+    assert "def sweep_worker_runs(" in sweep, (
+        "§2's bullet names `sweep_worker_runs()` as the owner of the trim and that "
+        "function is gone from scripts/groundskeeper/retention-sweep.py — re-read the "
+        "sweep and fix the doc, do not edit this assert")
+    cap = re.search(r"^WORKER_RUN_MAX_AGE_DAYS\s*=\s*(\d+)", sweep, re.M)
+    assert cap, (
+        "WORKER_RUN_MAX_AGE_DAYS is no longer a literal in the sweep script, so the "
+        "gap below has no expected value: derive it from whatever replaced it")
+    max_age = int(cap.group(1))
+
+    fmt = "%Y-%m-%dT%H:%M"
+    gap = (datetime.strptime(stamp.group(1), fmt)
+           - datetime.strptime(floor.group(1), fmt)).total_seconds() / 86400
+    assert max_age <= gap < max_age + 1, (
+        f"§2's floor ({floor.group(1)}) sits {gap:.2f} days before its own read stamp "
+        f"({stamp.group(1)}), but the prune holds `runs` to {max_age} days of "
+        "`completed_at`: the two dates were not produced by one read, so at least "
+        "one of them is being carried rather than measured")
+
+    db = _runs_store()
+    require_live_data(db, "the `runs` store whose floor §2 states", kind="file")
+    conn = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = conn.execute("SELECT min(started_at) FROM runs").fetchone()
+    finally:
+        conn.close()
+    assert row and row[0], (
+        f"`SELECT min(started_at) FROM runs` over {db} returned {row!r} — a store that "
+        "exists and holds no run rows is not the 30-day window §2 describes")
+    live = str(row[0])
+    # Both sides are UTC and ISO-ordered — the column's stamps carry an explicit
+    # `+00:00`, the bullet's carry `Z` — so comparing the first 16 characters is one
+    # clock, not a naive stamp read as an aware one.
+    assert live[:16] >= floor.group(1), (
+        f"§2 says the store begins {floor.group(1)} while `min(started_at)` is "
+        f"{live}: the doc claims a start later than the data's, which a forward-only "
+        "prune cannot produce — check whether the daily sweep stopped before editing "
+        "the doc to match")
+
+
+def test_dispatch_explains_the_null_task_id_zero_without_a_wipe():
+    """#4626: §Dispatch justified a zero by the horizon §2 has just re-stated.
+
+    Its bullet attributed `task_id IS NULL` counting 0 to "those runs pre-date the
+    2026-09-22 wipe §2 records". The query still returns 0 — re-read read-only this
+    turn, `SELECT count(*) FROM runs WHERE source='scheduled-task' AND task_id IS
+    NULL` → 0 — but the prune is the reason, because nothing surviving in `runs` is
+    older than `WORKER_RUN_MAX_AGE_DAYS`. The sentence is a cross-reference to a
+    §2 bullet that no longer exists the moment §2 is corrected, so it moves in the
+    same change rather than being orphaned by it. Scoped to the one bullet carrying
+    the query: §7 legitimately still discusses the 2026-09-22 filesystem event, and
+    `tests/` is full of that date as history.
+    """
+    bullets = [b for b in _section(SEC3).split("\n- ") if "task_id IS NULL" in b]
+    assert bullets, (
+        "§Dispatch no longer carries the NULL-`task_id` sentence, which makes this "
+        "node blind — confirm #4626's replacement landed before deleting it")
+    b = " ".join(bullets[0].split())
+    assert "wipe" not in b, (
+        "§Dispatch still attributes the NULL-`task_id` zero to a wipe, and every "
+        f"`runs` window is bounded by the 30-day prune now. Bullet head: {b[:110]!r}")
+    assert re.search(r"prun(?:e|ed|ing)", b), (
+        "§Dispatch dropped the wipe without naming what replaces it as the cause: a "
+        "zero with its reason removed reads as an unexplained gap")
+    assert re.search(r"returned 0 on \d{4}-\d{2}-\d{2}", b), (
+        "the NULL-`task_id` zero lost its read date, so no later reader can tell "
+        "which day this was true — the exact shape this item is about")
 
 
 # ---------------------------------------------------------------------------

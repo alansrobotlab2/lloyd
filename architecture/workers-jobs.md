@@ -200,9 +200,28 @@ removes.
   because the registry is what a `workers.sources` key may name. So its missing row
   here, and its missing row in §1's 17-name roster, are the design working — unlike
   a zero in the `automod-regression` row above, which is not.
-- **The store on this box begins 2026-09-22T20:03Z** (the 2026-09-22 data wipe), so
-  no window `runs` can show holds the old names §7 lists, and a "7 days" window
-  here has never been shortened by pruning.
+- **The store's floor is a moving prune boundary, not a fixed start.** It begins
+  `2026-10-28T06:01Z` — `min(started_at)`, read 2026-11-27T09:57Z with
+  `sqlite3 "file:/home/alansrobotlab/lloyd-data/workers.db?mode=ro" 'SELECT min(started_at) FROM runs'`.
+  `/api/workers/health` reaches the same instant from its own side: `?days=90` answers
+  `oldest_input: 2026-10-28T06:01:55.653116+00:00` with `window_clamped_to_hours: 723.93`,
+  while `?days=30` came back unclamped — by four hours of margin, which is why any
+  figure labelled "30-day" off that route is a ~29.9-day span or a genuine one
+  depending on the hour it was read. One stamp governs every figure in this bullet and
+  the floor moves under all of them, because the trim this section's header names is
+  what puts it there: `sweep_worker_runs()` deletes `runs` rows on `completed_at`
+  against `WORKER_RUN_MAX_AGE_DAYS = 30`
+  (`scripts/groundskeeper/retention-sweep.py`, run daily as autonomy task #79). The
+  sweep record of 2026-11-25 logged `min(completed_at)` as 2026-10-26T06:03Z, so the
+  boundary advanced two days in the two days to the stamp above — the prune, not any
+  filesystem event, is what bounds every window `runs` can show. A "7 days" ask is
+  shortened by it the moment the store holds less than a week, and past the surviving
+  span the route answers with a clamped window instead of the one requested. Two
+  consequences travel with the number: the old names §7 lists are unreachable because
+  they are more than 30 days gone (0 rows for all seven at the stamp above), not
+  because of a wipe; and this table's own window (`>= '2026-10-22'`) now sits largely
+  behind the floor, which is what the header's `re-measure before quoting this table`
+  is for.
 
 ---
 
@@ -268,8 +287,10 @@ Four behaviours are load-bearing:
   write anything, and 237 runs and 73.6 GPU-hours recorded with a NULL `task_id`
   were that bug — but the pair is `config.yaml`'s comment on the cap, not a row
   anyone can re-query: `SELECT count(*) FROM runs WHERE source='scheduled-task'
-  AND task_id IS NULL` returned 0 on 2026-10-27, because those runs pre-date the
-  2026-09-22 wipe §2 records.
+  AND task_id IS NULL` returned 0 on 2026-10-27 and again on 2026-11-27, because
+  nothing that old survives rather than because the rows were never written — §2's
+  `sweep_worker_runs()` prune holds `runs` to 30 days of `completed_at`, and the 237
+  sit far behind that floor.
 - **It recovers claims the pool never finished**, ahead of both the gate and
   `get_due_tasks`: `enqueue_if_due` calls `autonomy.recover_stuck_tasks` on every
   tick (`workers/sources/scheduled_task.py:488`), because a worker that dies
