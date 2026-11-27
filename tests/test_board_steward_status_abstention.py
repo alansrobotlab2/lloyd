@@ -445,7 +445,7 @@ RETRIAGE_FALLTHROUGH = PARK
 
 
 def _retriage_mark(item_id, *, ts, round_id="SM_RETRIAGE_FIXTURE"):
-    """One `backlog_retriage` row as `retriage_spent_items` writes it (`backlog.py:8201`).
+    """One `backlog_retriage` row as `retriage_spent_items` writes it (`backlog.py:8217`).
 
     Through `append_event`, like every other row here, so the fixture carries the
     `created_at` stamp the production store carries and no field list can drift."""

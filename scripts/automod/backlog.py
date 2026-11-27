@@ -2976,7 +2976,7 @@ def retriage_marks(ledger: Path, *, with_archives: bool = False) -> dict[int, fl
 
 
 #: The contract text a re-triage deleted from the item, stored on its mark row by
-#: `retriage_spent_items` (`backlog.py:8116`, written at `backlog.py:8187`). The ONLY
+#: `retriage_spent_items` (`backlog.py:8132`, written at `backlog.py:8203`). The ONLY
 #: clause text that survives a void: `gate.json` keeps a clause COUNT, and a `review`
 #: row keeps per-clause verdicts
 #: keyed by index with no clause text — so `Gate.contract_void_mark` reading this key
@@ -5875,7 +5875,23 @@ def desired_statuses(ledger: Path, boards: tuple[str, ...] | None = DEFAULT_BOAR
             # still owed (`up_next`) or spent (`draft`, needs-human). This
             # branch used to park it `in_progress` and contradict the rule.
             verdict, detail = outcomes.get(iid, ("", ""))
-            if verdict == "spent":
+            if verdict == "spent" and iid in _unfinished_rounds():
+                # #4621: not while this store still counts a round of it unfinished. The
+                # park fired on #4616 at 06:21:05Z on 2026-11-27 with that round's worktree
+                # and gate process alive — the state the board steward grounded as
+                # `round_state=worktree+gate` and answered `in_progress` to 66 seconds
+                # later, and the state `_unfinished_round_note` (`workers/sources/
+                # autocode.py`) refused to move a minute after that for, naming THIS
+                # predicate. Two surfaces, two in-flight measurements, one item: the
+                # disagreement was between two of this machine's own rules, not with the
+                # steward. The `outcomes` branch below has answered this case
+                # `in_progress` since #3546; this branch simply outranked it, so a LANDED
+                # item never reached that answer. Same destination and wording, asked of
+                # the one shared predicate through the same lazy closure — and asked HERE,
+                # where a pass only arrives for an item that reached this park, because
+                # the predicate probes a worktree and two markers per item it holds.
+                out[iid] = ("in_progress", "an automod round is in flight for it")
+            elif verdict == "spent":
                 out[iid] = ("draft", "landed with a clause not met and its one unattended attempt "
                                      "is spent; owed-check decides (reopen_item to grant another)", True)
             elif _awaits_triage(iid):

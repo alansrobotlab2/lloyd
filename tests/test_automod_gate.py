@@ -5536,7 +5536,7 @@ def _strip_clauses(path):
 
 def _seed_retriage_mark(item_id, *, ts=1_795_000_000.0, previous=_C4483_TEXT):
     """A `backlog_retriage` row for `item_id`, shaped like `retriage_spent_items`
-    writes it (`backlog.py:8116`).
+    writes it (`backlog.py:8132`).
 
     `previous=None` is the shape the recovery cannot serve: the steward's own
     re-triage row (`unmet_twice`, no `previous_clauses`) is the only writer of that

@@ -6455,7 +6455,7 @@ def test_a_reap_holds_the_item_while_another_round_of_it_is_unsettled(isolated, 
     """The #3524 shape. The reaper closed one round of the item and, in the same breath,
     put the item back in the pool while a second round of it sat promoted-and-unsettled on
     `main`. The wrong status is walked back by the next reconciler pass (its unfinished-round
-    branch at `backlog.py:5879`), so what is pinned here is that the move never happens:
+    branch at `backlog.py:5895`), so what is pinned here is that the move never happens:
     readiness holds an item only while a gate or landing is RUNNING, so through that window
     the item was offerable and could be given a fresh round while its earlier change was
     still under observation.

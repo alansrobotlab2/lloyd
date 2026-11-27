@@ -2192,7 +2192,7 @@ def test_the_live_3320_item_carries_the_carrier_block():
 # ── #3897 clause 3: a string refused as a clause cannot be booked as owed ───────
 #
 # `clean_clauses` heals a contract on READ, but an owed entry is written by a
-# different door: `add_owed` (the landing writers at `backlog.py:6042`, `:6474`
+# different door: `add_owed` (the landing writers at `backlog.py:6058`, `:6474`
 # and `:7738`) filtered only on `_text(w)` truthiness, so #3504's `human_clauses`
 # fragments were booked exactly as its activity log records them — `still owed
 # 1.; 1]}],` — and each cost an owed-check turn to re-discharge, out of the

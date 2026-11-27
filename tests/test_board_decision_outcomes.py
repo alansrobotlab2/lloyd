@@ -6,11 +6,13 @@ automod state dir (conftest points it at scratch anyway)."""
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import pytest
+import yaml
 
+from scripts.automod import backlog as B, state as S, worktree as W
 from scripts.automod import board_decisions as BD
 
 NOW = datetime(2026, 9, 24, 12, 0, tzinfo=timezone.utc).timestamp()
@@ -231,3 +233,182 @@ def test_summary_drops_the_listings_but_keeps_the_ids(tmp_path):
     assert "entries" not in s and "reopened" not in s
     assert "ids" in s["retire_reopen"]
     json.dumps(s)   # it rides a ledger row and a JSON payload
+
+
+# ── #4621: the landed attempt-spent park yields to a round the store counts unfinished ──
+#
+# `backlog.desired_statuses` parked #4616 `draft` + needs-human on 2026-11-27 while the
+# same store still counted one of its rounds unfinished: the board steward scored that
+# tick as a disagreement, and the reaper-side note in `workers/sources/autocode.py`
+# (`_unfinished_round_note`) refused to move the item at all one minute later with
+# "`items_with_unfinished_rounds` still counts this item mid-round". These nodes read the
+# reconcile's own table over fixture rows, the way `tests/test_backlog_unattended.py`
+# does for the rest of that function.
+
+def _board(tmp_path, monkeypatch):
+    """A scratch board plus ledger, the two globals `desired_statuses` reads."""
+    d = tmp_path / "backlog"
+    d.mkdir()
+    monkeypatch.setattr(B, "BACKLOG_DIR", d)
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    return d
+
+
+def _open_item(d, iid, *, status="draft"):
+    created = (datetime.now(timezone.utc) - timedelta(days=100)).isoformat()
+    fm = {"status": status, "priority": "medium", "created": created,
+          "board": "lloyd", "tags": ["backlog"]}
+    path = d / f"{iid}-a-thing.md"
+    path.write_text(f"---\n{yaml.dump(fm, default_flow_style=False)}---\n\n# A thing\n\n"
+                    f"Do the thing.\n", encoding="utf-8")
+    return path
+
+
+NOT_MET = {"acceptance": "not_met", "landed": True, "deferred_to": [], "summary": "",
+           "spawned": [], "clause_outcomes": [
+               {"clause": 1, "outcome": "not_met", "evidence": "", "deferred_to": []}]}
+
+
+def _spent_landed_park(d, iid, *, rolled_back=True):
+    """An item the landed park fires on, built the way the landing sweep leaves it.
+
+    Round one lands with a `not_met` clause (promoted, settled, swept — which writes
+    the item's `automod_landed` marker and its `item_landed` row and leaves the item
+    open); round two then runs and never promotes, which is what makes
+    `implement_outcomes` answer `spent`: the documented rule offers a not_met landing
+    exactly one more unattended attempt.
+
+    `rolled_back=True` appends the `rollback_succeeded` row for the landing's commit,
+    and that is what makes the fixture usable for clause 2 at all: the shared
+    predicate's promotion arm holds every item whose promoted commit no rollback took
+    off `main` — measured on the live store on 2026-11-27, 264 of the 266 items it
+    holds are held by that arm alone — so a fixture that left the promotion standing
+    could never show the park firing on an item with no unfinished round.
+    `rolled_back=False` is #4616's own sequence: the promotion stands, and with it the
+    predicate's hold.
+    """
+    _open_item(d, iid)
+    S.append_event({"event": "backlog_implement", "item_id": iid, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": iid, "phase": "finished",
+                    "round_id": f"SM_{iid}_ONE", "stop_reason": "stop", "num_turns": 40,
+                    "outcome": NOT_MET}, path=S.LEDGER_PATH)
+    commit = f"{iid:040x}"
+    S.append_event({"event": "promoted", "round_id": f"SM_{iid}_ONE", "commit": commit},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "settled", "commit": commit}, path=S.LEDGER_PATH)
+    B.close_settled_items(S.LEDGER_PATH)
+    if rolled_back:
+        S.append_event({"event": "rollback_succeeded", "commit": commit}, path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": iid, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": iid, "phase": "finished",
+                    "round_id": f"SM_{iid}_TWO", "stop_reason": "stop", "num_turns": 60},
+                   path=S.LEDGER_PATH)
+    return f"SM_{iid}_TWO"
+
+
+def _worktree_stands(tmp_path, monkeypatch):
+    """The latest round's worktree on disk, and no `current.json` round.
+
+    The state the reaper takes away with `round.abort`, so a hold keyed on it decays
+    instead of pinning an item; `read_current` is pinned so the pass cannot see the
+    round this very session opened.
+    """
+    wt = tmp_path / "wt"
+    wt.mkdir(exist_ok=True)
+    monkeypatch.setattr(W, "worktree_path", lambda rid: wt)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    return wt
+
+
+def test_the_landed_spent_park_yields_to_a_round_the_shared_predicate_still_counts(
+        tmp_path, monkeypatch):
+    """Clause 1 — #4616's row, on the machine's side.
+
+    A landed `not_met` item whose one re-offer is spent must not be parked while
+    `items_with_unfinished_rounds` counts one of its rounds unfinished: the answer is
+    the same `in_progress` the `in_flight` guard at the head of that chain gives, and
+    it is one tuple shared between the two positions, not a paraphrase — the reason is
+    what the board, owed-check and the steward's scoring all read.
+    """
+    d = _board(tmp_path, monkeypatch)
+    _spent_landed_park(d, 9101, rolled_back=False)      # #4616's own sequence
+    _worktree_stands(tmp_path, monkeypatch)             # round two's tree is still open
+
+    assert B.implement_outcomes(S.LEDGER_PATH)[9101][0] == "spent", \
+        "the fixture must be the park's own verdict, or the node proves nothing"
+    assert 9101 in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "a round of it is unfinished on the ONE shared predicate"
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)[9101]
+    assert want == ("in_progress", "an automod round is in flight for it"), \
+        f"the park fired on a mid-round item: {want}"
+
+
+def test_a_spent_landed_item_with_no_unfinished_round_still_parks_for_owed_check(
+        tmp_path, monkeypatch):
+    """Clause 2 — the gate cannot strand a truly spent item in `in_progress`.
+
+    The same fixture with the landing's commit rolled back: nothing is mid-round, so
+    the park still fires, still as `draft` + needs-human, and still naming the route
+    that grants another attempt. Without this half the new guard would be a way for a
+    spent item to sit `in_progress` with nothing running and never reach the board a
+    person reads.
+    """
+    d = _board(tmp_path, monkeypatch)
+    _spent_landed_park(d, 9102, rolled_back=True)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+
+    assert 9102 not in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "nothing is mid-round: the guard must not fire here"
+
+    want = B.desired_statuses(S.LEDGER_PATH, None)[9102]
+    assert want[0] == "draft" and want[2] is True, f"a spent item stopped parking: {want}"
+    assert "owed-check decides (reopen_item to grant another)" in want[1], want[1]
+
+
+def test_the_park_guard_is_the_shared_predicates_and_walks_nothing_else(
+        tmp_path, monkeypatch):
+    """Clause 3 — one measurement, asked once, and only where a park candidate stands.
+
+    Three readings of one stubbed `items_with_unfinished_rounds`:
+
+    * a board with no park candidate asks it NOTHING — the predicate probes a worktree
+      and a gate and land marker per item it holds (265 items on the live store on
+      2026-11-27), and the reconcile runs every 900 s, so a guard that asked per item,
+      or asked eagerly at the head of the pass, would pay that walk board-wide;
+    * a board with one park candidate asks it exactly ONCE per pass;
+    * with the stub answering EMPTY while the worktree still stands, the park fires
+      anyway — so the decision belongs to that predicate and to no liveness rule of
+      this function's own, which is the drift the two surfaces were caught in.
+    """
+    calls: list = []
+    stubbed: set = set()
+
+    def counting(ledger, **kw):
+        calls.append(ledger)
+        return set(stubbed)
+
+    monkeypatch.setattr(B, "items_with_unfinished_rounds", counting)
+    monkeypatch.setattr(S, "read_current", lambda: None)
+
+    # 1. No park candidate on the board: no walk at all.
+    d = _board(tmp_path, monkeypatch)
+    _open_item(d, 9201, status="up_next")
+    B.desired_statuses(S.LEDGER_PATH, None)
+    assert calls == [], "the pass walked round state for a board with nothing parked"
+
+    # 2/3. One park candidate: asked once, and the answer is the stub's, not a local one.
+    stubbed = {9202}
+    _spent_landed_park(d, 9202, rolled_back=False)
+    _worktree_stands(tmp_path, monkeypatch)
+    want = B.desired_statuses(S.LEDGER_PATH, None)[9202]
+    assert want == ("in_progress", "an automod round is in flight for it"), want
+    assert len(calls) == 1, f"one shared measurement per pass, not one per item: {calls}"
+
+    # The control: the same live worktree, the predicate saying nothing is unfinished.
+    stubbed = set()
+    want = B.desired_statuses(S.LEDGER_PATH, None)[9202]
+    assert want[0] == "draft" and "owed-check decides" in want[1], \
+        f"the guard holds its own liveness rule and ignores the predicate: {want}"
