@@ -1975,19 +1975,23 @@ CATEGORY_TRUST: dict[str, tuple[str, str]] = {
                             + "; which name-close pairs the second gate suppressed "
                             "is read off the same scan as the count, and for this "
                             "run they were not measured"),
-    # Both inert halves named, and the measured half pointed at. This entry used to
-    # close by blaming the missing events, which stopped being true the day #435
-    # landed (`3774e27b`, 2026-09-24): the rows exist, `app.skill_telemetry` reads
-    # them, and #1603
-    # wired this report to them. So the reason now states the two things that DO
-    # keep the count at 0 — the exemption, and an age ceiling no file has reached —
-    # and sends the reader to `stale_context` and the usage table for the numbers.
-    "STALE": ("no", "two halves, both inert: `check_stale` returns (False, 0) "
-                    "before the age check for any skill marked "
+    # Both arms named, and the age verdict pointed at rather than recited. This
+    # entry used to close by blaming the missing events, which stopped being
+    # true the day #435 landed (`3774e27b`, 2026-09-24): the rows exist,
+    # `app.skill_telemetry` reads them, and #1603
+    # wired this report to them. It then asserted as fact that the oldest
+    # scanned `SKILL.md` "has not reached the threshold" — a landed-state
+    # sentence, falsified the moment one did, with no flag in the table to
+    # contradict it (#4614, the 2026-11-27 run: `max_age_days` 95). The ceiling
+    # is now stated where it is measured — the `oldest_could_trip` flag in
+    # `stale_context` — and the row only says who holds the count unconditionally.
+    "STALE": ("no", "two arms decide what this count can see: `check_stale` "
+                    "returns (False, 0) before the age check for any skill marked "
                     "`status: active`, so no marked skill reaches the comparison; "
-                    "and the oldest `SKILL.md` in the scanned roots has not reached "
-                    "the threshold, so the un-marked remainder cannot either. "
-                    "`stale_context` carries the marked count and `max_age_days`. "
+                    "and whether the oldest scanned `SKILL.md` has passed the "
+                    "threshold is not asserted here — it is published per run as "
+                    "the measured flag `oldest_could_trip` in `stale_context`, "
+                    "which also carries the marked count and `max_age_days`. "
                     "Usage over the window IS measured — per-skill "
                     "offers/loaded/ignored from the `prefetch.skill_match` rows "
                     "#435 ships — and a skill with no row is listed as unmeasured, "
@@ -2655,19 +2659,36 @@ def render_report(result: dict) -> str:
         lines.append(f"## STALE — {n_stale} skills > {STALE_DAYS} days since last edit")
         lines.append("")
         if staled:
-            lines.append("This 0 is not a measurement of staleness. Two halves of the check are")
-            lines.append("inert on this library, and both would have to move before the count meant")
-            lines.append("anything:")
+            # #4614: both the intro and the age bullet are BRANCHED on the
+            # measured flag. They used to print the below-threshold framing
+            # unconditionally beside the flag's own value, so once the oldest
+            # scanned file crossed `STALE_DAYS` the section asserted the
+            # ceiling and its failure in one sentence. Neither arm recites a
+            # comparison the other arm would falsify.
+            if staled["oldest_could_trip"]:
+                lines.append("This 0 is not a measurement of staleness. The age ceiling has")
+                lines.append("moved on this library, so the count rests on the exemption half")
+                lines.append("alone:")
+            else:
+                lines.append("This 0 is not a measurement of staleness. Two halves of the check are")
+                lines.append("inert on this library, and both would have to move before the count meant")
+                lines.append("anything:")
             lines.append("")
             lines.append("- `check_stale` returns `(False, 0)` **before reading the age** for any")
             lines.append(f"  skill marked `status: active` — {staled['marked_active']} of "
                          f"{staled['total']} scanned skills carry that mark, and")
             lines.append("  the age of those files is never read, so `age_days` is 0 rather than old.")
             lines.append(f"- The oldest `SKILL.md` in the scanned roots is {staled['max_age_days']} days old,")
-            lines.append(f"  below the {STALE_DAYS}-day threshold, so the "
-                         f"{staled['unmarked']} skills without the mark cannot")
-            lines.append(f"  reach it either: `max_age_days` exceeds the threshold is "
-                         f"{'true' if staled['oldest_could_trip'] else 'false'}.")
+            if staled["oldest_could_trip"]:
+                lines.append(f"  past the {STALE_DAYS}-day threshold: `max_age_days` exceeds the")
+                lines.append("  threshold is true, so an un-marked file that age would trip the")
+                lines.append("  count today. The 0 rests on the arm above — `check_stale`'s early")
+                lines.append(f"  return on `status: active`, marked on {staled['marked_active']} of "
+                             f"{staled['total']} scanned skills.")
+            else:
+                lines.append(f"  below the {STALE_DAYS}-day threshold, so the "
+                             f"{staled['unmarked']} skills without the mark cannot")
+                lines.append("  reach it either: `max_age_days` exceeds the threshold is false.")
             lines.append("")
             lines.append("Re-marking the library, or retiring the mtime/status check outright, is a")
             lines.append("governance call rather than a lint one (#1603). What the lint can measure is")

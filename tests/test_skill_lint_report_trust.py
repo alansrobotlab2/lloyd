@@ -171,9 +171,11 @@ def test_the_ban_on_the_unemitted_telemetry_claim_bites():
 
 def test_stale_reason_names_both_live_halves_and_no_longer_blames_telemetry():
     """#1603 clause 4: `CATEGORY_TRUST["STALE"]` still says the count is not a
-    measurement, and now says why in terms of the two things that are actually
-    inert — the exemption that returns before the age is read, and an age ceiling
-    nothing has reached — instead of a telemetry gap that closed four days later.
+    measurement, and names the two arms that decide it — the exemption that
+    returns before the age is read, and the age ceiling, whose state the row
+    has not asserted since #4614 (an "age ceiling nothing has reached" claim
+    rotted the day one did) but points at as the measured flag
+    `oldest_could_trip` — instead of a telemetry gap that closed four days later.
     """
     verdict, reason = sl.CATEGORY_TRUST["STALE"]
     assert verdict == "no", (
@@ -295,6 +297,90 @@ def test_the_walk_itself_produces_the_two_stale_measurements(tmp_path):
         result["names"])
     sec = _stale_section(sl.render_report(result))
     assert "2 of 3" in sec, sec
+
+
+# ── #4614: the age sentence is chosen from the flag, not remembered ──────────
+#
+# The second STALE bullet rendered `below the {STALE_DAYS}-day threshold`
+# unconditionally while printing `oldest_could_trip` beside it, so once the
+# oldest scanned `SKILL.md` crossed the threshold (95 days against 90 in the
+# 2026-11-27 run) the section asserted the ceiling AND its failure in one
+# sentence — and `CATEGORY_TRUST["STALE"]` asserted the same ceiling as a plain
+# fact with no flag beside it to contradict it. Both are landed-state-sentence
+# rot: a comparison frozen in prose the day it stopped being true. The fix
+# branches on the measured flag; these nodes pin BOTH arms from ONE fixture
+# mirrored, so neither arm can be the remembered one.
+
+def _mirrored_stale_fixture(max_age_days: int, trip: bool) -> dict:
+    """One fixture, the age fields as the only variable between the two arms."""
+    result = _result()
+    result["stale_context"] = {"threshold_days": sl.STALE_DAYS,
+                               "marked_active": 205, "unmarked": 3, "total": 208,
+                               "max_age_days": max_age_days,
+                               "oldest_could_trip": trip}
+    result["usage"] = {"error": "read failed: OSError: none"}
+    return result
+
+
+def test_stale_section_over_the_threshold_asserts_no_ceiling_and_names_the_holder():
+    """#4614 clauses 1 and 3: with the oldest scanned file PAST the threshold,
+    the section must not claim it is below it, and must say what the 0 rests on.
+    """
+    sec = _stale_section(sl.render_report(_mirrored_stale_fixture(95, True)))
+    flat = " ".join(sec.split())
+    # Clause 1 — the exact sentence the nightly report published beside a
+    # `true` flag; the post-landing grep for it must go to zero.
+    assert f"below the {sl.STALE_DAYS}-day threshold" not in sec, sec
+    assert "inert on this library" not in flat, (
+        "the intro still recites the two-halves-inert framing, which the True "
+        "arm falsifies: the age half is live once the flag is true")
+    assert "95 days old" in sec, sec
+    assert "exceeds the threshold is true" in flat, sec
+    # Clause 3 — the 0 is not left unexplained: the section names the arm
+    # holding it (`check_stale`'s early return on `status: active`) with the
+    # measured marked/total count beside it.
+    assert "would trip the count today" in flat, sec
+    assert "The 0 rests on the arm above" in flat, sec
+    assert "`status: active`, marked on 205 of 208 scanned skills" in flat, sec
+
+
+def test_stale_section_under_the_threshold_still_says_the_unmarked_cannot_reach_it():
+    """#4614 clause 2: the SAME fixture mirrored below the threshold still
+    states the ceiling verdict the False arm owes — chosen from the flag, not
+    remembered from the True arm.
+    """
+    sec = _stale_section(sl.render_report(_mirrored_stale_fixture(34, False)))
+    flat = " ".join(sec.split())
+    assert "34 days old" in flat, sec
+    assert f"below the {sl.STALE_DAYS}-day threshold" in flat, sec
+    assert "cannot reach it either" in flat, sec
+    assert "exceeds the threshold is false" in flat, sec
+    # The True arm's sentences must not leak into this one either.
+    assert "would trip the count today" not in flat, sec
+    assert "The 0 rests on the arm above" not in flat, sec
+
+
+def test_stale_trust_row_publishes_the_ceiling_flag_instead_of_asserting_it():
+    """#4614 clause 4: `CATEGORY_TRUST["STALE"]` stated as fact that the oldest
+    scanned `SKILL.md` "has not reached the threshold, so the un-marked
+    remainder cannot either" — false once `max_age_days` passed 90, published
+    in the row a reader scans first, and carrying no flag to contradict it.
+    The row now points at `oldest_could_trip`, where the verdict is published.
+    """
+    verdict, reason = sl.CATEGORY_TRUST["STALE"]
+    assert verdict == "no", (
+        "the count's trustworthiness did not change with the wording, only its "
+        "honesty about which arm holds it")
+    flat = " ".join(reason.split())
+    assert "oldest_could_trip" in flat, reason
+    assert "stale_context" in flat, reason
+    # Neither direction of the frozen comparison survives in the table entry.
+    assert "has not reached" not in flat, reason
+    assert "cannot either" not in flat, reason
+    # The exemption half stays named as a mechanism, and the measured counts
+    # stay where they are published rather than in the row.
+    assert "check_stale" in flat and "before the age check" in flat, reason
+    assert "max_age_days" in flat, reason
 
 
 # ── #2451: the DUPLICATE trust cell derives its pair, it does not remember one ──
