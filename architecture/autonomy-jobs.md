@@ -1346,25 +1346,32 @@ the only monitor in the fleet with authority to act on what it finds.
 | ID | Freq | Watches | Role |
 |----|------|---------|---|
 | #60 | daily | the graph | Knowledge Health Report: god entities (>20 facts), thin (<2), orphans, stale facts, contamination, near-duplicates, provenance coverage |
-| #82 | daily | retrieval | 86-query retrieval eval (the yaml's 2026-11-12 count, `yaml.safe_load(open('eval/vault_recall_queries.yaml'))['queries']`; 81 measured 2026-10-26, grew from n=20 at `98fa216b`) against production's recall defaults; records the trend |
-| #70 | weekly | the skills library | `skill-lint`, advisory — `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`. Read-only, writes `skill-lint-report.{md,json}` for a human |
+| #82 | daily | retrieval | 88-query retrieval eval (`yaml.safe_load(open('eval/vault_recall_queries.yaml'))['queries']`, measured 2026-11-27; 86 on 2026-11-12, 81 on 2026-10-26, grown from n=20 at `98fa216b`) against production's recall defaults; records the trend |
+| #70 | weekly | the skills library | `scripts/skill_lint.py`, advisory, exit 0 always — **eleven** categories, not the five first listed here: `DEAD`, `MISSING_DESC`, `DRIFT`, `DUPLICATE`, `STALE`, `PHANTOM_TOOL`, `MISSING_SCRIPT`, `INJECTION_PATTERN`, `DEAD_SYSTEMD_UNIT`, `DESCRIPTION`, `BURIED_TRIGGER`. Read-only over the library; writes `skill-lint-report.{md,json}` for #83's mandated read, not for a human |
 | #36 | daily | the vault | **Retired 2026-09-23 (#1012)** — the row and the id stay because the group tables pin each other; its task file is in `_archived/` and nothing dispatches it. Read the groundskeeper queue and report counts, health score, and whether the timer ran — the queue and its write ledger are deleted now too (retention-sweep store 10, `d24c7ecd` #1574), so there is nothing left to read |
 | #76 | daily | the fleet | Queue health: per-task failure rate, timeouts, empty runs, `[SILENT]` rate, GPU-hours; reports the poisoned and quarantined rows the queue sweep has already triaged, and pauses failing tasks |
 | #86 | daily | the Inner Voice observer | Nightly grader run appended to a metrics series; flags a sustained `dropped_rate` breach |
 
-**Two of the six have no consumer.** Only one of them still leaves an artifact to
-leave unread. #36's queue held 31,291 items and nothing read it back (below).
+**One of the six has no consumer, and it produces nothing.** #36's queue held
+31,291 items and nothing read it back (below).
 The retention sweep has since deleted it: store 10 unlinks `groundskeeper-queue.json`
 and `groundskeeper-writes.jsonl` from the `_pipeline` store directory past
 `GROUNDSKEEPER_QUEUE_MAX_AGE_DAYS = 30`
 (`scripts/groundskeeper/retention-sweep.py:673`), added by `d24c7ecd` (#1574) —
-measured 2026-10-26 and again 2026-10-29, `ls ~/lloyd-data/_pipeline/groundskeeper*`
-returns no such file, so #36 no longer produces anything at all and the group's
-no-consumer case is one member deep. #70's findings are advisory and reach #83
-only if #83 happens to look — there is no `depends_on` between them, and #83's own
-is `58`. Under the chain grouping those were two unrelated facts in two different
-sections; grouped by function they are two of six, which is a pattern rather than
-two incidents (#3453).
+measured 2026-10-26, again 2026-10-29 and again 2026-11-27,
+`ls ~/lloyd-data/_pipeline/groundskeeper*`
+returns no such file, so #36 no longer produces anything at all. The other member
+this section counted as unconsumed, #70, has a consumer now, and #3453 is what gave
+it one: #83's SKILL.md makes reading `~/obsidian/autonomy/skill-lint-report.json` a
+step of every run ("**Read the JSON, not the markdown**", whose same rule forbids #83
+from re-running the linter because #70 is the only writer), bounds that run on the
+file's `generated_at` against #70's weekly frequency, and requires a `lint_report:`
+line in every summary reading `fresh` / `stale` / `absent` — so a run that skipped
+the read is visible from outside rather than silently unread. There is still no
+`depends_on` between the two and none is wanted: #83's own skill rules that
+`depends_on: 58` stays, because a daily job also pointing at a weekly one would be
+held six days of seven by the freshness gate. The binding is the reported line, not
+the scheduler (#3453).
 
 **A monitor that reports success when it cannot see the thing it monitors is
 worse than none.** #60 exits 2 (`EXIT_ALARM`,
@@ -1372,15 +1379,25 @@ worse than none.** #60 exits 2 (`EXIT_ALARM`,
 cannot be read, when active edges fall below half the
 baseline, when any directory holds facts about another entity, when fact records
 carry no `entity:` tag over the hygiene floor (#2474), or when any fact file
-carries duplicate fact IDs — and since #3222 it also alarms when the baseline
-floor file itself cannot be read, because a rail made blind by a wiped floor
-would otherwise report a clean night. #84 exits 2
+carries duplicate fact IDs — and since #3222 it also alarms when the degraded-edge
+comparison cannot run at all: `memory-graph/graph-baseline.json` absent,
+unparseable, or holding no positive `active_edges` while the store reports edges
+(`_alarms`, the `baseline <= 0 and active > 0` arm), because a rail made blind by a
+wiped floor would otherwise report a clean night. #84 exits 2
 when the graph could not be read. It is the same rule
 `_is_dependency_met` used to get wrong: `if not dep_task: return True` silently
 unblocked every dependent of an upstream whose file no longer answered, and #558
 (Alan's ruling, 2026-09-13) replaced it with a fail-closed gate —
 `_dependency_refusal` now warns and holds on an id no task file answers, which is
 the shape the evidence verifier's `insufficient` verdict is written against.
+
+#60 is also a reader, not only a reporter: since #2821 every run pulls in #94's
+referential-integrity ledger (`autonomy/referential-integrity-latest.md`, through
+`read_referential_ledger`) and publishes its four counts as a "Loaded-memory
+referential integrity" section, treating a dangling TOTAL as the standing baseline and
+raising a finding only on a nonzero newly-dangling delta. That is an edge from §Watch
+the machinery into a member of this group, and it is why a #60 report can be red for a
+reason the fact store itself does not contain.
 
 **#82 must pass no flags.** Until 2026-09-04 it ran `graph_rerank=False/alpha=0.5`
 against a production serving `True/0.3` and scored a configuration nobody used.
@@ -1394,7 +1411,9 @@ choice (#1000). The comment block introducing those knobs counted them wrong unt
 #3454, whose test now reads the conjunction's own terms out of that file. The
 corpus is no longer the 20 queries this row once advertised:
 `98fa216b` (2026-09-20) grew it n=20 → n=78 because at n=20 the nightly could not
-detect the change it exists to detect, and it holds 81 today (measured 2026-10-26).
+detect the change it exists to detect, and it holds 88 (measured 2026-11-27; 81 on
+2026-10-26, 86 on 2026-11-12 — the count grows with every triaged recall failure, so
+any figure quoted here is dated or it is wrong).
 The 27-query reserve beside it (`eval/vault_recall_holdout_queries.yaml`, #1412) is
 scored only by the post-landing automod paired check — `run_eval.py` refuses a
 `nightly*` label over it — so this trend is a dev-set number by design. What orders
@@ -1403,13 +1422,21 @@ so the scheduler's dependency gate is what can hold #82 back: with no successful
 run for the current period `_dependency_refusal` holds this job fail-closed (#558).
 That is the reflection chain's rule — what orders a chain is the freshness half of
 `depends_on`, not the clock — and the `preferred_hours` window is ordering on top of
-the edge, never instead of it. It takes 291–884 s against its 1800 s ceiling (run
-records, 2026-10-24 to -26). If a night's writes hurt recall, this is where it shows
-up.
+the edge, never instead of it. It takes 254–1,039 s against its 1800 s ceiling — 27
+runs, mean 504 s, the longest at 58% of the ceiling and no failure among them
+(`workers.db` `runs`, 2026-10-28 to 2026-11-26, read 2026-11-27). If a night's writes
+hurt recall, this is where it shows up.
 
-**#70 owns half of "wrong skill".** Its `MISSING_DESC` and `DRIFT` cover the case
-where a skill's body is fine and its *description* is not, so retrieval fires it
-on the wrong request or fails to fire it on the right one. The other half — a
+**#70 owns half of "wrong skill" — four buckets, two of them disclaimed.**
+`MISSING_DESC` and `DRIFT` are the pair this section used to name, but the
+description-side case now has four arms: `DESCRIPTION` counts the skills the prompt's
+index shows by name alone because the description is empty or longer than the
+renderer clips to (the clip read through `app.prompt_builder`, never restated in the
+linter), and `BURIED_TRIGGER` (#4374) asks what survives that cut over only the skills
+the renderer granted a line — 191 over-cap descriptions were just 68 rendered lines on
+2026-11-19. What the linter prints beside each count matters as much as the count:
+`CATEGORY_TRUST` marks `DRIFT` and `STALE` `"no"`, so a zero in either means "nothing
+this arm can see fired", not "none drift". The other half — a
 procedure that has rotted — belongs to #83 Stage 3 in
 [Distil](#distil-38-42-39-40-47--56-57-58-83--54), which appends a correction
 rather than rewriting.
@@ -1418,8 +1445,14 @@ rather than rewriting.
 per-task run records.** 237 pool-timeout rows
 carried a NULL `task_id` and were unreachable from any per-task view by
 construction — a task that timed out on every single run was indistinguishable
-from a healthy one. (That pile is history, not state: measured 2026-10-26 the
-`runs` table holds 0 NULL-`task_id` rows and its oldest row is 2026-09-26.) Its poison step is read-only: the deterministic sweep in
+from a healthy one. (That pile is history, but the shape it named is now the
+ordinary one: read 2026-11-27, the `runs` table — which the sweep prunes, so its
+oldest row is 2026-10-28 — holds 9,215 NULL-`task_id` rows of 10,348, because the
+named worker sources (`autotriage`, `owed-check`, `autocode`, `board-steward`, …)
+legitimately carry no autonomy id, and exactly **one** of those 9,215 carries a
+`timed out` summary. A NULL id is therefore no longer the tell it was; the per-source
+half of the same store, `/api/workers/health`, is what reaches those rows, and #76's
+Step 3b reads it.) Its poison step is read-only: the deterministic sweep in
 `workers/maintenance.py` triages that pile — one bounded revive for a transient
 cause, `quarantined` for a structural one — and #76 reports those rows and the
 sweep's own escalation tally instead of overwriting them, because until #1578 its
@@ -1449,17 +1482,33 @@ anyone arms anything.
 
 **#86 measures the observer, not the model.** It runs `scripts/iv_grade.py
 --json` — which opens `usage.db` with `mode=ro` and writes nothing in it — and
-pipes the result into `scripts/iv_metrics_record.py`, which appends **one row
-per night** to `_pipeline/reflection/iv-metrics.jsonl`; it has run nightly since
-2026-09-15 (measured 2026-10-26: 43 rows, newest `recorded_at` 2026-10-26T08:02Z).
-Seven of its 31 runs since 2026-09-26 recorded `failed`, six of them the 300 s
-wall-clock hang #2704 closed on 2026-10-14 — the row lands ~15 s into the run, so
-the series kept its nights while the run reported failure, which is the mirror
-image of the alarm-night #2619 publishes. What it watches is whether the observer's verdicts arrive at all:
+pipes the result into `scripts/iv_metrics_record.py`, which appends **one row per
+run** to `_pipeline/reflection/iv-metrics.jsonl`; it has run nightly since
+2026-09-15 (measured 2026-11-27: 71 rows over 67 dated nights, newest `recorded_at`
+2026-11-26T09:01:12Z). One row per *run* and not per night is the distinction that
+reaches the bound: 2026-11-19 and -24 each carry two rows, because a run that was
+killed had already written one and the retry wrote another, and the breach median
+counts `DEFAULT_WINDOW_ROWS` (7) **rows** with no per-night key of the kind #90 puts on
+its own diff base. Four of its 27 runs since 2026-10-28 recorded `failed`, and three of
+them — 2026-11-19, -24, -25 — were killed at the 300 s ceiling (300.2–300.3 s) with
+their row already written 3–6 s in. That wedge was the run calling
+`automod_vault_land` to commit its own mirror — a synchronous multi-minute call that
+outlasts a 300 s ceiling every time — and #4563 removed it from the skill on
+2026-11-25 (`9f185e42`), naming the nightly vault-commit sweep as committer instead; a
+second hang class on this task after #2704's, closed the same way, by taking the
+slow step out of the run rather than by raising the ceiling. The series had kept those
+nights while the runs reported failure, which is
+the mirror image of the alarm-night #2619 publishes. What it watches is whether the observer's verdicts arrive at all:
 `dropped_rate` is dropped verdicts over `llm_calls`, the share of the observer's
 judgment calls that returned nothing because the deadline expired or the call
 errored, so it turns "the observer seems quiet today" into a trend with a bound
-on it. Where that bound sits is a ruling and not an implementation detail, so it
+on it. Since #4345 the same row also carries the per-call latency percentiles
+(`latency_ms_per_call_p50/p90/p99`) and `latency_p90_over_sync_deadline`, judged
+against the observer's own deadline as read from config rather than against a guessed
+bound (`sync_deadline_ms` 8,000 from `inner_voice.observer.timeout_seconds`, measured
+2026-11-26), so the series now asks whether the verdicts arrive *in time* and not only
+whether they arrive — and a percentile stays `None` on an empty sample rather than
+being written as 0. Where that bound sits is a ruling and not an implementation detail, so it
 lives in `DEFAULT_THRESHOLD` in the recorder and is deliberately not copied here.
 This is the group's rarest shape — a report that has a consumer, and the consumer
 is its own recorder: the median over the last `DEFAULT_WINDOW_ROWS` (7) rows
