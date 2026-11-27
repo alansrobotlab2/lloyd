@@ -7199,3 +7199,193 @@ def test_the_never_triaged_arm_still_parks_on_the_board_s_own_store(isolated, mo
 #: these four call sites were its only readers. The number is kept so each node still
 #: asks about a moment past any grace a config could plausibly set.
 _PAST_ANY_GRACE = 20 * 60
+
+
+# ── #4610: a terminal implement row with `round_id: null` named no round ──────
+#
+# Both mid-round guards joined an item to its live round through the `round_id`
+# on the item's own implement rows, so a terminal row that reported
+# `round_id: null` left them answering "no round, so nothing is running" while
+# the item's own landing was still writing. Measured at triage on 2026-11-26:
+# 104 of the 1228 `backlog_implement` rows are terminal with a null round id
+# (101 `finished`, 3 `infra_failed`), 95 of them `surface=vault`. `retriage_spent_items`
+# filters only on `items_with_unfinished_rounds`, so a `backlog_retriage` row
+# landed over a running landing. The four nodes below are the hold, its vault
+# half, its bound, and its release.
+
+def _null_round_row(item_id):
+    """An implement history whose terminal row names no round — the #4610 shape.
+
+    `_landed(..., vault=True)` already writes this row for a vault land; this is
+    the same row without the promotion, so the guards see a spent-or-spending
+    terminal turn with no round to ask about.
+    """
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "started"},
+                   path=S.LEDGER_PATH)
+    S.append_event({"event": "backlog_implement", "item_id": item_id, "phase": "finished",
+                    "round_id": None, "stop_reason": "stop", "num_turns": 40},
+                   path=S.LEDGER_PATH)
+
+
+def _scratch_round_store(monkeypatch, tmp_path):
+    """Isolate the round store and the vault-marker dir for a live-marker node.
+
+    Left alone, the guards would read the real `rounds/` and `vault_lands/`,
+    where another round's marker is a fact about the machine and not about the
+    test. `marker_pid_is_live`'s automod-identity leg is not the subject here
+    (`tests/test_automod_marker_identity.py` pins it), so liveness stays what
+    the neighbouring guard fixtures use: `pid_alive`.
+    """
+    monkeypatch.setattr(S, "ROUNDS_DIR", tmp_path / "rounds")
+    monkeypatch.setattr(S, "VAULT_LAND_DIR", tmp_path / "vault_lands")
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    monkeypatch.setattr(S, "marker_pid_is_live",
+                        lambda pid, started_at=None: S.pid_alive(pid))
+    return tmp_path / "rounds"
+
+
+def _code_marker(rid, *, item, kind="land", pid=None):
+    """A gate/land marker for `rid` whose `run_spec.yaml` binds `item` (None = an
+    item-less round). The marker record itself carries no item id
+    (`state.write_gate_marker` stores pid/started_at/started_iso/head/by,
+    `state.write_land_marker` pid/started_at/started_iso/by), which is exactly
+    why the join has to go through the spec.
+    """
+    import os
+    import yaml as _yaml
+    (S.ROUNDS_DIR / rid).mkdir(parents=True, exist_ok=True)
+    spec = {"objective": "a thing", "code": {"base_commit": "0" * 40}}
+    if item is not None:
+        spec["item"] = {"id": int(item)}
+    (S.ROUNDS_DIR / rid / "run_spec.yaml").write_text(_yaml.dump(spec), encoding="utf-8")
+    pid = os.getpid() if pid is None else pid
+    (S.write_gate_marker if kind == "gate" else S.write_land_marker)(rid, pid=pid)
+
+
+def _dead_pid() -> int:
+    """A pid the kernel has handed back: spawned, waited, gone."""
+    import subprocess
+    p = subprocess.Popen(["true"])
+    p.wait()
+    return p.pid
+
+
+@pytest.mark.parametrize("source", ["land", "gate", "current"])
+def test_a_null_round_id_item_whose_round_is_live_is_held_by_both_guards(
+        isolated, monkeypatch, tmp_path, source):
+    """#4610 clause 1: the item's terminal row names no round, yet its landing is
+    running — so `retriage_spent_items` must not be allowed to re-judge it.
+
+    All three code-side sources of the shared helper are the same claim from a
+    different file, so all three are asked here: a live `land.running`, a live
+    `gate.running`, and a `current.json` round the guardian is still observing.
+    `items_being_gated_or_landed` is the one that had no fallback at all, so it
+    is asserted in the same breath as `items_with_unfinished_rounds`.
+    """
+    _scratch_round_store(monkeypatch, tmp_path)
+    write_item(isolated, 9401)
+    _null_round_row(9401)
+    if source == "current":
+        (S.ROUNDS_DIR / "SM_9401").mkdir(parents=True, exist_ok=True)
+        (S.ROUNDS_DIR / "SM_9401" / "run_spec.yaml").write_text(
+            yaml.dump({"item": {"id": 9401}}), encoding="utf-8")
+        monkeypatch.setattr(S, "read_current",
+                            lambda: {"round_id": "SM_9401", "state": "landing"})
+    else:
+        _code_marker("SM_9401", item=9401, kind=source)
+
+    assert 9401 in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        f"a {source} marker naming the item left it releasable"
+    assert 9401 in B.items_being_gated_or_landed(S.LEDGER_PATH), \
+        f"ready_confirmed would have offered a second round over its own {source}"
+
+    # The release edge, in the same fixture: the hold is the marker, not the row.
+    monkeypatch.setattr(S, "read_current", lambda: None)
+    S.clear_gate_marker("SM_9401")
+    S.clear_land_marker("SM_9401")
+    assert 9401 not in B.items_with_unfinished_rounds(S.LEDGER_PATH)
+    assert 9401 not in B.items_being_gated_or_landed(S.LEDGER_PATH)
+
+
+def test_a_null_round_id_item_with_a_live_vault_land_marker_is_held_by_both_guards(
+        isolated, monkeypatch, tmp_path):
+    """#4610 clause 2: the vault half, which is 95 of the 104 rows and needs no
+    `run_spec.yaml` join at all — `state.write_vault_land_marker` has been keyed
+    by item since #4583, and neither guard was reading it.
+
+    No code gate or land marker exists in this fixture: the vault marker alone
+    has to carry it, which is the whole reason the shared helper asks the
+    item-keyed marker directly instead of only walking round directories.
+    """
+    rounds = _scratch_round_store(monkeypatch, tmp_path)
+    write_item(isolated, 9402)
+    _null_round_row(9402)
+    S.write_vault_land_marker(item_id=9402, paths=["backlog/9402-a-thing.md"])
+    assert not list(rounds.glob("*/land.running")) and not list(rounds.glob("*/gate.running")), \
+        "this node is about the vault marker alone"
+    assert S.vault_land_in_progress(item_id=9402) is not None, "the marker is not live"
+
+    assert 9402 in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "a vault item mid-landing is invisible to retriage's only liveness filter"
+    assert 9402 in B.items_being_gated_or_landed(S.LEDGER_PATH)
+
+    S.clear_vault_land_marker(item_id=9402)
+    assert 9402 not in B.items_with_unfinished_rounds(S.LEDGER_PATH)
+    assert 9402 not in B.items_being_gated_or_landed(S.LEDGER_PATH)
+
+
+def test_a_marker_bound_to_another_item_or_to_a_dead_pid_holds_nothing(
+        isolated, monkeypatch, tmp_path):
+    """#4610 clause 3 — the bound that keeps a null-rid item from being frozen by
+    somebody else's round, or by a marker nobody owns.
+
+    Two shapes that must both release: a live marker whose `run_spec.yaml` binds
+    a DIFFERENT item, and a marker naming this item whose pid is gone (the
+    leftover `gate.running`/`land.running` files #3926 leaves on disk on
+    purpose). The positive control at the end changes only the binding, so a
+    broken scan cannot pass this node by finding nothing.
+    """
+    _scratch_round_store(monkeypatch, tmp_path)
+    write_item(isolated, 9403)
+    _null_round_row(9403)
+
+    _code_marker("SM_OTHER", item=9404)            # another item's live landing
+    assert 9403 not in B.items_with_unfinished_rounds(S.LEDGER_PATH)
+    assert 9403 not in B.items_being_gated_or_landed(S.LEDGER_PATH)
+
+    S.clear_land_marker("SM_OTHER")
+    _code_marker("SM_STALE", item=9403, pid=_dead_pid())   # its own marker, dead owner
+    assert 9403 not in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "a dead pid is a leftover, not a landing"
+    assert 9403 not in B.items_being_gated_or_landed(S.LEDGER_PATH)
+
+    _code_marker("SM_MINE", item=9403)             # only the binding changed
+    assert 9403 in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "the positive control: the scan works, so the two releases above are the bindings"
+    assert 9403 in B.items_being_gated_or_landed(S.LEDGER_PATH)
+
+
+def test_a_null_round_id_item_with_nothing_live_is_released_and_still_re_triaged(
+        isolated, monkeypatch, tmp_path):
+    """#4610 clause 4 — the release edge, which is the reason this is a hold and
+    not a freeze. 101 of the 104 null-rid rows are ordinary completed turns that
+    opened no round the guards could reach (a vault land that has since
+    finished, a turn whose round-start row is missing), and each of them is still
+    owed its re-triage: `retriage_spent_items` must write its mark exactly as it
+    did before the hold existed.
+    """
+    _scratch_round_store(monkeypatch, tmp_path)
+    write_item(isolated, 9405)
+    _null_round_row(9405)
+
+    assert 9405 not in B.items_with_unfinished_rounds(S.LEDGER_PATH), \
+        "a round-less finished row froze an item that has nothing running"
+    assert 9405 not in B.items_being_gated_or_landed(S.LEDGER_PATH)
+    assert B.implement_outcomes(S.LEDGER_PATH)[9405][0] == "spent"
+
+    out = B.retriage_spent_items(S.LEDGER_PATH)
+    assert [r["item_id"] for r in out] == [9405], "the re-triage itself was withheld"
+    mark = [e for e in S.read_events(path=S.LEDGER_PATH)
+            if e.get("event") == "backlog_retriage"][-1]
+    assert mark["item_id"] == 9405 and not mark.get("round_id"), \
+        "the mark a round-less item gets carries no round"

@@ -3088,6 +3088,92 @@ def _live_promoted_rounds(ledger: Path) -> set[str]:
             if d.get("round_id") and str(d.get("commit") or "") not in reverted}
 
 
+def _round_bound_item(rid: str) -> int | None:
+    """The item a round's `run_spec.yaml` binds, or None when it binds nothing.
+
+    `round.start` writes `run_spec["item"] = {"id": int(item_id)}` only `if
+    item_id` (`scripts/automod/round.py:123-124`), so an item-less round has no
+    mapping and holds no item — the half that keeps `live_rounds_by_item`
+    bounded. The same join `autocode._orphan_round` (`workers/sources/autocode.py:1239`),
+    `round._run_gate` (`scripts/automod/round.py:328`) and `promote._regate_after_move`
+    (`scripts/automod/promote.py:1322`) already walk. Unreadable or unparseable
+    means None: a spec that cannot be read cannot name an item.
+    """
+    from scripts.automod import state as S
+    import yaml
+    try:
+        spec = yaml.safe_load(
+            (S.ROUNDS_DIR / str(rid) / "run_spec.yaml").read_text(encoding="utf-8")) or {}
+        bound = (spec.get("item") or {}).get("id")
+        return None if bound is None else int(bound)
+    except (OSError, TypeError, ValueError, yaml.YAMLError):
+        return None
+
+
+def live_rounds_by_item(item_ids) -> dict[int, str]:
+    """{item_id: what is live} for every automod round or vault land RUNNING now, keyed by ITEM.
+
+    The two mid-round guards reach a round through the `round_id` on the item's
+    own implement rows, so a terminal row with `round_id: null` leaves them
+    nothing to ask about and the item was released while its own landing was
+    still writing — 104 of the 1228 `backlog_implement` rows measured at triage
+    on 2026-11-26 are terminal with a null round id (101 `finished`, 3
+    `infra_failed`), and `retriage_spent_items` wrote its mark over those
+    landings (#4610). This is the same question asked from the other side. The
+    marker RECORDS cannot answer it alone: `state.write_gate_marker` stores
+    pid/started_at/started_iso/head/by and `state.write_land_marker` stores
+    pid/started_at/started_iso/by, neither with an item id, so each live marker
+    is joined back to its item through that round's `run_spec.yaml`.
+
+    Three sources, each with its own liveness test, none of them a bare
+    directory: `gate_in_progress`/`land_in_progress` refuse a dead or recycled
+    pid (#3926), `vault_land_in_progress` refuses a pid that is gone, and
+    `current.json` is only live while the guardian has a record in it. A vault
+    landing is keyed by item from the moment it starts
+    (`state.write_vault_land_marker(item_id=…)`, #4583), so it needs no join and
+    is asked for directly by id — which is why this takes `item_ids`: 95 of
+    those 104 rows are `surface=vault`, and for them the marker is already the
+    right shape. A round whose spec names no item contributes nothing.
+
+    Read-only, and never unlinks a stale marker: whether that gate finished or
+    died is the reader's call, exactly as in `state.gate_in_progress`.
+    """
+    from scripts.automod import state as S
+    import os
+    ids = {int(i) for i in item_ids}
+    if not ids:
+        return {}
+    out: dict[int, str] = {}
+    for rid in sorted(os.listdir(S.ROUNDS_DIR)) if S.ROUNDS_DIR.is_dir() else []:
+        try:
+            if not (S.gate_marker_path(rid).exists() or S.land_marker_path(rid).exists()):
+                continue
+            kind = "gate" if S.gate_in_progress(rid) else (
+                "landing" if S.land_in_progress(rid) else "")
+        except OSError:  # noqa: BLE001 — an unreadable marker is not a running round
+            continue
+        if not kind:
+            continue
+        iid = _round_bound_item(rid)
+        if iid is not None:
+            out.setdefault(iid, f"round {rid} {kind}")
+    try:
+        current_rid = str((S.read_current() or {}).get("round_id") or "")
+    except Exception:  # noqa: BLE001
+        current_rid = ""
+    if current_rid:
+        iid = _round_bound_item(current_rid)
+        if iid is not None:
+            out.setdefault(iid, f"round {current_rid} named by current.json")
+    for iid in ids:
+        try:
+            if S.vault_land_in_progress(item_id=iid):
+                out.setdefault(iid, "vault land in flight")
+        except Exception:  # noqa: BLE001 — unsure is not a hold: the marker is the fact
+            continue
+    return out
+
+
 def items_with_unfinished_rounds(ledger: Path, *,
                                  history: dict[int, list[dict]] | None = None) -> set[int]:
     """Items whose attempt is not over, whatever `implement_outcomes` reads.
@@ -3102,6 +3188,13 @@ def items_with_unfinished_rounds(ledger: Path, *,
     any of its rounds promoted and was not reverted (the settle sweep or a
     person owns it), or when its latest round is named by `current.json`,
     still has a worktree, or has a live gate or land marker. Fails closed.
+
+    An item whose rows carry no `round_id` at all has no latest round to ask
+    about, so it is held by the other half of the question — `live_rounds_by_item`
+    (#4610). The bounded half matters as much as the hold: with no live marker
+    and no `current.json` round naming it, a round-less `finished` row releases
+    the item exactly as it always did, so a turn that never opened a round never
+    freezes its item in this predicate.
     """
     from scripts.automod import state as S, worktree as W
     history = implement_history(ledger) if history is None else history
@@ -3111,12 +3204,14 @@ def items_with_unfinished_rounds(ledger: Path, *,
     except Exception:  # noqa: BLE001
         current_rid = ""
     out: set[int] = set()
+    roundless: list[int] = []
     for iid, rows in history.items():
         if str(rows[-1].get("phase") or "") == "started":
             out.add(iid)
             continue
         rids = [str(r["round_id"]) for r in rows if r.get("round_id")]
         if not rids:
+            roundless.append(iid)
             continue
         if any(r in live_promoted for r in rids) or rids[-1] == current_rid:
             out.add(iid)
@@ -3127,6 +3222,7 @@ def items_with_unfinished_rounds(ledger: Path, *,
                 out.add(iid)
         except Exception:  # noqa: BLE001 — unsure means unfinished
             out.add(iid)
+    out |= set(live_rounds_by_item(roundless))
     return out
 
 
@@ -3143,19 +3239,35 @@ def items_being_gated_or_landed(ledger: Path, *,
     exists to avoid. Live markers only, never a bare worktree: a marker dies
     with its process, while a worktree an abort failed to remove would hold
     the item out of the pool for good. Unreadable means not held.
+
+    The item's own `round_id` is how it finds "its latest round", so an
+    implement row that reported `round_id: null` — a vault land keyed by item,
+    or a code turn whose round-start row is missing — was invisible here even
+    with the landing running. Those items go through `live_rounds_by_item`,
+    which asks the live markers and the item-keyed vault land marker directly
+    (#4610); it holds the same rule this docstring always stated, because it
+    consults marker liveness and nothing else. A vault land in flight is a
+    landing running right now by definition (`state.vault_land_in_progress` is
+    live only while the writing process is), and a round named by
+    `current.json` is one the promoter has not finished observing. With no live
+    marker and no `current.json` round naming it, a round-less item is not held
+    here either.
     """
     from scripts.automod import state as S
     history = implement_history(ledger) if history is None else history
     out: set[int] = set()
+    roundless: list[int] = []
     for iid, rows in history.items():
         rids = [str(r["round_id"]) for r in rows if r.get("round_id")]
         if not rids:
+            roundless.append(iid)
             continue
         try:
             if S.gate_in_progress(rids[-1]) or S.land_in_progress(rids[-1]):
                 out.add(iid)
         except Exception:  # noqa: BLE001
             continue
+    out |= set(live_rounds_by_item(roundless))
     return out
 
 
