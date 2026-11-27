@@ -17,7 +17,7 @@ files is dead text — is owned by `~/obsidian/backlog/951-*.md`. What this file
 pins is the #47 instance and the seam's delivery property, so that neither can
 quietly come back.
 
-Seven of the fourteen tests read the live `~/obsidian` and carry `@live_vault`, which
+Seven of the nineteen tests read the live `~/obsidian` and carry `@live_vault`, which
 the gate deselects (`pytest.ini:6-13`). The record, measured 2026-09-13: EVERY
 automated pytest invocation in the tree passes `-m "not live_vault"`
 (`gate.py:290`, `gate.py:918`, and the review rung's sandbox command at
@@ -26,10 +26,12 @@ or for a review that writes its own command. That gap is not this item's to fix 
 is already owned, with a measured case list, by **backlog #979**
 (`~/obsidian/backlog/979-live-vault-tests-run-on-no-automated-rung-so-a-pin.md`);
 until it closes, read the seven live nodes as pins a human or a review executes, and
-read the seven vault-free nodes below as the part the loop enforces by itself: the
+read the twelve vault-free nodes below as the part the loop enforces by itself: the
 extractor self-check, the `_build_task_prompt` mechanism test, the end-to-end
 `run_task` delivery test, the two #1633 long-skill delivery nodes, the `CLAUSE_NODES`
-self-check and the mark-scope self-check. (The round branch also
+self-check, the mark-scope self-check, and the five #4622 cap-notice nodes at the foot
+of the file (capped shape, uncapped shapes, the two content clauses, and the capped
+`run_task` delivery seam). (The round branch also
 carried a clause-5 diff test and its surface-filter self-check; both read the
 round's own `git diff` and were dropped when the file was landed by hand, #1413.
 `fact_check` was retired from the tool catalog on 2026-09-23, so the fixtures below
@@ -992,6 +994,13 @@ ENFORCED_NODES = frozenset({
     "test_the_runner_delivers_a_long_skill_whole_to_engine_and_store",
     "test_every_clause_names_a_node_that_exists",
     "test_only_the_nodes_that_read_the_vault_carry_the_live_mark",
+    # The five #4622 nodes: hand-built dicts and one synthetic driven `run_task`,
+    # no vault read, so they belong on the enforced side of this split.
+    "test_a_capped_task_prompt_appends_the_cap_notice_exactly_once",
+    "test_an_uncapped_task_prompt_gains_nothing_from_the_cap",
+    "test_the_cap_notice_names_every_call_that_counts_against_the_cap",
+    "test_the_cap_notice_sends_a_long_command_at_timeout_not_background",
+    "test_the_runner_delivers_the_cap_notice_to_the_engine",
 })
 
 
@@ -1064,3 +1073,180 @@ def test_the_map_covers_every_clause_the_item_numbers():
     assert numbered == ITEM_CLAUSES, (
         f"the item numbers {sorted(numbered)}; this file pins {sorted(PINNED_CLAUSES)} "
         f"and defers {sorted(FINALIZER_CLAUSES)} — reconcile before grading anything")
+
+
+# ── #4622: a capped task is told what its cap counts ───────────────────────────
+#
+# `max_tool_calls` is graded at `scripts/autoresearch/judge.py:723-728` as
+# `len(tools_called) <= int(val)`, over `_names_in(trace, "tool_calls")`
+# (`judge.py:687`) — every call the harness dispatched. Nothing anywhere said so to
+# the worker being capped: `git grep -n max_tool_calls -- app/ agent_mcp/ workers/`
+# on 2026-11-27 returns only the two bench-authoring template strings at
+# `workers/sources/bench_mine.py:610,614`, and 1 of the 18 live task files that
+# declare a cap (`autonomy/96-djev-name-prior-probe.md`, vault `bc77cb560`) carried
+# the wording. The cost is recurring rather than one-off: `scripts.autonomy.regrade_runs
+# --days 30 --show-runs` printed 7 `graded_fail` rows named on the cap across 6 capped
+# tasks (#100 x3, #90, #80, #96, #104), and 10 of those 18 caps sit at 4 calls or
+# fewer, so a poll after a backgrounded command is exactly what breaks one.
+#
+# The five nodes below are vault-free and enforced. `CLAUSE_NODES` above is #463's
+# map and stays untouched: its keys are #463's clause numbers, and
+# `test_the_map_covers_every_clause_the_item_numbers` re-reads the #463 item, so
+# folding #4622 in there would compare one item's numbering against another's. The
+# nodes name the #4622 clause they pin in their own docstrings instead.
+
+#: The two shapes differ by one key and nothing else — same id, name, skill and
+#: description — which is what lets the capped node assert the *differential*
+#: ("the capped prompt is the uncapped prompt plus exactly one appended sentence")
+#: instead of "some line mentioning the cap is in there somewhere".
+_CAP_PROBE_BASE = {
+    "id": 4622, "name": "cap probe", "skill_name": "probe-skill",
+    "description": "Read the published block and report it verbatim.",
+}
+
+#: The declared check that triggers the notice: the `acceptance.objective_checks`
+#: shape the real reader `app/run_acceptance.py:83 parse_acceptance` consumes, and
+#: which `app/autonomy.py::_declares_tool_call_cap` goes through — so the trigger is
+#: the declared grade, never a flag a caller could invent.
+_CAP_PROBE_CAPPED = dict(_CAP_PROBE_BASE, acceptance={
+    "objective_checks": [
+        {"type": "tool_called", "value": "Bash"},
+        {"type": "max_tool_calls", "value": 4},
+    ]})
+
+_CAP_PROBE_SKILL = "# probe-skill\n\n## Phase 1 — Orient\nread the published block.\n"
+
+
+def _built(task: dict) -> str:
+    return autonomy._build_task_prompt(task, _CAP_PROBE_SKILL)
+
+
+def test_a_capped_task_prompt_appends_the_cap_notice_exactly_once():
+    """#4622 clause 1, capped half: the sentence is appended, once, at the end.
+
+    The differential is the assertion, because "appends exactly one sentence" has
+    two ways to fail that a substring test cannot tell apart: the notice going in
+    twice (an author adds it to the header block and the tail), or the cap check
+    also changing something else in the prompt — a rewrapped description, a dropped
+    blank line. Both leave `notice in prompt` green. `run_task` hands this string
+    straight to the engine (`app/autonomy.py:5495`, its sole caller), so "exactly
+    one" here is the number a capped worker reads.
+    """
+    capped = _built(_CAP_PROBE_CAPPED)
+    uncapped = _built(_CAP_PROBE_BASE)
+    notice = autonomy.TOOL_CALL_CAP_NOTICE
+
+    assert capped == uncapped + "\n\n" + notice, (
+        "a capped task's prompt is not the uncapped prompt plus exactly one appended "
+        "sentence: the notice is missing, duplicated, placed somewhere other than the "
+        "end, or the cap check moved part of the prompt it does not own")
+    assert capped.count(notice) == 1, "the cap notice reaches the prompt twice"
+    assert "\n" not in notice, (
+        f"the cap notice is {len(notice.splitlines())} lines; clause 1 allows exactly "
+        "one sentence per capped prompt")
+
+
+def test_an_uncapped_task_prompt_gains_nothing_from_the_cap():
+    """#4622 clause 1, uncapped half, over the shapes a real task file comes in.
+
+    `acceptance` is absent on most tasks, a bare list on some (the shape
+    `parse_acceptance` tolerates at `app/run_acceptance.py:95`), and a dict here.
+    The last entry is the one with teeth beyond the first two: a check type the
+    judge does not know grades `acceptance_invalid`, not a cap, so the trigger must
+    be the *gradeable* declaration — otherwise a typo'd cap would tell a worker to
+    ration calls nothing grades it for.
+    """
+    notice = autonomy.TOOL_CALL_CAP_NOTICE
+    shapes = {
+        "no acceptance block": dict(_CAP_PROBE_BASE),
+        "objective_checks with no cap": dict(_CAP_PROBE_BASE, acceptance={
+            "objective_checks": [{"type": "tool_called", "value": "Bash"}]}),
+        "bare list with no cap": dict(_CAP_PROBE_BASE, acceptance=[
+            {"type": "regex", "value": "wrote \\d+ entries"}]),
+        "empty acceptance": dict(_CAP_PROBE_BASE, acceptance=[]),
+        "a cap-typed check the judge does not know": dict(_CAP_PROBE_BASE, acceptance={
+            "objective_checks": [{"type": "max_tool_call", "value": 4}]}),
+    }
+    base = _built(_CAP_PROBE_BASE)
+    for shape, task in shapes.items():
+        prompt = _built(task)
+        assert notice not in prompt, f"{shape}: an uncapped task was given the notice"
+        assert "counts every call" not in prompt, (
+            f"{shape}: cap wording reached an uncapped prompt")
+        assert prompt == base, (
+            f"{shape}: the prompt for an uncapped task is no longer the prompt this "
+            "file pinned before #4622 — clause 1 requires it unchanged")
+
+
+def test_the_cap_notice_names_every_call_that_counts_against_the_cap():
+    """#4622 clause 2: the sentence says what the grader counts.
+
+    Transcribed claims, not the module constant: a node that asserted
+    `autonomy.TOOL_CALL_CAP_NOTICE in prompt` would stay green however much of the
+    content were edited away, and the content is the clause. Each phrase below maps
+    onto the judge's own semantics — `len(tools_called)` counts dispatches, so the
+    Read that tails `_pipeline/tasks/*.log` (the file a backgrounded Bash command's
+    output goes to) and the poll in front of it are three of the four calls a
+    `max_tool_calls: 4` task has.
+    """
+    prompt = _built(_CAP_PROBE_CAPPED)
+    for claim in ("counts every call you dispatch",
+                  "a Read of a `_pipeline/tasks/*.log`",
+                  "`sleep`, `pgrep` or `ls` poll",
+                  "does not put the calls behind it outside the cap"):
+        assert claim in prompt, (
+            f"the cap notice no longer says {claim!r}, which is the half of the "
+            "#4622 sentence the capped worker needs: the grader counts dispatches, "
+            "so backgrounding a mandated command buys nothing if the run then reads "
+            "or polls for its result")
+
+
+def test_the_cap_notice_sends_a_long_command_at_timeout_not_background():
+    """#4622 clause 3: it also names the alternative, with its bound.
+
+    The bound is part of the claim — the Bash tool's own ceiling is 600000 ms, so a
+    sentence that said "pass timeout" without it would send a worker to raise a
+    timeout it cannot have and background the command anyway. `app/prompt_builder.py
+    :613-622` keeps telling every agent on every turn to background anything
+    long-running; #4524's owed-check declined to re-word that fleet-wide paragraph
+    (backgrounding is legitimate 292 times fleet-wide), which is why the alternative
+    is offered here, in the one prompt where a cap makes it the wrong call.
+    """
+    prompt = _built(_CAP_PROBE_CAPPED)
+    assert "must carry `timeout` (max 600000 ms) rather than `run_in_background`" in prompt, (
+        "the cap notice stopped naming `timeout` (max 600000 ms) as the alternative to "
+        "`run_in_background`, leaving a capped worker told what not to do and nothing "
+        "to do instead")
+
+
+def test_the_runner_delivers_the_cap_notice_to_the_engine(monkeypatch, tmp_path):
+    """The seam #4622 crosses, driven end to end: declared check → engine prompt.
+
+    `_build_task_prompt` returning the notice proves only that a string was built.
+    The boundary is `run_task` (`app/autonomy.py:5495`) taking the parsed front
+    matter, building this prompt and putting it in the message list the engine
+    receives — so this drives the real runner with a capped task and asserts at both
+    ends #463's node asserts at: the delivered message and the stored session row.
+    Nothing writes outside `tmp_path`, and `grade_run` is pure, so the acceptance
+    block costs no database.
+    """
+    out = _drive_one_run(monkeypatch, tmp_path, task=_CAP_PROBE_CAPPED,
+                         skill_text=_CAP_PROBE_SKILL)
+    assert out.get("messages"), "run_task never reached the engine"
+    delivered = out["messages"][0]["content"]
+    assert isinstance(delivered, str) and delivered, (
+        f"engine message content is {type(delivered).__name__}, not the string the "
+        "assertions below assume")
+    assert autonomy.TOOL_CALL_CAP_NOTICE in delivered, (
+        "a capped task's worker was dispatched without the sentence: the front matter "
+        "declared max_tool_calls and only the built prompt knows what the cap counts")
+    sessions = list((tmp_path / "sessions").glob("*.json"))
+    assert len(sessions) == 1, f"expected one session, got {len(sessions)}"
+    stored = json.loads(sessions[0].read_text(encoding="utf-8"))
+    user_rows = [m for m in stored["messages"] if m.get("role") == "user"]
+    assert user_rows, "the session stored no user row"
+    stored_text = "\n".join(c.get("text", "") for c in user_rows[0]["content"])
+    assert stored_text == delivered, (
+        "the stored user row is no longer the delivered prompt, so a later reader "
+        "cannot tell from the session what a capped worker was told")
+    assert autonomy.TOOL_CALL_CAP_NOTICE in stored_text

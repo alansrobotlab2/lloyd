@@ -6751,7 +6751,7 @@ CITATION_WINDOW = 320
 #: moved 278→310 rather than 278→279. A set pinned to the old numbers would go red on a
 #: doc whose citation had just been corrected, which is the worst thing a witness can do.
 REQUIRED_CITATIONS = frozenset({
-    "app/autonomy.py:3665",                        # EVIDENCE_PILOT_TASK_IDS. 2912→3112 when #4088's consumer re-drive block landed above it; 3112→3292 when #4135's pass-level hold did the same (181 lines); 3292→3420 when #4254's fleet-hold deduction landed above it (128 lines); 3420→3494 when #4304's once-per-occurrence catch-up marker landed above it (75 lines in, 1 out); 3494→3665 when #4299's chain-hold predicate and its two hold strings did the same (171 lines).
+    "app/autonomy.py:3726",                        # EVIDENCE_PILOT_TASK_IDS. 2912→3112 when #4088's consumer re-drive block landed above it; 3112→3292 when #4135's pass-level hold did the same (181 lines); 3292→3420 when #4254's fleet-hold deduction landed above it (128 lines); 3420→3494 when #4304's once-per-occurrence catch-up marker landed above it (75 lines in, 1 out); 3494→3665 when #4299's chain-hold predicate and its two hold strings did the same (171 lines); 3665→3726 when #4622's cap notice and its trigger predicate landed above it (61 lines).
     "tests/test_worker_evidence.py:686",           # the assert pinning that frozenset
     "tests/test_skill_tool_names.py:150",          # ALLOWED_TO_MENTION
     "scripts/skill_lint.py:392",                   # PHANTOM_EXEMPT. 282→392 when #4374's BURIED_TRIGGER check landed above it (110 lines).

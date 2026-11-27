@@ -5,8 +5,9 @@ this file's pins moved with them.
 
 An autonomy task's markdown body looks like a specification and reaches no run:
 `_build_task_prompt` (`app/autonomy.py:2487`) assembles the silent-run hint, the
-task header, the `skill_name` SKILL.md and the front-matter `description` — never
-the body. #463 caught the first instance (#47's `Fact Store Consolidation` phase,
+task header, the `skill_name` SKILL.md and the front-matter `description`, plus one
+sentence about its `max_tool_calls` cap when the front matter declares one (#4622) —
+never the body. #463 caught the first instance (#47's `Fact Store Consolidation` phase,
 instructed in a body, present in 0 of 4 run records), and
 `~/obsidian/autonomy/90-corpus-shape-trend.md:62` states the rule in the file
 itself. So the only version of this task a worker can obey is the two carriers
@@ -488,6 +489,52 @@ def test_the_body_stays_documentation_and_reaches_no_run():
             f"{line!r} reached the delivered prompt from the body, which means "
             "the renderer changed under #463's rule"
         )
+
+
+def test_the_capped_front_matter_reaches_the_worker_as_the_cap_notice():
+    """#4622 clause 4: the trigger is this task's own declared check, not a flag.
+
+    The two directions are both here because the failure the sentence exists to stop
+    is a capped worker spending its budget on polls: `max_tool_calls: 4` is in this
+    fixture's front matter (`acceptance.objective_checks`), `app/run_acceptance.py:83
+    parse_acceptance` is the reader that turns it into a grade, and
+    `app/autonomy.py::_declares_tool_call_cap` asks that same reader — so the first
+    assertion below is what the grade will measure, and the second is that the worker
+    is told about it. The counterfactual is the point: delete the declared check from
+    the parsed dict, leave the task's id, name, description and skill untouched, and
+    the sentence must go. That is what rules out a trigger keyed on the task's
+    identity, which would tell #95 and only #95, while 18 task files declare a cap.
+
+    Fixture, not live vault: `TASK_FIXTURE` carries the same `acceptance:` block as
+    `~/obsidian/autonomy/95-mitigation-drill.md` and is compared against it by
+    `test_the_live_task_and_skill_are_the_job_this_file_grades`, so the gate runs this
+    node and the live comparison is what keeps the fixture honest.
+    """
+    from app.run_acceptance import parse_acceptance
+
+    task, prompt = _render(TASK_FIXTURE, SKILL_FIXTURE)
+    notice = autonomy.TOOL_CALL_CAP_NOTICE
+
+    graded = [c["type"] for c in (parse_acceptance(task) or {}).get("checks", [])]
+    assert "max_tool_calls" in graded, (
+        f"the grader reads {graded} from this fixture, so no run of this task is "
+        "capped and the sentence below would be instructing a worker nothing grades"
+    )
+    assert _checks(task).get("max_tool_calls") == [4], (
+        "the declared cap moved off 4, which is the number the 2026-11-26 breach "
+        "series was graded against; re-read the item before carrying a new one")
+    assert notice in prompt, (
+        "a capped #95 run was dispatched without being told the cap counts every "
+        "dispatched call: its one GET plus a background and a poll is already three"
+    )
+
+    uncapped = {k: v for k, v in task.items() if k != "acceptance"}
+    same_rest = autonomy._build_task_prompt(
+        uncapped, SKILL_FIXTURE.read_text(encoding="utf-8"))
+    assert notice not in same_rest, (
+        "the notice is keyed on something other than the declared check, since it "
+        "survived removing the acceptance block from the same parsed task"
+    )
 
 
 def test_the_skill_names_the_history_cap_the_code_keeps():

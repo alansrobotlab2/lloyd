@@ -81,7 +81,12 @@ logger = logging.getLogger("lloyd-autonomy")
 
 AUTONOMY_DIR = vault_root() / "autonomy"
 from app.paths import AUTONOMY_RUNS_DIR  # anchored to DATA_ROOT
-from app.run_acceptance import GRADE_KEY as _ACCEPTANCE_GRADE_KEY, DispatchTrace, grade_run
+from app.run_acceptance import (
+    GRADE_KEY as _ACCEPTANCE_GRADE_KEY,
+    DispatchTrace,
+    grade_run,
+    parse_acceptance,
+)
 from app.silent_sentinel import is_silent_response, run_is_silent
 from app.paths import LLOYD_HOME  # the checkout root, not this file's directory
 
@@ -3614,6 +3619,60 @@ def _load_skill_content(skill_name: str) -> Optional[str]:
         return None
 
 
+#: #4622 — say in a capped task's prompt what its cap counts.
+#:
+#: `max_tool_calls` is graded by `scripts/autoresearch/judge.py:723-728` as
+#: `len(tools_called) <= int(val)` over `_names_in(trace, "tool_calls")`
+#: (`judge.py:687`) — literally every call the harness dispatched, so the Read that
+#: tails a backgrounded command's `_pipeline/tasks/*.log` and every `sleep`/`pgrep`
+#: /`ls` poll in front of it each spend one of the budget. That is the shape the
+#: breaches take: `scripts.autonomy.regrade_runs --days 30 --show-runs` on
+#: 2026-11-26 printed 7 `graded_fail` rows whose named failing check is the cap,
+#: over 6 capped tasks (#100 x3, #90, #80, #96, #104), and #96's was traced to
+#: background-then-poll. No prompt surface said the cap worked that way:
+#: `git grep -n max_tool_calls -- app/ agent_mcp/ workers/` returns only two
+#: bench-authoring template strings (`workers/sources/bench_mine.py:610,614`), and
+#: only `autonomy/96-djev-name-prior-probe.md` carried the wording out of the 18
+#: task files that declare a cap.
+#:
+#: This is the bounded alternative to re-wording the fleet-wide background-bash
+#: paragraph at `app/prompt_builder.py:613-622`, which #4524's owed-check declined:
+#: 10 of those 18 cap at 4 calls or fewer, the paragraph reaches every agent's
+#: prompt on every turn, and backgrounding is legitimate 292 times fleet-wide. So
+#: the paragraph is untouched here and the sentence goes only to a worker whose own
+#: task declares the check — read through `parse_acceptance`, the same reader that
+#: produces the grade, so the sentence fires exactly when a cap will be graded and
+#: an uncapped task's prompt is byte-for-byte what it was.
+TOOL_CALL_CAP_NOTICE = (
+    "[SYSTEM: This task caps the tool calls you may dispatch, and the cap counts "
+    "every call you dispatch — including a Read of a `_pipeline/tasks/*.log` to see "
+    "how a backgrounded command went, and every `sleep`, `pgrep` or `ls` poll you "
+    "run while waiting for one — so backgrounding a command does not put the calls "
+    "behind it outside the cap: a command you fear is long-running must carry "
+    "`timeout` (max 600000 ms) rather than `run_in_background` to stay inside it.]"
+)
+
+
+def _declares_tool_call_cap(task: dict) -> bool:
+    """Whether this task's run will be graded on a `max_tool_calls` check.
+
+    `parse_acceptance` is the canonical reader (`app/run_acceptance.py:83`): it
+    resolves the `acceptance.objective_checks` block, the bare-list shape too, and
+    drops a check type the judge does not know — so a declaration the grader would
+    score `acceptance_invalid` does not get a sentence about a cap that will never
+    be graded. The `try` is for a tree whose bench-runner import failed, which
+    leaves `CHECK_TYPES` None and makes the parse raise: that run records
+    `grader_error` elsewhere, and still gets a prompt here.
+    """
+    try:
+        spec = parse_acceptance(task)
+    except Exception:
+        return False
+    if not spec:
+        return False
+    return any(c.get("type") == "max_tool_calls" for c in spec["checks"])
+
+
 def _build_task_prompt(task: dict, skill_content: str) -> str:
     silent_hint = (
         "[SYSTEM: If you have a meaningful status report or findings, "
@@ -3634,6 +3693,8 @@ def _build_task_prompt(task: dict, skill_content: str) -> str:
     description = str(task.get("description", "")).strip()
     if description:
         parts.extend(["", f"Task description: {description}"])
+    if _declares_tool_call_cap(task):
+        parts.extend(["", TOOL_CALL_CAP_NOTICE])
     return "\n".join(parts)
 
 
