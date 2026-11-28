@@ -2405,6 +2405,62 @@ async def test_a_vault_land_answer_shows_the_agent_the_heavy_rung_ran_nothing(
     assert "ran 0 tests" in g["heavy_rung_verdict"], g["heavy_rung_verdict"]
 
 
+async def test_a_second_vault_land_while_one_is_still_running_is_refused_across_the_seam(
+        monkeypatch, tmp_path):
+    """#4628 clause 5, on the hop the early answer makes newly possible.
+
+    Before #4628 a second call during a live land could only be the caller whose own
+    call had timed out; after it the first call answers in fractions of a second while
+    its land is still validating and committing, so "call it again" becomes a thing an
+    agent can actually do. The refusal is therefore proven through the aggregator
+    dispatch with a real session `_meta`, and the proof is the call count on `_land`:
+    the second call is answered from the first one's marker state and runs nothing.
+    """
+    import threading
+
+    import agent_mcp.automod as AM
+    from scripts.automod import vault_round as VR
+
+    monkeypatch.setattr(S, "VAULT_LAND_DIR", tmp_path / "vault_lands")
+    monkeypatch.setattr(S, "LEDGER_PATH", tmp_path / "ledger.jsonl")
+    monkeypatch.setattr(S, "GATE_TESTS_LOCK_PATH", tmp_path / "gate-tests.lock")
+    monkeypatch.setattr(AM, "VAULT_LAND_HANDBACK_SECONDS", 0.4)
+
+    started, release, calls = threading.Event(), threading.Event(), []
+
+    def slow_land(paths, message, **kw):
+        calls.append(list(paths))
+        started.set()
+        release.wait(30)
+        return {"ok": True, "commit": "deadbeef", "paths": list(paths)}
+
+    monkeypatch.setattr(VR, "_land", slow_land)
+    call = _dispatch_automod(monkeypatch, tmp_path, "s-4628")
+    args = {"paths": ["knowledge/4628.md"], "message": "m"}
+
+    refused, is_error = await call("automod_vault_land", args, "turn-1")
+    assert is_error, "the unobserved turn reached the lander"
+
+    out, is_error = await call("automod_vault_land", args, "turn-2")
+    assert not is_error and out["vault_land_in_flight"] is True, out
+    assert started.wait(10), "the detached land never started"
+
+    second, is_error = await call("automod_vault_land", args, "turn-3")
+    assert is_error, f"a second call ran the land again: {second}"
+    assert "already in flight" in second["error"], second
+    assert "session s-4628" in second["error"], second
+    assert "knowledge/4628.md" in second["error"], second
+
+    release.set()
+    deadline = time.time() + 30
+    while time.time() < deadline and S.read_vault_land_marker(session_id="s-4628"):
+        time.sleep(0.02)
+    assert S.read_vault_land_marker(session_id="s-4628") is None, \
+        "the land never finished, so the marker check below proves nothing"
+    assert calls == [["knowledge/4628.md"]], \
+        f"three tool calls ran the land {len(calls)} times: {calls}"
+
+
 def test_the_gate_is_actually_wired_into_automod_start():
     """A gate nothing calls is the failure this whole review keeps finding."""
     src = (ROOT / "agent_mcp" / "automod.py").read_text()

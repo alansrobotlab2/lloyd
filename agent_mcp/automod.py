@@ -228,6 +228,173 @@ def _err(message: str) -> str:
     return json.dumps({"error": message})
 
 
+#: #4628: how long `automod_vault_land` may hold its caller's turn before handing back.
+#:
+#: A land runs inside lloyd-mcp and its cost is not the caller's budget. The 165
+#: `vault_land` rows dated November 2026 in `promotions.jsonl` put `guards.seconds` at a
+#: 900.0 s median and a 2389.3 s maximum — and its variable half is `lock_wait_s` (up to
+#: 1259.3 s queued behind another round's gate tests), not `validate()`'s compute, so no
+#: cheap leg can be cut to fit. Against that: the tool-call ceiling is 660.0 s
+#: (`app/harness/mcp_pool.py:CALL_TIMEOUT_SECONDS`) and the tightest `timeout_seconds` of
+#: the tasks that still call the tool is 1200 s (#78, since #4563 took the land off #86).
+#: The call therefore cannot complete inside a run, and waiting for it was the death: 12
+#: of the 17 November autonomy cap-kills carried this call's transport error with
+#: `idle_seconds` between 133.1 and 659.8 — idle, never busy, which is why raising a cap
+#: is ruled out twice (#3447, `autonomy/86-nightly-iv-metrics-series.md`).
+#:
+#: The bound bounds the WAIT, never the land: past it the caller is handed back control
+#: and the land runs on to its own ledger row. 120 s is a fifth of the ceiling it exists
+#: to precede and under a tenth of the tightest cap that reaches it, so an ordinary land
+#: is always the thing handed back and never the caller.
+VAULT_LAND_HANDBACK_SECONDS = 120.0
+
+
+def _vault_land_ok(out: dict):
+    """Today's answer, unchanged: `land()`'s own dict plus the note about reverting."""
+    out["note"] = ("Committed on the vault's main and live already — nothing "
+                   "restarts. automod_vault_revert undoes it.")
+    return text_result(json.dumps(out, indent=2))
+
+
+def _handback_answer(S, *, paths, item_id, session_id, waited_s) -> dict:
+    """What the caller is handed when the bound expires: the marker, and no sha.
+
+    The payload deliberately carries `"commit": None` rather than omitting the key — an
+    answer that reads like a landed one is the failure mode here, because the caller's
+    next move is to report the item as landed. `next` is this answer's own instruction;
+    `in_flight` carries `state.vault_land_in_flight_text` verbatim, the sentence a
+    refused second call gets, so the two surfaces cannot disagree about what is running.
+    """
+    rec = _live_vault_land_marker(S, item_id=item_id, session_id=session_id) or {}
+    who = (f"item #{item_id}" if item_id is not None else f"session {session_id}")
+    return {
+        "vault_land_in_flight": True,
+        "landed": False,
+        "commit": None,
+        "waited_s": round(waited_s, 1),
+        "handback_bound_s": VAULT_LAND_HANDBACK_SECONDS,
+        "item_id": rec.get("item_id", item_id),
+        "session_id": rec.get("session_id", session_id),
+        "stage": rec.get("stage") or "committing",
+        "paths": rec.get("paths") or [str(p) for p in paths],
+        "elapsed_s": rec.get("elapsed_s"),
+        "marker": rec,
+        "no_commit_yet": (
+            f"no vault commit has happened yet: the land for {who} is still running in "
+            f"lloyd-mcp {rec.get('elapsed_s', '?')} s after it started, which is why this "
+            "answer carries no commit sha. Your turn is yours again; the land is not "
+            "cancelled and will write its own `vault_land` row to promotions.jsonl."),
+        "next": (
+            "Do not call automod_vault_land again for these paths: the in-flight land "
+            "commits them exactly once, and a second call now is refused. Read the "
+            "outcome from git, not from a retry — `git -C ~/obsidian log -1 -- <path>`. "
+            "And do not report the item as landed from this answer: the row is the record."),
+        "in_flight": (S.vault_land_in_flight_text(rec) if rec else
+                      f"the marker for {who} could not be read; the land thread is "
+                      "still running and owns these paths"),
+    }
+
+
+def _live_vault_land_marker(S, *, item_id, session_id, grace_s: float = 2.0) -> dict | None:
+    """The in-flight marker, allowing for the thread having only just started to write it.
+
+    `land()` writes the marker as its first act, so this normally reads it on the first
+    pass; the grace is for the case where the handback fires while the thread is still
+    between starting and writing, and it is bounded because the caller has waited long
+    enough already.
+    """
+    deadline = time.monotonic() + grace_s
+    while True:
+        rec = S.vault_land_in_progress(item_id=item_id, session_id=session_id)
+        if rec is not None or time.monotonic() >= deadline:
+            return rec
+        time.sleep(0.05)
+
+
+def _vault_land_bounded(VR, paths, message, *, item_id, session_id,
+                        ack: list[str] | None = None):
+    """Run the land where it can outlive the caller's wait, and answer at the bound.
+
+    `vault_round.land` is synchronous and, at the measured median, costs 900 s — past
+    both the 660 s tool-call ceiling and the cap of every autonomy task that calls it —
+    so holding the caller for it produced a transport error over a healthy land and then
+    a cap-kill that read as a budget problem (#4625, #4563, #4628). The land therefore
+    gets a thread of its own, inside this process: lloyd-mcp owns the commit either way,
+    which is also why #4563's owed half was never a stray thread to stop but a caller
+    that had to stop waiting for it.
+
+    Two things already in place make an early answer safe rather than a lie:
+
+    * `land()` writes `state.vault_land_in_progress` before any work and refuses a second
+      call for the same item (or session) while it is live (#4583), so the paths land
+      exactly once and the caller has something real to read;
+    * `_land` writes its own `vault_land` row on success and on refusal, so the ledger
+      remains the record even when the failure arrives after the caller is gone.
+
+    A caller with neither an item nor a session has no marker key at all
+    (`state.vault_land_marker_path` answers None), so nothing would refuse a second call
+    and detaching could commit the same paths twice. Such a call is served synchronously,
+    exactly as before this bound existed.
+
+    A land that fails after the handback raises in the worker thread, where no caller is
+    left to catch it: `_land` has already ledgered the refusal naming what it refused, so
+    the log line is the only thing that would otherwise go silent.
+    """
+    # `threading` is imported here, not in the header, for the reason `vault_round.py`
+    # gives at its own tail: live prose cites lines of this file by number — a 2026-11-28
+    # gate failed on `agent_mcp/automod.py:203`, the `NON_USER_PLATFORMS` line inside
+    # `_inner_voice_gate`, purely because one header line was added above it — and
+    # `tests/test_autonomy_jobs_doc_claims.py` fails the round that moves a cited line.
+    import threading
+
+    from scripts.automod import state as S
+
+    kwargs = {"item_id": item_id, "session_id": session_id}
+    if ack:
+        kwargs["ack"] = ack
+    if S.vault_land_marker_path(item_id=item_id, session_id=session_id) is None:
+        try:
+            return _vault_land_ok(VR.land(paths, message, **kwargs))
+        except VR.VaultRoundError as exc:
+            return text_result(_err(str(exc)))
+
+    box: dict = {}
+    handed_back = threading.Event()
+
+    def _run():
+        try:
+            box["out"] = VR.land(paths, message, **kwargs)
+        except BaseException as exc:  # noqa: BLE001 — re-raised to the caller when it is still here
+            box["exc"] = exc
+            if handed_back.is_set():
+                logger.error("the vault land detached from %s failed after its caller was "
+                             "handed back: %s: %s", item_id or session_id,
+                             type(exc).__name__, str(exc)[:600])
+
+    began = time.monotonic()
+    # Not a daemon thread, deliberately. A daemon thread is killed at interpreter exit,
+    # which would land a land halfway through `git commit` — a vault with the paths
+    # staged and no commit, or a commit with no `vault_land` row. The synchronous call
+    # this replaces ran in the loop's default `asyncio.to_thread` executor, whose threads
+    # are non-daemon and are waited for at shutdown; keeping that property is the point.
+    t = threading.Thread(target=_run, name=f"vault-land-{item_id or session_id}")
+    t.start()
+    t.join(VAULT_LAND_HANDBACK_SECONDS)
+    if not t.is_alive():
+        if "exc" in box:
+            raise box["exc"]
+        return _vault_land_ok(box["out"])
+
+    handed_back.set()
+    waited = time.monotonic() - began
+    logger.warning("automod_vault_land handed %s back after %.1f s with the land still "
+                   "running (bound %s s); the outcome is in its vault_land row",
+                   item_id or session_id, waited, VAULT_LAND_HANDBACK_SECONDS)
+    return text_result(json.dumps(
+        _handback_answer(S, paths=paths, item_id=item_id, session_id=session_id,
+                         waited_s=waited), indent=2))
+
+
 def _land_detached(round_id: str) -> dict:
     """Start the landing in its own session and return immediately.
 
@@ -797,9 +964,9 @@ async def list_tools() -> list[Tool]:
                          "main, and records the sha in the automod ledger. If validation fails "
                          "the paths are REVERTED and nothing lands. "
                          ".obsidian/**, .git/** and .trash/** are denied. "
-                         "Requires Inner Voice on the turn. It can outlast the call timeout "
-                         "(review, then a probe queued behind a running gate): a timed-out land "
-                         "is still running, and calling again reports it, never lands twice."),
+                         "Requires Inner Voice on the turn. It can outlive your wait: past "
+                         "120 s it answers that the land is still in flight and hands your "
+                         "turn back; a retry is refused, so a land never lands twice."),
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -950,16 +1117,24 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             # about two items and matching one of them loosely settles the other
             # (#2888 on the `landed` field, #2039 on the close).
             from agent_mcp import _task_registry
+            # The land is not waited out (#4628): past `VAULT_LAND_HANDBACK_SECONDS` the
+            # caller is handed back control with #4583's in-flight marker, while this
+            # process keeps running the land to its own ledger row. A land that finishes
+            # inside the bound answers with `land()`'s dict exactly as it always did —
+            # which is what keeps the attribution and seam guards that read `commit`,
+            # `paths` and `guards` running unmodified. Pinned across this hop by
+            # `tests/test_vault_land_in_flight.py` (the handback, its payload, the row the
+            # detached land writes, and a post-handback validation refusal that commits
+            # nothing) and by
+            # `tests/test_automod_hardening.py::test_a_second_vault_land_while_one_is_still_running_is_refused_across_the_seam`.
             try:
-                out = VR.land(paths, str(arguments.get("message") or ""),
-                              item_id=arguments.get("item_id"),
-                              session_id=str(_task_registry.current_session_id.get("") or ""),
-                              **({"ack": ack} if ack else {}))
+                return _vault_land_bounded(
+                    VR, paths, str(arguments.get("message") or ""),
+                    item_id=arguments.get("item_id"),
+                    session_id=str(_task_registry.current_session_id.get("") or ""),
+                    **({"ack": ack} if ack else {}))
             except VR.VaultRoundError as exc:
                 return text_result(_err(str(exc)))
-            out["note"] = ("Committed on the vault's main and live already — nothing "
-                           "restarts. automod_vault_revert undoes it.")
-            return text_result(json.dumps(out, indent=2))
 
         if name == "automod_vault_revert":
             from scripts.automod import vault_round as VR
