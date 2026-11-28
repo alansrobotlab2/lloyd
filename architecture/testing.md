@@ -291,22 +291,23 @@ it surfaced only when someone ran the whole suite. Run unmarked periodically.
 
 `rung_tests` probes the base commit before blaming a round: `_failures_at_base`
 re-runs the failing node ids in a throwaway worktree with this round's diff
-absent, and a failure the base reproduces **and** whose file the diff does not
-touch is subtracted from the round (`_failure_outside_round`); the set is cached
-in the round's `base-red-set.json` because the probe costs a whole suite.
-Everything else — including anything in a file the round touched — stays owned by
-the round and blocks. The reasoning behind that second half is in [[automod]] (a
-test the diff itself touched cannot be excused by a probe), so the rule is stated
-once there and not re-derived here.
+absent, and a failure the base reproduces is subtracted from the round; the set
+is cached in the round's `base-red-set.json` because the probe costs a whole
+suite. A node in a file the round's own diff touched is asked that same question
+— since #4649, in a second probe aimed at the node ids rather than the files, in
+its own run. What cannot be excused stays owned by the round and blocks: a node
+green at base, a node the round added (pytest cannot select it there), and
+anything whose probe reached no verdict. The reasoning is in [[automod]] and not
+re-derived here.
 
 The subtraction is gated on the probe having reached a conclusion. Failures
-outside the round's own files that the base probe does **not** reproduce leave the
-rung unable to attribute them: an inconclusive probe fails the round, and it fails
-closed — *"every failure outside the
-round's own files was unexplained, and the base probe could not say whose they
-are"* (`scripts/automod/gate.py:4372`, the fail-closed branch of `rung_tests`) — filing nothing. Only a conclusive pass with an inherited
-red files the debt: `_file_red_tree` runs on `pre_existing and conclusive`
-(`scripts/automod/gate.py:4343`), and the verdict names the nodes under `pre_existing_failures`
+that the base probe does **not** reproduce leave the rung unable to attribute
+them: an inconclusive probe fails the round, and it fails closed — *"no failure
+could be explained, and the base probe could not say whose they are"*
+(`scripts/automod/gate.py:4477`, the fail-closed branch of `rung_tests`) — filing
+nothing. Only a conclusive pass with an inherited red files the debt:
+`_file_red_tree` runs on `pre_existing and conclusive`
+(`scripts/automod/gate.py:4448`), and the verdict names the nodes under `pre_existing_failures`
 with the tracker's id in `red_tree_item`. There is no `external_blocker` /
 `external_failures` pair in the gate — that was the pre-#2876 shape, and a round
 whose report contains neither key did not hit an inherited red.

@@ -417,3 +417,32 @@ def test_a_partial_landing_neither_closes_the_item_nor_hides_its_leftover_red(
     again = B.file_red_tree_item(commit2, c_nodes, "SM_B")
     assert again.get("action") != "suppressed", again
     assert again.get("action") in ("created", "merged"), again
+
+
+def test_the_two_rails_still_hold_when_an_inherited_red_lands_in_a_touched_file(isolated, repo):
+    """#4649 moved ATTRIBUTION and deliberately left these two rails where they
+    are: a round may not FILE a red that lives in a file its own diff touches, and
+    may not be credited with HEALING one either. What changed is that such a red
+    can now pass the `tests` rung when it reproduces at base — which makes this
+    pair the only thing standing between a round and writing its own file's red
+    out of the tracker's sight, so it is pinned here rather than trusted.
+    """
+    r, c = repo
+    # Rail 1, filing. Two nodes are red; RED's file is in this round's diff. Only
+    # the other one reaches the board.
+    res = B.file_red_tree_item(c["c1"], [RED, OTHER], "SM_TCH",
+                              ["tests/test_uptake.py"], live_root=r)
+    assert res["action"] == "created", res
+    assert _fm(B.item_by_id(res["item_id"]))["red_tree_nodes"] == [OTHER], \
+        _fm(B.item_by_id(res["item_id"]))["red_tree_nodes"]
+
+    # Rail 2, healing. An open item covers RED; a full green run at a descendant
+    # base proves the tree healed — but not for this round, which touched the file.
+    iid = B.file_red_tree_item(c["c1"], [RED], "SM_A", [], live_root=r)["item_id"]
+    assert B.close_healed_red_tree(c["c2"], "SM_TCH", r,
+                                   touched=["tests/test_uptake.py"]) == []
+    assert B.item_by_id(iid).status != "done", B.item_by_id(iid).status
+    # The same run by a round whose diff touched an unrelated file IS a heal, and
+    # closes: the rail refuses the touched case, not the mechanism.
+    assert B.close_healed_red_tree(c["c2"], "SM_OTHER", r, touched=["web/src/App.tsx"]) == [iid]
+    assert B.item_by_id(iid).status == "done", B.item_by_id(iid).status

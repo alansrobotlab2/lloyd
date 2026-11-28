@@ -108,12 +108,19 @@ def test_a_failure_that_survives_the_serial_re_run_is_judged_as_it_always_was(tm
     script.append((1, f"FAILED {real} - assert False\n1 failed, 60 passed in 3s\n"))
     probed: list = []
 
-    # `**_kw` because the rung now also passes `excerpt_path`, the round-dir file
-    # the probe's own bodies go to; this stub answers the attribution and nothing
-    # else, so it takes the new keyword and ignores it.
-    # `excerpt_path` named, not `**_kw`: the rung passes it now, and a stub
-    # that swallows unknown keywords swallows a mistyped one.
-    def at_base(python, live, base, node_ids, scratch, env, *, excerpt_path=None):
+    # Every keyword the rung passes is NAMED, never swallowed by `**_kw` — a stub
+    # that accepts unknown keywords accepts a mistyped one. `excerpt_path` is the
+    # round-dir file the probe's own bodies go to; `by_node` is #4649's, set only
+    # for a node in a file the round's diff touched, and this fake worktree is not
+    # a git repo, so `_touched_paths` answers empty and that question must not be
+    # asked. The assert makes a rung that asks it anyway a red here, naming the
+    # node, instead of a `probed` list quietly built from the wrong batch.
+    # `missing_file` travels with `by_node` (#4649): the by-file reading is
+    # `unresolved`, the by-node one for a touched file is `omit`.
+    def at_base(python, live, base, node_ids, scratch, env, *,
+                excerpt_path=None, by_node=False, missing_file=None):
+        assert (by_node, missing_file) == (False, "unresolved"), \
+            "this node lives in a file the round never touched"
         probed.append(list(node_ids))
         return set(), "probed 1 file(s) at base: none failing"
     monkeypatch.setattr(G, "_failures_at_base", at_base)

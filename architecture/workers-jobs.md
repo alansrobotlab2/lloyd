@@ -413,7 +413,7 @@ one `architecture/*.md` doc per run, and nothing else.
 What the five share is that **no member acts on its own conclusion**.
 `backlog-cluster` writes a file that triage is free to ignore; `autotriage`
 reaches a verdict and implements nothing; `autocode` lands only through the gate's
-sixteen rungs (the `ladder` literal in `Gate.run` at `scripts/automod/gate.py:2722`)
+sixteen rungs (the `ladder` literal in `Gate.run` at `scripts/automod/gate.py:2768`)
 and a second reader; `automod-regression` measures and never reverts; and
 `arch-review` may correct the doc it read and must *file* every other finding,
 including the one-line skill fix it could obviously make itself.

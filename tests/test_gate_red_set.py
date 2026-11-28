@@ -51,11 +51,18 @@ def _gate(tmp_path, monkeypatch, base, *, failing, probe=None):
                         lambda *a, **k: ([], "failed every repeat"))
     probed: list[list[str]] = []
 
-    # `**_kw` for the same reason as tests/test_gate_parallel_tests.py: the rung
-    # passes `excerpt_path` now, and this stub's whole job is the attribution.
-    # `excerpt_path` named, not `**_kw`: the rung passes it now, and a stub
-    # that swallows unknown keywords swallows a mistyped one.
-    def at_base(python, live, b, node_ids, scratch, env=None, *, excerpt_path=None):
+    # Every keyword the rung passes is NAMED, not swallowed by `**_kw`: a stub
+    # that accepts unknown keywords accepts a mistyped one. `excerpt_path` came
+    # first; `by_node` is #4649's, and this fixture pins `_touched_paths` to the
+    # empty set, so the by-node question must never be asked here — the assert
+    # below is what makes a future rung that asks it by default a red test in the
+    # file that documents the cache, rather than a silently-cached wrong answer.
+    # `missing_file` travels with `by_node` (#4649): `unresolved` is the by-file
+    # reading, `omit` the by-node one, and this fixture only ever sees the first.
+    def at_base(python, live, b, node_ids, scratch, env=None, *,
+                excerpt_path=None, by_node=False, missing_file=None):
+        assert (by_node, missing_file) == (False, "unresolved"), \
+            "the red-set cache is asked by NODE here, not by file"
         probed.append(list(node_ids))
         if probe is not None:
             return probe(node_ids)

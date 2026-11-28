@@ -3619,10 +3619,11 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
     # seed rather than on the doc — which is exactly what "the node asserts on itself"
     # was already warning about two lines down.
     seeded = text.replace("eval/run_eval.py:3097", "eval/run_eval.py:2134")
-    # #4347 grows `_reuse_inner`/`_reuse_rule` above `rung_prompt_surface`, so the
-    # live number is 3608 and this pre-shift seed must age with it: seeding a value
-    # the doc no longer carries replaces nothing and the node asserts on itself.
-    seeded = seeded.replace("scripts/automod/gate.py:3615", "scripts/automod/gate.py:1590")
+    # Every insertion above `rung_prompt_surface` ages this number: #4347 put it at
+    # 3608, and #4649's base-probe rewrite of `_base_failures` moved the labelled line
+    # to 3661. Seeding a value the doc no longer prints replaces nothing, and the node
+    # then reddens on its own seed instead of on the doc.
+    seeded = seeded.replace("scripts/automod/gate.py:3661", "scripts/automod/gate.py:1590")
     assert seeded != text, "the seed found nothing to replace — the doc was re-typed"
     flagged = [r["span"] for r in fallback_decision(seeded) if r["mode"] != "named"]
     assert sorted(flagged) == ["eval/run_eval.py:2134", "scripts/automod/gate.py:1590"], (
@@ -3651,8 +3652,14 @@ def test_the_named_symbol_rail_holds_measurement_md_to_a_named_symbol():
 #: event allowlist sit ABOVE `Gate.run` and moved `rung_recovery` 3073→3130 and
 #: `rung_pyright` 3182→3239 — so 3187 fell out of `rung_pyright` and now sits inside
 #: `rung_recovery`, the same drift one rung earlier, and all +57 of it is this round's
-#: own insertion above the rung, not main's.
-_PRE_3770_PROMPT_SURFACE_ANCHOR = 3244
+#: own insertion above the rung, not main's; 3340 since #4649, whose base-probe rewrite
+#: of `_base_failures` and its sidecar helper sit above `Gate.run` and moved
+#: `rung_static` 3196->3242 and `rung_pyright` 3239->3285, so 3244 — five lines into
+#: `rung_pyright` when #4483 measured it — became `rung_static`+2 and the control
+#: reddened reading `['Gate', 'rung_static']`. 3340 is 55 lines into `rung_pyright` and
+#: 38 clear of the next definition, which is what keeps it outside the +/-slack window
+#: around a def line.
+_PRE_3770_PROMPT_SURFACE_ANCHOR = 3340
 
 
 def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
@@ -3664,16 +3671,17 @@ def test_a_round_that_shifts_prompt_surface_shifts_the_anchors_too():
     lines to land on. This node reads the bytes at the cited line and requires them
     to be the `label = f"item{…}" … f"gate-{…}"` assignment the doc is talking about,
     which is the only property that makes the doc's `gate.py` number the right number
-    rather than a defensible one (3435 when #3770 filed this, 3541 before #4347, 3558, and 3608
-    now).
+    rather than a defensible one (3435 when #3770 filed this, 3541 before #4347, 3558,
+    3608, and 3661 since #4649).
 
     Then the failure this round would have shipped. #3770 inserts the chrome-bundle
     provenance node into `gate.py` above this rung, the assignment slides down by the
     inserted length, and the stale number is then graded against a DIFFERENT
-    definition — the rung that happens to swallow it. Seeding the pre-#3770 value 3043
-    back into the same sentence must yield a non-`named` row whose enclosing
-    definitions are `Gate` and `rung_pyright`, and the shipped text must not be that
-    text. That is the leg which reddens for the next round that inserts lines above
+    definition — the rung that happens to swallow it. Seeding `_PRE_3770_PROMPT_SURFACE_
+    ANCHOR` — a line inside `rung_pyright` whose value every round that shifts the file
+    re-measures, and whose lineage is that constant's comment — back into the same
+    sentence must yield a non-`named` row whose enclosing definitions are `Gate` and
+    `rung_pyright`, and the shipped text must not be that text. That is the leg which reddens for the next round that inserts lines above
     `rung_prompt_surface` and forgets to re-point, and it names the number to point at.
     """
     text = _text("measurement.md")
@@ -4238,8 +4246,9 @@ def test_the_ceiling_s_own_comment_gives_advice_and_names_what_forces_a_shrink()
 
 #: The anchor #4061 re-typed out of the unreadable `gate.py:2584` spelling, and the
 #: definition the rewritten sentence names beside it. 2584 until #4074 put the
-#: `pre_replay` field and its loader into `gate.py` above `run` and moved it down 34.
-GATE_LADDER_SPAN = "scripts/automod/gate.py:2685"
+#: `pre_replay` field and its loader into `gate.py` above `run` and moved it down 34;
+#: 2685 until #4649's touched-file attribution sat its own insertions above `run`.
+GATE_LADDER_SPAN = "scripts/automod/gate.py:2731"
 GATE_LADDER_SYMBOL = "run"
 
 
@@ -4301,7 +4310,7 @@ THREAT_AUTOMOD_ANCHORS = (
     # it points into is in the same diff.
     ("scripts/automod/spec.py:766", "check_scope"),     # what classifies the diff
     (GATE_LADDER_SPAN, "run"),                          # the ladder itself (B11)
-    ("scripts/automod/gate.py:4424", "rung_review"),    # the second reader
+    ("scripts/automod/gate.py:4529", "rung_review"),    # the second reader
 )
 
 #: The numbers those rows carried, which sit in definitions unrelated to them.

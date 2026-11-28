@@ -2971,10 +2971,19 @@ So on a failure the rung re-runs the failing **files** at the round's base, in
 a throwaway worktree and — since 2026-09-24 — a throwaway data root
 (`<round>/baseline-data`, `LLOYD_DATA` for the probe only), and classifies:
 
-- in a file the round's own diff touches → **the round's**, even if it also
-  fails at base (the touched-file rule: a round that edits a red test file
-  and leaves it red owns it; such nodes are not even probed)
-- reproduces at base → **pre-existing**
+- reproduces at base → **pre-existing**. Since #4649 this is the answer for a
+  node in a file the round's own diff touched too, asked in a **second** probe
+  aimed at the node ids rather than the files: the round rewrote that file, so
+  "is anything in here red at base" is not the question about it. The rule this
+  replaces charged such a node to the round without asking, and what it cost was
+  round `SM_20261127_200018`, failed on a node whose assertion is the live
+  vault's backlog file count — red on its own base, in a file it had reason to
+  edit, and unlandable for as long as the board sat outside its calibration band.
+  The two probes cannot be one run: a node id pytest cannot find at base makes it
+  exit 4 with `ERROR: not found:` and run NOTHING else in the batch (measured
+  2026-11-27: `no tests ran in 0.48s` beside a real node), so a node the round
+  ADDED is left out of the by-node batch and stays the round's by construction,
+  counted in the note as `(+N whose file is absent at base)`.
 - does not reproduce, but passes a repeat run with the diff present (§4.2f,
   #1196) → **flaky**
 - anything else → **new**, the round's own, and the detail names it
@@ -5100,7 +5109,7 @@ cannot measure.
   for these docs on 2026-10-25 (`855c4865`, #3292), so those numbers are not
   claims about the tree. The `spec.py` fence
   tuples, the `round` subcommand set, the rung ladder in
-  `Gate.run` (`scripts/automod/gate.py:2685`), and the live
+  `Gate.run` (`scripts/automod/gate.py:2731`), and the live
   `/api/workers/health` and `/api/autonomy/health` at `days=7` —
   `window_clamped_to_hours` and `oldest_input` are both null on each, so those
   are genuine 7-day spans. The `Gate.run` ladder's number was re-typed the same

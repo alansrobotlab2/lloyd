@@ -1323,28 +1323,189 @@ def test_a_pass_over_pre_existing_failures_still_meets_the_floors(tmp_path, monk
     assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
 
 
-def test_a_red_test_file_the_round_touches_is_the_rounds(tmp_path, monkeypatch):
-    """The touched-file rule: a round that edits a red test file and leaves it
-    red owns it, even though the same node also fails at base. The base probe
-    is not even asked about it."""
-    _small_floors(monkeypatch)
-    src = ("def test_already_broken():\n    assert False\n\n"
-           "def test_fine():\n    assert True  # touched by the round\n")
-    g, repo, wt, _base = _round_over_red_tree(tmp_path, monkeypatch, "SM_TCH",
-                                              edit=("tests/test_pre.py", src))
-    probed: list = []
+#: The file at base for the four #4649 tests below: one node red at base and at
+#: head, one node green at base and at head. What each round does to it is what
+#: separates an inherited red from one the round caused.
+_TCH_BASE = ("def test_already_broken():\n    assert False\n\n"
+             "def test_fine():\n    assert True\n")
+
+
+def _spy_base_probes(monkeypatch) -> list:
+    """Record every `_failures_at_base` batch the rung sends, as
+    `(node ids, by_node)`, and let the real probe run."""
+    seen: list = []
     real = G._failures_at_base
-    monkeypatch.setattr(G, "_failures_at_base",
-                        lambda *a, **k: probed.append(list(a[3])) or real(*a, **k))
+
+    def spy(python, live_root, base, node_ids, scratch, env=None, **kw):
+        seen.append((list(node_ids), bool(kw.get("by_node"))))
+        return real(python, live_root, base, node_ids, scratch, env, **kw)
+
+    monkeypatch.setattr(G, "_failures_at_base", spy)
+    return seen
+
+
+def test_a_touched_file_node_that_reproduces_at_base_is_the_bases(tmp_path, monkeypatch):
+    """#4649 clause 1: a red in a file the round's diff touches is attributed by
+    whether the same node also fails at base — the same question an untouched
+    file's red is asked. The rule this replaces never asked it, so round
+    SM_20261127_200018 failed its `tests` rung on a node whose assertion is the
+    LIVE vault's backlog file count, red on its own base, in a file it had
+    reason to edit.
+
+    The round's whole diff is a comment on the green node of `tests/test_pre.py`
+    — the smallest possible reason to have to edit a file that holds a red, which
+    is exactly the situation the old rule could not get out of.
+    """
+    _small_floors(monkeypatch)
+    src = _TCH_BASE.replace("assert True", "assert True  # touched by the round")
+    g, repo, wt, base = _round_over_red_tree(tmp_path, monkeypatch, "SM_TCH",
+                                             edit=("tests/test_pre.py", src))
+    (G.S.ROUNDS_DIR / g.round_id).mkdir(parents=True)
+    seen = _spy_base_probes(monkeypatch)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is True, f"{detail}\n{data.get('base_probe')}"
+    assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert data["touched_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert "new_failures" not in data
+    # Two batches, not one: the touched file by node id (the round rewrote the
+    # file, so "is anything in here red" is not the question), and — had there
+    # been a failing node in an untouched file — the untouched ones by file.
+    assert seen == [(["tests/test_pre.py::test_already_broken"], True)], seen
+    assert "red set cached" not in data["base_probe"], data["base_probe"]
+    assert data["red_set_cached"] is False, data["base_probe"]
+    # The by-node run's bodies go beside gate.json too, in their own file so the
+    # by-file run's cannot be rewritten by this one — and not in the worktree.
+    p = G.S.ROUNDS_DIR / g.round_id / G.BASE_PROBE_NODE_EXCERPTS_FILE
+    assert p == G.base_probe_node_excerpts_path(g.round_id)
+    assert "assert False" in json.loads(p.read_text(encoding="utf-8"))[
+        "excerpts"]["tests/test_pre.py::test_already_broken"], p
+
+
+def test_a_touched_file_node_that_is_green_at_base_is_still_the_rounds(tmp_path, monkeypatch):
+    """#4649 clause 2: excusing a touched-file red by its NODE, at base, must not
+    degrade into excusing the whole file because some node in it is red at base.
+    Here the round flips the node that was green, and the file was already red at
+    base through a different node — so a by-file probe would have answered
+    "already failing" for both and let the round through with a test it broke."""
+    _small_floors(monkeypatch)
+    src = _TCH_BASE.replace("def test_fine():\n    assert True",
+                            "def test_fine():\n    assert False  # broken by the round")
+    g, repo, wt, base = _round_over_red_tree(tmp_path, monkeypatch, "SM_TCH2",
+                                             edit=("tests/test_pre.py", src))
+    seen = _spy_base_probes(monkeypatch)
     try:
         ok, detail, data = g.rung_tests()
     finally:
         git(repo, "worktree", "remove", "--force", str(wt))
     assert ok is False, detail
-    assert data["new_failures"] == ["tests/test_pre.py::test_already_broken"]
-    assert data["touched_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert data["new_failures"] == ["tests/test_pre.py::test_fine"], data
+    assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"]
+    assert seen == [(["tests/test_pre.py::test_already_broken",
+                      "tests/test_pre.py::test_fine"], True)], seen
+    assert "INCONCLUSIVE" not in data["base_probe"], data["base_probe"]
+
+
+def test_a_node_the_round_added_to_a_touched_file_cannot_be_excused_at_base(tmp_path, monkeypatch):
+    """#4649 clause 2, the pytest half of the hazard: a node id that does not
+    exist at base is not skipped there — pytest exits 4 with `ERROR: not found:`
+    and runs NOTHING else in the batch (measured in a base checkout on 2026-11-27:
+    one invented node beside a real one printed `no tests ran in 0.48s`). So the
+    by-node probe of a touched file cannot answer for any node in its batch once
+    the round added one, and an inconclusive probe grants nothing: both nodes are
+    the round's.
+    """
+    _small_floors(monkeypatch)
+    src = _TCH_BASE + "\ndef test_round_added():\n    assert False\n"
+    g, repo, wt, base = _round_over_red_tree(tmp_path, monkeypatch, "SM_TCH3",
+                                             edit=("tests/test_pre.py", src))
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False, detail
+    assert data["touched_failures"] == ["tests/test_pre.py::test_already_broken",
+                                        "tests/test_pre.py::test_round_added"], data
+    assert data["new_failures"] == data["touched_failures"], data
     assert "pre_existing_failures" not in data
-    assert probed == [], "a node in the round's own file is never probed"
+    assert "INCONCLUSIVE" in data["base_probe"], data["base_probe"]
+    # The abort is visible in the report, not smoothed over: rc=4 and pytest's
+    # own words, so a reader can tell "the base cannot even select this node"
+    # from "the base ran it and it passed".
+    assert "ERROR: not found" in data["base_probe"], data["base_probe"]
+    assert "INCONCLUSIVE" in detail, detail
+
+
+def test_a_failing_node_in_a_file_the_round_added_is_charged_not_skipped(tmp_path, monkeypatch):
+    """#4649 clause 2, the other half of the same hazard: a node in a file the
+    round ADDED cannot predate the round, so it is left out of the by-node batch
+    (handing pytest its id would abort the batch, above) and stays charged. It is
+    counted in the note rather than dropped quietly, and an untouched file's
+    inherited red is still subtracted in the same run."""
+    _small_floors(monkeypatch)
+    g, repo, wt, base = _round_over_red_tree(
+        tmp_path, monkeypatch, "SM_TCH4",
+        edit=("tests/test_added.py", "def test_new_red():\n    assert False\n"))
+    seen = _spy_base_probes(monkeypatch)
+    try:
+        ok, detail, data = g.rung_tests()
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+    assert ok is False, detail
+    assert data["new_failures"] == ["tests/test_added.py::test_new_red"], data
+    assert data["pre_existing_failures"] == ["tests/test_pre.py::test_already_broken"], data
+    assert "INCONCLUSIVE" not in data["base_probe"], data["base_probe"]
+    assert "(+1 whose file is absent at base)" in data["base_probe"], data["base_probe"]
+    # Two batches from one rung: the untouched file's node by FILE, the added
+    # file's node by NODE id — and the second answer does not touch the first.
+    assert seen == [(["tests/test_pre.py::test_already_broken"], False),
+                    (["tests/test_added.py::test_new_red"], True)], seen
+
+
+def test_the_touched_file_probe_handing_back_no_verdict_grants_nothing(tmp_path, monkeypatch):
+    """#4649 clause 3: a by-node probe that reaches no verdict — a timeout, a
+    pytest with no summary — excuses nothing, files nothing and does not touch the
+    shared red set. The same fixture as clause 1, where the probe WOULD have
+    reproduced: this patches the probe itself, the three ways it can fail."""
+    _small_floors(monkeypatch)
+    src = _TCH_BASE.replace("assert True", "assert True  # touched by the round")
+    g, repo, wt, base = _round_over_red_tree(tmp_path, monkeypatch, "SM_TCH5",
+                                             edit=("tests/test_pre.py", src))
+    red_set = G.S.RED_SET_PATH
+    try:
+        for note in ("probe produced no pytest summary line at all",
+                     "probe timed out after 3600s; no pytest summary was written"):
+            monkeypatch.setattr(G, "_failures_at_base",
+                                lambda *a, **k: (set(), note))
+            ok, detail, data = g.rung_tests()
+            assert ok is False, f"{note}: {detail}"
+            # Grants NOTHING: with no probe answer the node is charged as it
+            # would have been before the probe existed, and nothing is filed.
+            assert data["new_failures"] == ["tests/test_pre.py::test_already_broken"], data
+            assert "pre_existing_failures" not in data, f"{note}: {data}"
+            assert "red_tree_item" not in data, f"{note}: {data}"
+            assert not red_set.exists(), f"{note}: an inconclusive probe wrote the red set"
+    finally:
+        git(repo, "worktree", "remove", "--force", str(wt))
+
+
+def test_a_base_probe_that_cannot_make_its_worktree_says_so(tmp_path):
+    """#4649 clause 3 at the probe itself: a base commit that will not check out
+    (or whose worktree will not be created) is the one branch that never reaches
+    pytest, and it is the one place the rung reads a bare verb — so the note must
+    name the failure as a non-answer, for every caller of `_probe_conclusive`
+    including the pickup probe. Nothing may be claimed as already failing."""
+    repo, base = _repo_with_failing_test(tmp_path)
+    failed, note = G._failures_at_base(
+        Path(sys.executable), repo, "0" * 40,
+        ["tests/test_pre.py::test_already_broken"], tmp_path / "scratch")
+    assert failed == set(), note
+    # The predicate the rung actually consults, not a word it happens to print:
+    # `_probe_conclusive` has recognised this phrase as a non-answer since #2876.
+    assert G._probe_conclusive(note) is False, note
+    assert "baseline worktree failed" in note, note
 
 
 def test_an_inconclusive_base_probe_grants_nothing(tmp_path, monkeypatch):
@@ -4072,10 +4233,10 @@ def test_the_probes_bodies_lay_where_gate_json_lays_not_in_the_worktree(tmp_path
     the right file name. Two directories share the word `round_dir`, so this names
     which one the store resolves to, then deletes the other to prove it.
 
-    The edit is in an unrelated file on purpose: the probe exists to answer
-    "does this red predate the diff?" about files the round did NOT touch, and
-    skips failures inside its own (`no failures outside the round's own files to
-    probe`), so an edit to the red file itself would never run the probe at all.
+    The edit stays in an unrelated file so this node keeps going down the by-FILE
+    probe: since #4649 a red in a touched file goes to a second probe and a second
+    sidecar, whose placement is pinned by
+    `test_a_touched_file_node_that_reproduces_at_base_is_the_bases`.
     """
     _small_floors(monkeypatch)
     # Named so `worktree.round_dir(g.round_id)` IS the tree this round stands on:

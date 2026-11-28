@@ -149,10 +149,10 @@ TIERS_HEADER = jm.TIERS_HEADER
 #: #70 LEFT this set on 2026-11-27. `42b056b0` (arch-review, #3453) recorded that the skill-lint
 #: inventory has a consumer now and rewrote the sentence to "One of the six has no consumer"
 #: — but did not move this set, which left both nodes below RED AT THAT COMMIT with no round's
-#: diff present. They are repaired here rather than left because the `tests` rung charges a red
-#: to any round that edits the file it lives in (`new_failures` names it, and the base probe
-#: reports "no failures outside the round's own files"), and because the counts they grade are
-#: in the same Measure section this round edits for #4623. A job joins this set only when the
+#: diff present. They are repaired here rather than left because the `tests` rung then charged a
+#: red to any round that edited the file it lives in (`new_failures` named it with no base probe
+#: asked — #4649 has since moved that attribution onto the node's own probe at base), and because
+#: the counts they grade are in the same Measure section this round edits for #4623. A job joins this set only when the
 #: DOCUMENT says it has no consumer — never from a run.
 NO_CONSUMER = {"#36"}
 

@@ -1194,6 +1194,21 @@ def base_probe_excerpts_path(round_id: str) -> Path | None:
     d = S.ROUNDS_DIR / round_id
     return d / BASE_PROBE_EXCERPTS_FILE if d.is_dir() else None
 
+
+#: Sidecar for the by-NODE probe of a file this round touched (#4649). A sidecar
+#: and not the same file because `write_failure_excerpts` writes whole: one
+#: `excerpts` dict rewritten by the second run would silently delete the first
+#: run's bodies, which is the exact loss #2876 exists to prevent. Two runs, two
+#: files, each named by the rung's own note.
+BASE_PROBE_NODE_EXCERPTS_FILE = "base-probe-node-failures.json"
+
+
+def base_probe_node_excerpts_path(round_id: str) -> Path | None:
+    """The sidecar's path, under the same `is_dir()` rule as
+    `base_probe_excerpts_path` — see it for why that test is not decoration."""
+    d = S.ROUNDS_DIR / round_id
+    return d / BASE_PROBE_NODE_EXCERPTS_FILE if d.is_dir() else None
+
 #: What an over-budget body says about itself. A cut that leaves no trace is a
 #: body that reads as complete, and the whole point of the store is a body a
 #: reader can trust.
@@ -1543,6 +1558,7 @@ def _reconfirm_candidate_failures(python: Path, root: Path,
 def _failures_at_base(python: Path, live_root: Path, base: str,
                       node_ids: list[str], scratch: Path,
                       env: dict | None = None, *, by_node: bool = False,
+                      missing_file: str = "unresolved",
                       timeout: float | None = None,
                       excerpt_path: Path | None = None) -> tuple[set[str], str]:
     """Which of `node_ids` already fail at `base`, in a throwaway worktree.
@@ -1575,6 +1591,18 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
     since the item was filed is exactly the case that must NOT read as healed,
     so `by_node` additionally answers "nothing passed and nothing failed" as
     inconclusive rather than as a clean run, which is what catches that case.
+
+    `missing_file` says what a node whose FILE is absent at base counts as, and
+    only applies with `by_node`, because by-file already skips such a node.
+    The default `unresolved` is the pickup reading just described: the node joins
+    the reported failures, since a node that has gone since its item was filed
+    has not been healed. `omit` is the `tests` rung's reading of a node in a file
+    this round's diff touched (#4649): a file the round ADDED cannot carry a
+    failure that predates the round, so the node is left out of the pytest
+    invocation AND out of the returned set — it stays the round's by
+    construction — and the note counts them, so a reader of `gate.json` can see
+    that the question was never asked of those nodes rather than that it was
+    asked and answered "green".
     """
     if not node_ids:
         return set(), "no node ids to probe"
@@ -1597,6 +1625,7 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         # not a path and every node id names the file it lives in.
         files = []
         vanished = []
+        omitted: list[str] = []
         for nid in node_ids:
             f = nid.split("::", 1)[0]
             t = nid if by_node else f
@@ -1606,11 +1635,22 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
                     # never told about it, its own green run would answer for a
                     # node that no longer exists, and the item would be closed as
                     # healed with its test deleted. It is a node that did not pass.
-                    vanished.append(nid)
+                    # Under `omit` (#4649) the same node is instead left out of
+                    # both the run and the answer: its file came into existence
+                    # with this round, so no failure in it can predate the round.
+                    (omitted if missing_file == "omit" else vanished).append(nid)
                 continue
             if t not in files:
                 files.append(t)
         if not files:
+            if omitted:
+                # Nothing to hand pytest, and that IS the answer: every node
+                # asked lives in a file the round added. It starts with "probed "
+                # for the same reason the run below does — `_probe_conclusive`
+                # reads the note, and a non-answer must not be mistaken for this
+                # one. An empty `failed` here charges each node to the round.
+                return set(), (f"probed 0 node(s) at base {base[:8]}: 0 already failing "
+                               f"(+{len(omitted)} whose file is absent at base)")
             return set(), ("none of the failing files exist at base" if not by_node
                            else f"none of the probed nodes exist at base {base[:8]}")
         probe_env = dict(env or {})
@@ -1665,11 +1705,17 @@ def _failures_at_base(python: Path, live_root: Path, base: str,
         # nothing, and an empty body store beside "pytest never ran" is a phantom.
         if excerpt_path is not None:
             write_failure_excerpts(excerpt_path, text, _failed_node_ids(text),
-                                   source=f"base probe at {base[:8]}")
+                                   source=f"base probe at {base[:8]}"
+                                          f"{'' if not by_node else ' (touched files, by node)'}")
         where = " in a fresh data root" if "LLOYD_DATA" in probe_env else ""
         lost = (f" (+{len(vanished)} whose file is gone)" if by_node and vanished else "")
+        # Counted, never listed one by one: these are nodes the run was not told
+        # about at all, and a note that reads "0 already failing" beside them
+        # would be the silent-wrong-answer this probe's whole design refuses.
+        skipped = f" (+{len(omitted)} whose file is absent at base)" if omitted else ""
         return failed, (f"probed {len(files)} {'node' if by_node else 'file'}(s) "
-                        f"at base {base[:8]}{where}: {len(failed)} already failing{lost}")
+                        f"at base {base[:8]}{where}: {len(failed)} already failing"
+                        f"{lost}{skipped}")
     except subprocess.TimeoutExpired:
         return set(), (f"baseline probe timed out after "
                        f"{(float(timeout) if timeout else EXTERNAL_PROBE_TIMEOUT):.0f}s")
@@ -4134,41 +4180,79 @@ class Gate:
         except Exception:  # noqa: BLE001
             return set()
 
-    def _base_failures(self, probe_ids: list[str]) -> tuple[set[str], str, bool, bool]:
-        """`(base_failed, note, conclusive, cached)` for `probe_ids`.
+    def _base_failures(self, untouched_ids: list[str],
+                       touched_ids: list[str] | None = None
+                       ) -> tuple[set[str], str, bool, bool]:
+        """`(base_failed, note, conclusive, cached)` for both groups of ids.
+
+        Two questions, asked in two pytest runs, deliberately not one.
+        `untouched_ids` are failing nodes in files this diff does NOT touch and
+        are probed by FILE, as they always have been. `touched_ids` are the
+        failing nodes in files it DOES touch, and are probed by NODE ID (#4649):
+        the round rewrote that file, so "what is red somewhere in here at base"
+        is not the rung's question about them — the question is whether THIS node
+        was already red, which is the same question the untouched files are
+        asked. Before this, a node in a touched file was never asked at all: it
+        was kept out of the only batch there was and charged to the round.
+
+        They cannot share one pytest invocation. A node id pytest cannot find at
+        base makes it exit 4 with `ERROR: not found:` and run NOTHING — measured
+        on 2026-11-27 in a base checkout, one round-added node beside a real one
+        printed `no tests ran in 0.48s` — so a single new test would silence the
+        answer for every other node in the batch. Split across two runs, the
+        abort is confined to the side that can legitimately contain a round-added
+        node, and its own inconclusiveness excuses only its own nodes.
 
         The per-base red set answers first (`state.read_red_set`, fresh within
-        `automod.gate.red_set_max_age_s`): when every id is already known to
-        fail at this exact base, the throwaway-worktree probe is skipped. It
-        applies only to nodes that failed at HEAD, so a stale entry can skip a
-        probe, never hide a failure. A conclusive probe is merged back in; an
-        INCONCLUSIVE one writes nothing.
+        `automod.gate.red_set_max_age_s`) — per group, on the same rule as ever:
+        when every id of that group is already known to fail at this exact base,
+        that group's throwaway-worktree probe is skipped. It applies only to
+        nodes that failed at HEAD, so a stale entry can skip a probe, never hide
+        a failure. A conclusive probe is merged back in; an INCONCLUSIVE one
+        writes nothing. `cached` says no probe ran at all.
         """
-        if not probe_ids:
-            return set(), "no failures outside the round's own files to probe", True, False
+        touched_ids = list(touched_ids or ())
+        if not untouched_ids and not touched_ids:
+            return set(), "no failing nodes to probe at base", True, False
         try:
             entry = S.read_red_set(self.base, float(_gate_cfg("red_set_max_age_s", RED_SET_MAX_AGE_S)))
         except Exception:  # noqa: BLE001 — a cache is not the gate
             entry = None
-        if entry and set(probe_ids) <= set(entry["nodes"]):
-            return (set(probe_ids),
-                    f"red set cached for base {self.base[:8]} (recorded by {entry.get('by') or '?'}, "
-                    f"{int(time.time() - entry['ts'])}s ago): all {len(probe_ids)} already failing; "
-                    f"probe skipped", True, True)
-        # Beside `gate.json`, for the reason in `_failures_at_base`. The pickup
-        # probe in `red_tree_state_at_head` passes nothing and keeps the behaviour
-        # it has always had.
-        base_failed, note = _failures_at_base(
-            self.python, self.live, self.base, probe_ids,
-            W.round_dir(self.round_id), self._child_env(isolate_home=True),
-            excerpt_path=base_probe_excerpts_path(self.round_id))
-        conclusive = _probe_conclusive(note)
-        if conclusive:
+        base_failed: set[str] = set()
+        notes: list[str] = []
+        conclusive = True
+        probed_any = False
+        for ids, by_node in ((list(untouched_ids), False), (touched_ids, True)):
+            if not ids:
+                continue
+            if entry and set(ids) <= set(entry["nodes"]):
+                base_failed |= set(ids)
+                notes.append(
+                    f"red set cached for base {self.base[:8]} (recorded by "
+                    f"{entry.get('by') or '?'}, {int(time.time() - entry['ts'])}s ago): "
+                    f"all {len(ids)} already failing; probe skipped")
+                continue
+            probed_any = True
+            # Beside `gate.json`, for the reason in `_failures_at_base`, and in a
+            # sidecar for the by-node run because that writer rewrites the whole
+            # file and one run's bodies must not delete the other's. The pickup
+            # probe in `red_tree_state_at_head` passes nothing and keeps the
+            # behaviour it has always had.
+            failed, note = _failures_at_base(
+                self.python, self.live, self.base, ids,
+                W.round_dir(self.round_id), self._child_env(isolate_home=True),
+                by_node=by_node, missing_file="omit" if by_node else "unresolved",
+                excerpt_path=(base_probe_node_excerpts_path(self.round_id) if by_node
+                              else base_probe_excerpts_path(self.round_id)))
+            base_failed |= failed
+            notes.append(note)
+            conclusive = conclusive and _probe_conclusive(note)
+        if conclusive and probed_any:
             try:
                 S.write_red_set(self.base, sorted(base_failed), by=self.round_id, merge=True)
             except Exception as exc:  # noqa: BLE001
                 print(f"[warn] could not record the red set: {exc}")
-        return base_failed, note, conclusive, False
+        return base_failed, " | ".join(notes), conclusive, not probed_any
 
     def _files_red_tree(self) -> bool:
         """Whether this gate may write the red-tree item: the switch is on and
@@ -4253,9 +4337,12 @@ class Gate:
         was kill 157 rounds in a week, 21 of which ever landed.
 
         Three rules keep that from becoming a way round the gate:
-          * a failing node in a file the round's own diff touches is the
-            round's, even if it also fails at base — a round that edits a red
-            test file and leaves it red owns it;
+          * a node is attributed by what it does AT BASE, not by which file it
+            lives in. A node in a file the round touched is therefore probed too
+            (#4649, which retired the rule that such a node was the round's
+            without asking), by node id and in its own pytest run: a node the
+            round ADDED cannot be selected at base, so it cannot reproduce there
+            and stays the round's;
           * one new failure fails the rung, however many old ones sit beside
             it (the mixed case still records which ones are not the round's);
           * an INCONCLUSIVE base probe grants nothing — fail closed.
@@ -4273,12 +4360,22 @@ class Gate:
         tail = "\n".join(text.strip().splitlines()[-15:])
         node_ids = _failed_node_ids(text, self.worktree)
         touched = self._touched_paths()
+        # `own` is a fact about the diff, not a charge list: the nodes whose FILE
+        # this round touched. Since #4649 they are asked the same question the
+        # rest are — does this node also fail at base? — in a second, by-node
+        # probe of the touched files. Before that they were left out of the only
+        # batch there was, never probed, and prepended to `new`, which charged a
+        # round for whatever red already sat in a file it had reason to edit:
+        # round SM_20261127_200018 failed its `tests` rung on
+        # `test_the_board_is_still_the_size_the_budget_was_calibrated_on`, whose
+        # assertion is the LIVE vault's backlog file count, red on its own base,
+        # in a file the round had every right to touch.
         own = [n for n in node_ids if n.split("::", 1)[0] in touched]
-        probe_ids = [n for n in node_ids if n not in own]
-        base_failed, probe_note, conclusive, cached = self._base_failures(probe_ids)
-        pre_existing = [n for n in probe_ids if n in base_failed]
-        _external, new = _classify_test_failure(probe_ids, base_failed)
-        new = own + new
+        elsewhere = [n for n in node_ids if n not in own]
+        base_failed, probe_note, conclusive, cached = self._base_failures(elsewhere, own)
+        # One rule for every node now, whichever probe answered for it.
+        pre_existing = [n for n in node_ids if n in base_failed]
+        _external, new = _classify_test_failure(node_ids, base_failed)
         # One run is one sample. The base probe above is a single invocation,
         # so a node that flickers clears it often enough to matter and lands
         # in `new`. Ask those nodes again before the wording commits to that.
@@ -4300,6 +4397,10 @@ class Gate:
                 "base_probe": probe_note, "home": self.home_isolation,
                 "red_set_cached": cached}
         if own:
+            # Which failing nodes live in a file this diff touched — a fact about
+            # the diff, not a charge list. Since #4649 the charge list is
+            # `new_failures`, and a node named here may also sit in
+            # `pre_existing_failures` because it reproduced at base.
             data["touched_failures"] = own
         if pre_existing:
             data["pre_existing_failures"] = pre_existing
@@ -4339,6 +4440,10 @@ class Gate:
             probe_bodies = base_probe_excerpts_path(self.round_id)
             if probe_bodies is not None and probe_bodies.exists():
                 said += f"; the base probe's own bodies are in `{probe_bodies.name}`"
+            node_bodies = base_probe_node_excerpts_path(self.round_id)
+            if node_bodies is not None and node_bodies.exists():
+                said += (f"; the touched files' by-node probe wrote its bodies to "
+                         f"`{node_bodies.name}`")
             data["failure_excerpt_note"] = said
         red_item = self._file_red_tree(pre_existing) if (pre_existing and conclusive) else None
         if red_item:
@@ -4369,8 +4474,8 @@ class Gate:
                                                    "_lead": lead})
         if not conclusive and node_ids and not new:
             return False, self._tests_verdict(
-                "every failure outside the round's own files was unexplained, and the base "
-                "probe could not say whose they are — failing closed",
+                "no failure could be explained, and the base probe could not say whose "
+                "they are — failing closed",
                 counts, f"{probe_note}. {flaky_note}\n{tail[-600:]}"), data
         if flaky:
             # Some failures flickered and some did not: the round still owns
