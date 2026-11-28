@@ -1922,6 +1922,22 @@ def trial_ledger_row(round_id: str, trace: dict[str, Any],
         # score. Same helper as `bench_runner_sdk.ledger_row_for`, so neither
         # writer can omit them; on the sdk arm both come back clean.
         **rankability_fields(score),
+        # #4650: the durable-write verifier's verdict, published rather than dropped. It is
+        # computed in-process at `bench_runner_sdk.py:1587-1597` and lived ONLY there: a
+        # `git grep -n side_effect_reward -- scripts/autoresearch/run_round.py` returned zero
+        # hits, and not one of the admitted writes rows in the ledger carried the key, so the
+        # one number that says whether the trial actually changed the state it was asked to
+        # change was unreadable by anyone who was not the runner process. Two keys, not one,
+        # because a refusal's number is meaningless without its `reason` — the refused row's
+        # reward is 0.0 by construction, and only the reason says whether that 0.0 means
+        # "wrote the wrong thing" or "was never allowed to write". `None` on the overwhelming
+        # majority of rows is the honest reading of a trial that declared no `writes:` scope
+        # and therefore had no verifier to run; it is never 0.0, which would read as a failed
+        # write on a card that asked for none. Same two keys on the on-demand writer
+        # (`bench_runner_sdk.ledger_row_for`) in the same commit, or the pair splits and a
+        # CLI row stops being comparable with a round's — the #353 failure shape.
+        "side_effect_reward": trace.get("side_effect_reward"),
+        "side_effect_reward_reason": trace.get("side_effect_reward_reason"),
         "promoted": None,  # filled in after promotion decision
         "created_at": now_iso(),
     }
@@ -2436,6 +2452,23 @@ async def run(
         trial_row = trial_ledger_row(rid, t, score)
         trial_rows.append(trial_row)
         ledger_append(cfg.paths.ledger_path, trial_row)
+    # #4650: the admitted writes trial's verifier verdict, read off THIS round's own judged
+    # traces rather than recomputed. `boot` is set only when a child was booted and a trial
+    # dispatched, and the card runs on the baseline arm alone (#4320), so this selects exactly
+    # one trace — the same trace whose `per_trial` row the loop above just wrote, and the row
+    # and this reading cannot disagree because both are taken from `st["side_effect_reward"]`,
+    # one value on one dict. The trace is absent only if the card's lone trace was dropped
+    # while `boot` stayed set, which nothing in this function does; `None` is still carried
+    # rather than assumed, so a future drop shows up as a missing number in the report and not
+    # as a reward of nothing.
+    writes_trial_reward: dict[str, Any] | None = next(
+        ({"composite": st["_score"].get("composite_score"),
+          "reward": st.get("side_effect_reward"),
+          "reason": st.get("side_effect_reward_reason")}
+         for st in scored_traces
+         if boot is not None and st["task_id"] == boot["card"]
+         and st["variant_id"] == baseline_id) , None)
+
     # #2019: per-variant cost, from the rows just written. Emit-only: it reaches the
     # report and the decision rows below, and no input of `evaluate_promotion`.
     cost_records = trial_cost.round_cost_records(trial_rows)
@@ -2594,9 +2627,33 @@ async def run(
     # caller reads, and a verdict that lives only in the returned payload or in `main`'s
     # exit status is invisible to whoever opens this file next morning.
     leftovers = leftover_fixtures(_boot_src, before=fixtures_before)
+    # #4650: the admitted trial's verifier reward, printed beside its composite. The boot line
+    # already said a child came up and a trial ran, and the arm table below prints that trial's
+    # `composite` — but the number that says whether the durable write actually landed was
+    # computed in the runner process and reached neither the report, the ledger row, nor any
+    # file, so every round that ever booted a child presented the card as unmeasured on the one
+    # question it exists to answer. `reward=none` is reserved for a trial that declared no
+    # `writes:` scope and therefore had no verifier to run; it is never printed as `0.0000`,
+    # which would read as a write that failed on a card that was never asked to write. A
+    # trailing reason accompanies a reward of 0.0 because on this path 0.0 has two causes with
+    # opposite meanings — the verifier found nothing written, versus the runner refused to
+    # dispatch at all — and only the reason distinguishes them.
+    boot_reward_note = ""
+    if boot:
+        _reward, _composite = "none", "unrankable"
+        if writes_trial_reward is not None:
+            if writes_trial_reward["reward"] is not None:
+                _reward = f"{writes_trial_reward['reward']:.4f}"
+            if writes_trial_reward["composite"] is not None:
+                _composite = f"{writes_trial_reward['composite']:.4f}"
+        boot_reward_note = (
+            f"; that trial's verifier side_effect_reward={_reward} beside "
+            f"composite={_composite}"
+            + (f" ({writes_trial_reward['reason']})"
+               if writes_trial_reward and writes_trial_reward.get("reason") else ""))
     result_boot_note = (
         f"child booted for {boot['card']} over scopes {boot['scopes']}, one trial "
-        f"admitted against it ({boot['state_url']})"
+        f"admitted against it ({boot['state_url']}){boot_reward_note}"
         if boot else
         (f"no child booted: {boot_skipped}" if writes_card and card_scopes
          else "no writes-scoped card in this round's matrix"))

@@ -413,6 +413,14 @@ PUBLISHED_TRIAL_KEYS = {
     # on, from `cost.cost_ledger_fields`. Emit-only provenance; #428's denominator
     # reads `decision` rows and is unmoved by them.
     "recorded_session_id", "reprefill_cost_tokens",
+    # #4650: the durable-write verifier's verdict and, beside it, the reason a refusal
+    # gave. Grown on BOTH writers in ONE commit — `run_round.trial_ledger_row` and
+    # `bench_runner_sdk.ledger_row_for` — which is the deliberate act this set exists to
+    # force: a key on one arm only is #353 again. `None` on a trial that declared no
+    # `writes:` scope, never 0.0, so "no verifier ran" cannot be read as "the write
+    # failed"; a 0.0 row is either a refused dispatch or a wrong write, and
+    # `side_effect_reward_reason` is the only thing that tells those two apart.
+    "side_effect_reward", "side_effect_reward_reason",
 }
 
 #: A `decision` row's unconditional keys: the floor, never a ceiling. A row written by

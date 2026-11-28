@@ -1132,3 +1132,175 @@ def test_a_deadline_cut_keeps_the_admitted_writes_card_scored(round_env, tmp_pat
     line = next(ln for ln in report.splitlines()
                 if "not reached by every variant" in ln)
     assert seen["cut"] in line and card not in line, line
+
+
+# ── #4650 clause 1: the admitted trial's verifier reward reaches the published row ────
+# The verifier's verdict is computed in the runner process at `bench_runner_sdk.py:1587-1597`
+# and, before this change, reached NOTHING else: `git grep -n side_effect_reward -- scripts/
+# autoresearch/run_round.py` returned zero hits, and not one of the 27 admitted writes rows in
+# `~/lloyd-data/_pipeline/research/ledger.jsonl` (`R_20261122_193718` ..
+# `R_20261127_235240`, 9 per card) carries the key. So the round could say a child booted, a
+# trial dispatched and a composite came out, and be silent on the one question the card exists
+# to answer — did the durable write actually land — while the number that answered it was
+# thrown away at the end of the process that computed it.
+
+#: What a fixture-rooted trial's own dispatch record looks like on this path. The bare
+#: spelling is what the agent loop records (`bench_runner_sdk.py:1006, 1014-1017`); the card
+#: that grades it declares `mcp__lloyd-mcp__memory_add`, which is #4650's other half.
+_WRITES_DISPATCH = "memory_add"
+
+
+def _per_trial_rows(cfg, round_id: str) -> list[dict]:
+    """The round's own `per_trial` rows, read back off the scratch ledger on disk.
+
+    Read from the FILE and not from the returned payload: the defect #4650 is about is a
+    value that existed in memory and reached no artifact, so an assertion that never
+    touches disk cannot see it. `event` rows (`round_summary`, `unscorable_writes_trial`)
+    are filtered out the same way `test_autoresearch_round_report.py::_rows` filters them,
+    so what is left is one row per scored trial.
+    """
+    rows = [json.loads(line) for line in
+            cfg.paths.ledger_path.read_text(encoding="utf-8").splitlines()]
+    return [r for r in rows if r.get("round_id") == round_id
+            and not r.get("event") and r.get("task_id")]
+
+
+def _writes_task(card_id: str = CARD) -> dict:
+    """A `writes:`-scoped card in the shape `load_bench_tasks` yields, so the round admits it.
+
+    Declared checks are the corpus's real three (`tool_called` prefixed, `regex`,
+    `max_tool_calls`), which matters: this node is about a card whose objective layer the
+    judge can actually pass, and a card with a check the judge excludes would publish a row
+    for the wrong reason.
+    """
+    return {"id": card_id, "category": "synthetic", "requires_runtime": True,
+            "writes": ["vault"], "max_tool_calls": 8,
+            "prompt": "Save the finding through the memory tool.",
+            "objective_checks": [
+                {"type": "tool_called", "value": "mcp__lloyd-mcp__memory_add"},
+                {"type": "regex", "value": "ZEDQUILL-3688-VANE"}],
+            "rubric_criteria": ["names_the_tool_it_actually_used"],
+            "safety_critical": False}
+
+
+def _writes_trace(vid: str, card_id: str = CARD, **over) -> dict:
+    """A sdk-arm trace for an admitted writes trial, reward and all.
+
+    `side_effect_reward` on the TRACE is the runner's own output — `run_trial` puts it there
+    before any writer sees it — so this double is the same shape the real runner hands back,
+    not a shortcut around the seam.
+    """
+    trace = {"variant_id": vid, "task_id": card_id, "status": "success",
+             "task_category": "synthetic", "turns": 3, "harness": "sdk",
+             "tool_trace_authoritative": True,
+             "final_text": "Saved with ZEDQUILL-3688-VANE via memory_add.",
+             "tool_calls": [{"name": _WRITES_DISPATCH, "args": {}}],
+             "denied_calls": [], "duration_seconds": 4.0,
+             "messages": [{"role": "assistant",
+                           "content": "Saved with ZEDQUILL-3688-VANE via memory_add."}],
+             "side_effect_reward": 1.0, "side_effect_reward_reason": None}
+    trace.update(over)
+    return trace
+
+
+def test_an_admitted_writes_trial_publishes_its_reward_on_its_own_row(
+        round_env, tmp_path, monkeypatch):
+    """Clause 1, across the whole boundary: runner trace → round's writer → ledger.jsonl on
+    disk → the row a later reader greps. Nothing stubbed in between.
+
+    The round is given ONE `writes:`-scoped card and a faked fixture/spawn pair (this file's
+    `_BootCall`), so `run()` decides to boot, admits the trial, dispatches it on the baseline
+    arm, judges it and appends its `per_trial` row — every step the live round takes, at the
+    same call sites, with only the child process and the model doubled. The assertion is read
+    back off the file: an in-memory row that never reached disk is exactly what #4650 was
+    filed about.
+
+    Two things are pinned together because the bug was the pair of them. `side_effect_reward`
+    must be the key's PRESENT-and-non-null value 1.0 (not absent, and not 0.0 — a zero here
+    would read as "the write failed" on a trial whose verifier said it landed), and the same
+    row's `objective_score` must be 1.0, because a card whose `tool_called` check the judge
+    cannot pass would publish a reward beside an objective layer that contradicts it. That
+    second assertion is the acceptance check's other half: the card becomes passable.
+    """
+    _BootCall(_FakeFixture(tmp_path / "fx"), _FakeHandle()).install(monkeypatch)
+    corpus = run_round.load_bench_tasks(round_env.paths.bench_dir)
+    tasks = list(corpus) + [_writes_task()]
+    monkeypatch.setattr(run_round, "load_bench_tasks", lambda _dir: list(tasks))
+
+    async def fake_trials(cfg_, variant_pairs, ts, model, harness, max_parallel, **kw):
+        # The writes card must arrive on the sdk arm and nothing else may: `_run_trials`
+        # decides the split from `requires_runtime` + `writes`, so this assert is the
+        # dispatch-half of the clause read at the same boundary.
+        assert [t["id"] for t in ts] == [t["id"] for t in tasks]
+        direct, sdk = [], []
+        for vid, _ in variant_pairs:
+            for t in ts:
+                if t["id"] == CARD:
+                    sdk.append(_writes_trace(vid))
+                else:
+                    direct.append({"variant_id": vid, "task_id": t["id"],
+                                   "status": "success", "task_category": "replay",
+                                   "turns": 1, "harness": "direct",
+                                   "final_text": "ZEDQUILL-3688-VANE called Read",
+                                   "tool_calls": [{"name": "Read"}],
+                                   "denied_calls": [], "duration_seconds": 1.0})
+        return direct, sdk, {}
+
+    monkeypatch.setattr(run_round, "_run_trials", fake_trials)
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=len(tasks),
+                                       harness="sdk"))
+    assert "error" not in result, result
+    # The payload field is the round's short verdict for this card, not the report's prose:
+    # `booted:<card>` is what a caller keys on, and the prose carrying the reward belongs in
+    # the report file, which the node below reads back separately.
+    assert result["writes_trial_boot"] == f"booted:{CARD}", result["writes_trial_boot"]
+
+    rows = _per_trial_rows(round_env, result["round_id"])
+    by_task = {r["task_id"]: r for r in rows}
+    assert CARD in by_task, f"the admitted card wrote no per_trial row: {sorted(by_task)}"
+    row = by_task[CARD]
+    assert row["side_effect_reward"] == 1.0, (
+        "the verifier said the write landed and the published row says nothing: "
+        f"{ {k: row.get(k) for k in ('side_effect_reward', 'side_effect_reward_reason')} }")
+    assert row["side_effect_reward_reason"] is None
+    assert row["objective_score"] == 1.0, (
+        "the card's `tool_called` check did not pass on a bare-spelled dispatch, so the "
+        "reward is being published beside an objective layer that contradicts it")
+    assert row["tool_call_count"] == 1
+
+
+def test_a_refused_writes_trial_publishes_zero_reward_and_its_reason(tmp_path):
+    """Clause 1's refusal arm, at the one surface a refusal actually reaches.
+
+    A trial the runner refuses never dispatches, so there is no scored trace and no `per_trial`
+    row at all — `test_a_trial_handed_only_the_child_state_refuses_with_no_scored_row` pins
+    that, and it is right: an unscored trial must not become a scored 0.0, which would move
+    `mean_composite`. What the refusal DOES produce is a trial record carrying
+    `side_effect_reward: 0.0` and a `side_effect_reward_reason`
+    (`bench_runner_sdk.py:1281-1288`), and where that record is published the two keys have to
+    carry both numbers: the 0.0 alone has two causes with opposite readings — the verifier ran
+    and found nothing written, versus the trial was never allowed to write — and only the
+    reason separates them. So the clause is pinned on the writer's output for a refusal trace,
+    not on a ledger row that legitimately does not exist.
+    """
+    from scripts.autoresearch import judge
+
+    refused = _writes_trace("BASELINE_t", side_effect_reward=0.0, tool_calls=[],
+                            side_effect_reward_reason=(
+                                "writes-scoped trial refused: the aggregator answers with "
+                                "production roots"))
+    score = judge.judge_trace(_writes_task(), refused)
+    row = run_round.trial_ledger_row("R_T_1", refused, score)
+    assert row["side_effect_reward"] == 0.0
+    assert row["side_effect_reward_reason"].startswith("writes-scoped trial refused")
+    # The unscoped neighbour is NOT 0.0. bench_001..bench_028 declare no `writes:` scope and
+    # have no verifier, so their rows say `None`: if an absent verifier published 0.0, every
+    # historical row would read as a failed write and the column would be unreadable.
+    plain = _writes_trace("BASELINE_t")
+    plain.pop("side_effect_reward")
+    plain.pop("side_effect_reward_reason")
+    plain_row = run_round.trial_ledger_row("R_T_1", plain,
+                                           judge.judge_trace(_writes_task(), plain))
+    assert plain_row["side_effect_reward"] is None
+    assert plain_row["side_effect_reward_reason"] is None
+    assert set(plain_row) == set(row), "the two writers' shape depends on the trial's scope"

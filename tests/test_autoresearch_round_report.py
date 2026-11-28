@@ -1707,3 +1707,113 @@ def test_a_refused_promotion_is_reported_as_a_refusal_and_not_as_a_landing(
     assert REFUSAL_TEXT in report, "the refusal is quoted, not summarised into nothing"
     assert "wrote no file" in report
     assert f"- `{REFUSED_VARIANT}`: PROMOTE" in report, "the decision is still recorded"
+
+
+# ── #4650 clause 3: the report prints the writes trial's reward beside its composite ──
+def test_the_report_prints_the_admitted_writes_trials_reward_beside_its_composite(
+        round_env, tmp_path, monkeypatch):
+    """One round, one admitted writes trial, and the round's own `.md` read back off disk.
+
+    Before this the boot line said a child came up and a trial ran, the arm table printed that
+    trial's composite, and the number that answers the card's actual question — did the durable
+    write land — appeared nowhere in the artifact, because it was computed in the runner process
+    at `bench_runner_sdk.py:1587-1597` and dropped there: `git grep -n side_effect_reward --
+    scripts/autoresearch/run_round.py` returned zero hits before this change. A reader of
+    `R_20261127_195142.md` therefore graded bench_031 as unmeasured on the one axis it was run
+    to measure, while the measurement existed and said 0.0-or-1.0.
+
+    The fixture and the child are doubled (this file's scratch root has no aggregator to boot),
+    and the model never runs; every other step — admit, dispatch, judge, write the row, write
+    the report — is the real code path. The composite is pinned to a number rather than left at
+    its default so the phrase "beside its composite score" is literally what is asserted.
+    """
+    import json as _json
+
+    from scripts.autoresearch import bench_fixture, bench_spawner
+
+    class _Fx:
+        root = tmp_path / "fx"
+
+        def cleanup(self):
+            return self.root
+
+    class _Handle:
+        url = "http://127.0.0.1:45999"
+        env = {}
+
+        def stop(self):
+            return 0, 0.1
+
+    monkeypatch.setattr(bench_fixture, "build_fixture", lambda **kw: _Fx())
+    monkeypatch.setattr(bench_spawner, "spawn", lambda **kw: _Handle())
+    # The rubric mode is read from the live config by `run()`; pinned to scalar here so the
+    # stub below's `{"overall": 0.5}` is the mode's own shape and the composite is a number.
+    monkeypatch.setattr(run_round, "configured_rubric_mode", lambda: "scalar")
+
+    writes_card = {"id": "bench_029_durable_write_vault_note", "category": "synthetic",
+                   "requires_runtime": True, "writes": ["vault"], "max_tool_calls": 8,
+                   "prompt": "Save the finding through the memory tool.",
+                   "objective_checks": [
+                       {"type": "tool_called", "value": "mcp__lloyd-mcp__memory_add"},
+                       {"type": "regex", "value": "ZEDQUILL-3688-VANE"}],
+                   "rubric_criteria": ["names_the_tool_it_actually_used"],
+                   "safety_critical": False}
+    corpus = list(run_round.load_bench_tasks(round_env.paths.bench_dir))
+    tasks = corpus + [writes_card]
+    monkeypatch.setattr(run_round, "load_bench_tasks", lambda _dir: list(tasks))
+
+    async def fake_trials(cfg_, variant_pairs, ts, model, harness, max_parallel, **kw):
+        vid = variant_pairs[0][0]
+        direct = [{"variant_id": vid, "task_id": t["id"], "status": "success",
+                   "task_category": t.get("category"), "turns": 1, "harness": "direct",
+                   "final_text": "ZEDQUILL-3688-VANE called vault_recall",
+                   "tool_calls": [{"name": "Read"}], "denied_calls": [],
+                   "duration_seconds": 1.0}
+                  for t in ts if t["id"] != writes_card["id"]]
+        sdk = [{"variant_id": vid, "task_id": writes_card["id"], "status": "success",
+                "task_category": "synthetic", "turns": 3, "harness": "sdk",
+                "tool_trace_authoritative": True,
+                "final_text": "Saved with ZEDQUILL-3688-VANE via memory_add.",
+                "messages": [{"role": "assistant",
+                              "content": "Saved with ZEDQUILL-3688-VANE via memory_add."}],
+                "tool_calls": [{"name": "memory_add", "args": {}}], "denied_calls": [],
+                "duration_seconds": 4.0,
+                "side_effect_reward": 1.0, "side_effect_reward_reason": None}] \
+            if any(t["id"] == writes_card["id"] for t in ts) else []
+        return direct, sdk, {}
+
+    monkeypatch.setattr(run_round, "_run_trials", fake_trials)
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=len(tasks),
+                                       harness="sdk"))
+    assert "error" not in result, result
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+
+    boot_line = [ln for ln in report.splitlines() if "writes-scoped trial:" in ln]
+    assert len(boot_line) == 1, report[:2000]
+    line = boot_line[0]
+    # The phrase is the clause. A report that printed the reward somewhere else, or printed
+    # the composite alone, would still leave the card looking unmeasured next to a number.
+    assert "side_effect_reward=1.0000 beside composite=0.7500" in line, line
+    # And the same number the round's own ledger row carries, so the artifact and the row
+    # cannot tell two stories about one trial.
+    rows = _rows(round_env, result["round_id"])
+    row = next(r for r in rows if r["task_id"] == writes_card["id"])
+    assert row["side_effect_reward"] == 1.0 and row["composite_score"] == 0.75
+    assert _json.dumps(row["side_effect_reward"]) in line, (
+        "the report and the per-trial row disagree about the same trial")
+
+
+def test_a_round_with_no_admitted_writes_trial_prints_no_reward(
+        round_env, tmp_path, monkeypatch):
+    """The line stays honest when nothing was admitted: no boot, no reward.
+
+    `None` and `0.0` mean different things on this path and the report has to keep them apart.
+    A round that admitted no writes card must not print a reward at all — printing `none` for
+    26 cards that never had a verifier would look like 26 failed writes, which is precisely the
+    misreading the `None`-not-`0.0` rule exists to prevent.
+    """
+    result = asyncio.run(run_round.run(targets=["prompts"], bench_limit=2))
+    assert "error" not in result, result
+    report = Path(result["summary_file"]).read_text(encoding="utf-8")
+    line = next(ln for ln in report.splitlines() if "writes-scoped trial:" in ln)
+    assert "side_effect_reward" not in line, line

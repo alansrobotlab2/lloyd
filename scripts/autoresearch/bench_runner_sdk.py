@@ -1793,17 +1793,20 @@ def ledger_row_for(trace: dict[str, Any], score: dict[str, Any] | None,
         # no score at all; now it is also null when the objective layer had no
         # dispatch record to grade, with `rankable: False` saying why.
         **rankability_fields(score),
-        # #3403 deliberately adds NO key here. The isolation flags (`is_production_data`,
-        # `is_production_vault`), the admitted names (`write_scope`, `stateful_admitted`)
-        # and the verifier's `side_effect_reward` live on the TRIAL RECORD — the trace this
-        # function reads and the JSON the runner writes per trial — and that is where
-        # clause 4's "recorded on the trial row either way" is read and pinned
-        # (tests/test_autoresearch_bench_runner_sdk.py). Putting them here instead would
-        # have to grow `PUBLISHED_TRIAL_KEYS` AND `run_round.trial_ledger_row` in the same
-        # commit, which is #884's named change (the two writers are pinned to one key set
-        # by `test_the_ondemand_writer_emits_the_same_per_trial_keys`, and a key on this
-        # arm only is the #353 bug again), and would move `run_round.py:1428`, which four
-        # sites cite by number. The ledger's denominator is #428's to move.
+        # #3403 deliberately added NO key here, and named the reason: growing the published
+        # per-trial key set means growing `run_round.trial_ledger_row` in the same commit,
+        # because `test_the_ondemand_writer_emits_the_same_per_trial_keys` pins the two
+        # writers to one shape and a key on this arm only is the #353 bug again. #4650 is
+        # that commit, for ONE thing and not for the whole set: the verifier's
+        # `side_effect_reward` and its `reason` are published on both writers below.
+        # The isolation flags (`is_production_data`, `is_production_vault`) and the admitted
+        # names (`write_scope`, `stateful_admitted`) stay off the ledger exactly as #3403
+        # left them — they answer "was this trial allowed to run", which the trial record
+        # holds and no column-summing reader asks — so what moved here is the one number the
+        # item found was being computed and then thrown away, not #884's transcript change
+        # and not #428's denominator.
+        "side_effect_reward": trace.get("side_effect_reward"),
+        "side_effect_reward_reason": trace.get("side_effect_reward_reason"),
         "promoted": None,
         "created_at": now_iso(),
     }

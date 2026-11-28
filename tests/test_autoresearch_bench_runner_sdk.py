@@ -2334,3 +2334,61 @@ def test_the_trace_keeps_the_prompt_the_trial_dispatched(monkeypatch):
     assert tr["user_turn"] == task["prompt"] + "\n\n" + probe
     assert tr["user_turn"].startswith(task["prompt"]), \
         "the field is the prompt as sent, not the reply"
+
+
+# ── #4650 clause 2: the two per-trial writers publish `side_effect_reward` identically ──
+def test_both_per_trial_writers_publish_the_reward_in_one_key_set(monkeypatch, tmp_path):
+    """`run_round.trial_ledger_row` and `bench_runner_sdk.ledger_row_for` still emit ONE key
+    set, and that set now contains `side_effect_reward` and its reason.
+
+    This is the commit #3403 named and deliberately did not make. Its comment said the reward
+    stays off the ledger because growing the published per-trial key set means growing BOTH
+    writers together — `test_the_ondemand_writer_emits_the_same_per_trial_keys` pins the pair,
+    and a key on one arm only is #353's bug: a hand-triggered CLI trial that reads differently
+    to a scheduled round's. The #4650 triage found the cost of leaving it: `side_effect_reward`
+    is computed in-process at `bench_runner_sdk.py:1587-1597` and reaches NO published row on
+    either writer, and `grep -rl side_effect_reward --include="*.json*"
+    ~/lloyd-data/_pipeline/research/` returned no file at all.
+
+    Three things are asserted, because each is a separate way to get this wrong:
+      * the two writers agree on the key SET, so a row is one shape whoever wrote it;
+      * the key is present on a plain unscoped trial with value `None` — not absent, because an
+        absent key makes "this row predates the change" and "this trial had no verifier"
+        indistinguishable to a grep-based reader, and #4650's own acceptance check is a grep;
+      * on a scoped trial both writers carry the same number, so the CLI arm cannot silently
+        drop what the round arm publishes.
+    """
+    from scripts.autoresearch import run_round
+
+    tr = {"task_id": "bench_010_safety_destructive", "variant_id": "V", "status": "ok",
+          "turns": 1, "final_text": "I won't do that without confirmation.",
+          "messages": [{"role": "assistant",
+                        "content": "I won't do that without confirmation."}],
+          "tool_calls": [], "denied_calls": [], "duration_seconds": 1.0}
+    score = judge.judge_trace(_task(), tr)
+
+    plain_round = run_round.trial_ledger_row("R_4650", tr, score)
+    plain_sdk = ledger_row_for(tr, score, "R_4650")
+    assert set(plain_round) == set(plain_sdk), sorted(
+        set(plain_round) ^ set(plain_sdk))
+    assert {"side_effect_reward", "side_effect_reward_reason"} <= set(plain_sdk)
+    assert plain_sdk["side_effect_reward"] is None, (
+        "an unscoped trial published a number: 0.0 here would read as a failed write on a "
+        "card that declared no writes at all")
+    assert plain_round["side_effect_reward"] is None
+
+    scoped = dict(tr, task_id="bench_029_durable_write_vault_note",
+                  side_effect_reward=0.0,
+                  side_effect_reward_reason="writes-scoped trial refused: production roots",
+                  side_effect_checks=[{"name": "note", "pass": False}])
+    scoped_score = judge.judge_trace(_task(task_id=scoped["task_id"]), scoped)
+    scoped_round = run_round.trial_ledger_row("R_4650", scoped, scoped_score)
+    scoped_sdk = ledger_row_for(scoped, scoped_score, "R_4650")
+    assert set(scoped_round) == set(scoped_sdk), sorted(
+        set(scoped_round) ^ set(scoped_sdk))
+    for row in (scoped_round, scoped_sdk):
+        assert row["side_effect_reward"] == 0.0
+        assert row["side_effect_reward_reason"] == (
+            "writes-scoped trial refused: production roots")
+    # Additive means additive: the reward moves no existing number on either arm.
+    assert scoped_round["composite_score"] == plain_round["composite_score"]
