@@ -1418,14 +1418,22 @@ def test_the_conf_offers_only_a_revert_target_that_is_on_the_box():
 # entry and keeps the byte pin boots a four-month-old engine at today's budget
 # instead of refusing.
 #
-# No retained log has ever booted that pairing (the scan the item ran covers
-# `.log` back to `.log.10`, whose mtime 2026-11-04 predates 14.5 GiB entirely, and
-# shows only -1012@15032385536, -1110@15569256448 and -1110@15032385536). So the
-# price below is arithmetic off the conf's own recorded readings, and stops short
-# of claiming a boot died: this build read 92,002 of 97,887 MiB at 11.5 GiB, so
-# 14.5 GiB puts it at ~95,074 used — ~2,800 MiB free, under the ~3,300 MiB the same
-# paragraph prices as safe headroom. 14.0 GiB is therefore the revert value, and
-# the ceiling this check holds an older build to.
+# No retained log has ever booted that pairing. Its surviving record is now a
+# committed extract rather than the live store:
+# `backlog/data/2026-11-21.4449-services-agent-llm-primary.log` and its header
+# `2026-11-21.4449-services-agent-llm-primary.log.witness.md` (vault `eaced343`),
+# the 11 `A/B config:` boots present at capture (22 lines / 3,369 bytes by
+# `wc -l -c <`), as at 2026-11-21T18:49 PST: 6 -1012@15032385536 (one bfloat16),
+# 3 -1110@15569256448, 2 -1110@15032385536, 0 undated `-main` = 11, i.e. no `-main`
+# boot at any byte value. The live store is an 11-slot byte rotation whose oldest
+# surviving slot no longer necessarily reaches back before the 14.5 GiB era began
+# (2026-11-10 22:13, `556862af`), and an extract of the lines that ARE present
+# cannot itself prove an absence: those 11 lines are the pairing's whole surviving
+# record, not a census of the era. So the price below is arithmetic off the conf's
+# own recorded readings, and stops short of claiming a boot died: this build read
+# 92,002 of 97,887 MiB at 11.5 GiB, so 14.5 GiB puts it at ~95,074 used — ~2,800 MiB
+# free, under the ~3,300 MiB the same paragraph prices as safe headroom. 14.0 GiB is
+# therefore the revert value, and the ceiling this check holds an older build to.
 
 REVERT_KV_MAX = 15032385536                       # 14.0 GiB, the priced revert value
 REVERT_KV_READING = ("92,002", "97,887")          # the card reading that derives it

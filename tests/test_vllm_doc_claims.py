@@ -6186,6 +6186,365 @@ def _sha_of_page_record(page: str) -> str:
     return m.group(1)
 
 
+# ── #4652: #4449's own provenance stops citing a rotation slot ──────────────────────────
+#
+# #3191 and #3405 removed this bug from `architecture/vllm.md`, and #4449 shipped a fresh copy
+# of it into a test file twelve days later. The comment above `REVERT_KV_MAX` there cited the
+# live rotation twice over: by slot index and by mtime — "`.log` back to `.log.10`, whose mtime
+# 2026-11-04 predates 14.5 GiB entirely". Both halves were already false when #4652's triage
+# measured `.log.10` at 2026-11-11 10:12 on 2026-11-27, and the substance goes false at the very
+# next shift: that slot was the only retained file holding bytes from before the 14.5 GiB era
+# opened (`556862af`, 2026-11-10 22:13:59 -0800) while `.log.9` starts at 11-11 10:13:20, and the
+# active file measured 9,776,467 B of the ~10,485,800 B cap at 18:05 that day. A slot's mtime is
+# the worse of the two citations to ship: an index at least names a file that exists, while a
+# date pinned to a slot is a claim the rotation rewrites on its own clock and nothing can notice.
+# So the comment now cites the extract #4498 committed (vault `eaced343`) and says out loud what
+# an extract of present lines cannot carry.
+
+#: The extract and its header, both under the vault's `backlog/data/`. `_4449_LINES` and
+#: `_4449_BYTES` are the landed `wc -l -c <` reading — 11 `A/B config:` lines beside the 11
+#: stamped lines that date them — and, as with `_WITNESS_LINES`, the node below re-measures them
+#: rather than trusting them.
+_4449_WITNESS = "2026-11-21.4449-services-agent-llm-primary.log"
+_4449_HEADER = "2026-11-21.4449-services-agent-llm-primary.log.witness.md"
+_4449_LINES = 22
+_4449_BYTES = 3_369
+
+#: The capture instant #4498's header dates the census to. Every figure in `_4449_CENSUS` is
+#: true of the store AT that instant and of no later one, which is exactly why the comment has
+#: to carry the date rather than the number alone.
+_4449_CAPTURE = "2026-11-21T18:49"
+
+#: The census as re-countable from the extract's own bytes: `(build suffix, kv_bytes) -> boots`.
+#: `_4449_UNDATED` is the count of undated-`-main` boots, which is what the pairing's whole
+#: absence rests on — and, being a count of lines that ARE there, cannot be a proof of it.
+_4449_CENSUS = {("-1012", "15032385536"): 6,
+                ("-1110", "15569256448"): 3,
+                ("-1110", "15032385536"): 2}
+_4449_BOOTS = 11
+_4449_UNDATED = 0
+
+#: The era whose absence is being asserted, and the commit that opened it. The comment cites
+#: both, so the node reads the date back out of git rather than admiring the prose.
+_4449_ERA_COMMIT = "556862af"
+_4449_ERA_START = "2026-11-10 22:13"
+
+#: Active file plus supervisord's default 10 backups. `agent-llm-primary.conf` sets
+#: `stdout_logfile_maxbytes=10MB` and names no `stdout_logfile_backups`; the node below re-reads
+#: both facts, so an added override moves this figure rather than quietly falsifying the
+#: comment that cites it.
+_4449_SLOTS = 11
+
+#: The card readings the revert price is derived from, and the derived figure itself. Pinned as
+#: arithmetic, not as three strings, so a re-cut number has to break the derivation to pass.
+_4449_KV_USED = 92_002           # MiB in use on the undated build at the launcher's 11.5 GiB
+_4449_KV_CAP = 97_887             # MiB the card reports
+_4449_KV_STEP = 3_072             # 14.5 GiB - 11.5 GiB, in MiB
+_4449_KV_FREE_SAFE = 3_300        # the headroom the same conf paragraph prices as safe
+
+#: The block as #4449 shipped it, verbatim from the lines #4652 replaces. Every ban and every
+#: preserved phrase below is graded against this, for the reason `_PRE_3191_PROVENANCE` gives:
+#: a scan that had stopped matching the real prose would otherwise read as a clean file.
+_PRE_4652_PROVENANCE = (
+    "No retained log has ever booted that pairing (the scan the item ran covers `.log` back "
+    "to `.log.10`, whose mtime 2026-11-04 predates 14.5 GiB entirely, and shows only "
+    "-1012@15032385536, -1110@15569256448 and -1110@15032385536). So the price below is "
+    "arithmetic off the conf's own recorded readings, and stops short of claiming a boot died: "
+    "this build read 92,002 of 97,887 MiB at 11.5 GiB, so 14.5 GiB puts it at ~95,074 used.")
+
+#: A slot's `mtime` asserted in prose. Banned for the reason the block header gives: the
+#: rotation rewrites it and the comment cannot follow.
+_SLOT_MTIME = re.compile(r"whose mtime|\.log(?:\.\d+)? mtime")
+
+_AB_BUILD = re.compile(r"^A/B config: venv=\S*/vllm-flash-next-main((?:-\d{4})?)\b")
+_AB_KV_BYTES = re.compile(r"\bkv_bytes=(\d{6,})\b")
+_AB_KV_DTYPE = re.compile(r"\bkv_dtype=(\w+)")
+
+_LAUNCHER_TEST = Path(__file__).resolve().parent / "test_flash_next_launcher.py"
+
+
+def _vault_4449(name: str) -> Path:
+    """One of #4498's two committed files, present, or a FAILURE.
+
+    `_vault_witness` states the policy for #3191's extract and it applies here with more force:
+    these 11 `A/B config:` lines exist nowhere else once the rotation has shifted, so an absent
+    witness is not a box missing a fixture, it is the sentence "no retained log has ever booted
+    that pairing" losing its last record.
+    """
+    path = _vault() / "backlog" / "data" / name
+    if not path.is_file():
+        pytest.fail(f"{path} is gone from the vault. It is the only committed copy of the 11 "
+                    "A/B-config boots behind #4449's absence claim, and the 11-slot rotation it "
+                    "was cut from keeps deleting itself — an absent witness is the failure, not "
+                    "a skip")
+    return path
+
+
+def _4449_boots() -> list[tuple[str, str, str]]:
+    """`(build suffix, kv_bytes, kv_dtype)` for every `A/B config:` line of the extract.
+
+    Every such line has to parse, and that IS the check that the file is still those lines: a
+    header typed into it, a truncated config line, or boots appended from a later rotation all
+    fail here rather than sliding past a `wc -l` equality. The dating lines are skipped by the
+    `A/B config:` prefix, not by a line count.
+    """
+    out = []
+    for line in _vault_4449(_4449_WITNESS).read_text(encoding="utf-8").splitlines():
+        if not line.startswith("A/B config:"):
+            continue
+        m = _AB_BUILD.match(line)
+        kb, dt = _AB_KV_BYTES.search(line), _AB_KV_DTYPE.search(line)
+        assert m and kb and dt, (
+            f"{line[:88]!r} does not parse to `venv=…/vllm-flash-next-main…` plus `kv_bytes=` "
+            "plus `kv_dtype=`. The extract's contract is those lines and nothing else, and the "
+            "census the comment quotes is built from these three fields")
+        out.append((m.group(1) or "-main", kb.group(1), dt.group(1)))
+    return out
+
+
+def _4449_revert_comment() -> str:
+    """The `#4449` block comment of `tests/test_flash_next_launcher.py`, read from that file.
+
+    The comment, not a copy of it — and deliberately from ANOTHER module, which is the seam this
+    item exists because of: #4449's own nodes read the conf and the launcher, never their file's
+    shipped prose, so the comment rotted with its suite green. A node that carried its own
+    quotation of the right text would stay green again the same way. The `REVERT_KV_MAX` anchor
+    is what makes the read non-arbitrary: the block graded is the one sitting directly above the
+    constant whose price that comment justifies.
+    """
+    lines = _LAUNCHER_TEST.read_text(encoding="utf-8").splitlines()
+    start = next((i for i, ln in enumerate(lines) if ln.startswith("# ── #4449:")), None)
+    assert start is not None, "`# ── #4449:` no longer anchors: the provenance pin read nothing"
+    end = next((i for i in range(start + 1, len(lines)) if not lines[i].startswith("#")), None)
+    assert end is not None, "the `#4449` block comment never stops being a comment"
+    after = next((i for i in range(end, len(lines)) if lines[i].strip()), None)
+    assert after is not None and lines[after].startswith("REVERT_KV_MAX"), (
+        f"the block ends above {lines[after][:40]!r}, not above `REVERT_KV_MAX`: the arithmetic "
+        "that comment prices has moved away from it, so this pin is reading some other block")
+    return "\n".join(lines[start:end])
+
+
+def _4449_comment_flat() -> str:
+    """That block with its `#` gutters stripped and its line wraps joined — the sentence shape a
+    human at the keyboard actually reads, the same reason `_md_paragraphs` joins wraps."""
+    return " ".join(ln.lstrip("#").strip() for ln in _4449_revert_comment().splitlines())
+
+
+def test_the_4449_provenance_cites_the_committed_extract_and_not_a_slot():
+    """#4652 clauses 1 and 2: the comment above `REVERT_KV_MAX` names #4498's committed extract
+    and the `wc -l -c <` figure for it, labelled as at the 2026-11-21T18:49 PST capture with its
+    census, and carries neither a `.log.<N>` rotation index nor a slot's mtime.
+
+    Why the mtime ban belongs beside the index ban #3191 already had, and why this node lives in
+    this file rather than in the one it grades: an index is a name for whatever file happens to
+    be ten-deepest this week, and an mtime is a date attached to that name — the file's clock
+    moves when the rotation shifts, so `2026-11-04` had already become `2026-11-11` in the ten
+    days #4449 was open, with its suite green throughout. #4449's own nodes read `CONF` and
+    `LAUNCHER` and never their file's shipped prose, so a comment-only regression in that file
+    has no local enforcement and cannot have one: a module cannot fail on its own text without
+    this cross-module read, which is the seam #3191's `_pool_provenance_comment` already crosses
+    for `NO_BOOT_POOL`.
+
+    The byte figure is checked against the extract and the census against its parsed lines, not
+    against constants alone, so a re-cut extract plus a comment that follows it stays green while
+    a comment that lags goes red. Every ban is graded against the prose it replaced.
+    """
+    flat = _4449_comment_flat()
+    whole = _LAUNCHER_TEST.read_text(encoding="utf-8")
+
+    assert "predates 14.5 GiB entirely" not in whole, (
+        "the shipped comment is asserting what a rotation slot's retained history covers again "
+        "— the clause #4652 was filed to delete, and the one no rotation lets a comment keep")
+    assert "predates 14.5 GiB entirely" in _PRE_4652_PROVENANCE, (
+        "positive control: the sentence this ban replaced no longer holds the phrase, so the "
+        "ban has stopped matching real prose and its green means nothing")
+    assert not _ROTATION_INDEX.search(flat), (
+        f"a rotation index ({_ROTATION_INDEX.findall(flat)}) is back in the block: an index "
+        "names a slot in a rotation, not bytes — #3191's finding, shipped a second time")
+    assert _ROTATION_INDEX.findall(_PRE_4652_PROVENANCE) == [".log.10"], (
+        f"positive control: the index ban matched {_ROTATION_INDEX.findall(_PRE_4652_PROVENANCE)}"
+        " in the text it replaced, not ['.log.10']")
+    assert not _SLOT_MTIME.search(flat), (
+        f"a slot's mtime ({_SLOT_MTIME.findall(flat)}) is back in the block. Worse than an "
+        "index: the rotation rewrites that date on its own clock, so the comment cannot be "
+        "wrong more loudly, it can only be wrong silently")
+    assert _SLOT_MTIME.findall(_PRE_4652_PROVENANCE) == ["whose mtime"], (
+        f"positive control: the mtime ban matched {_SLOT_MTIME.findall(_PRE_4652_PROVENANCE)} in "
+        "the text it replaced, not ['whose mtime']")
+
+    assert f"backlog/data/{_4449_WITNESS}" in flat, (
+        "the block no longer names the committed extract, so a reader following the citation "
+        "goes back to the live rotation — the state #3191 was filed to end and #4652 re-ended")
+    assert _4449_HEADER in flat, (
+        f"the block no longer names `{_4449_HEADER}`, which is the only file recording that the "
+        "census is capture metadata rather than a reproducible reading")
+    m = re.search(r"\((\d+) lines / ([\d,]+) bytes", flat)
+    assert m, (
+        "the block names a path but not its `wc -l -c <` figure, so the citation cannot be "
+        "checked against the bytes it cites — the form #3191's clause 4 pinned")
+    measured = _wc_l_c(_vault_4449(_4449_WITNESS))
+    assert measured == (_4449_LINES, _4449_BYTES), (
+        f"the extract now measures {measured[0]} / {measured[1]}, not "
+        f"{_4449_LINES} / {_4449_BYTES}: it was re-cut, and #4498's predicted 3,380 B and the "
+        "landed 3,369 B already differed, so a figure that drifts silently is the failure mode")
+    assert (int(m.group(1)), int(m.group(2).replace(",", ""))) == measured, (
+        f"the block quotes {m.group(1)} lines / {m.group(2)} bytes and the extract measures "
+        f"{measured[0]} / {measured[1]} — the citation and the bytes have already parted, which "
+        "is how the last one rotted")
+    assert _4449_CAPTURE in flat, (
+        f"the census is no longer labelled as at {_4449_CAPTURE} PST. The rotation has been "
+        "deleting from this store ever since, so an undated census reads as a live reading")
+
+    boots = _4449_boots()
+    assert len(boots) == _4449_BOOTS, (
+        f"the extract parses to {len(boots)} A/B-config boots, not {_4449_BOOTS}, so the census "
+        "the block quotes is not the census these bytes carry")
+    assert len(boots) * 2 == _4449_LINES, (
+        f"{len(boots)} config lines and {_4449_LINES} total lines are not paired 1:1, so the "
+        "extract is either losing its dating lines or has grown lines of another kind")
+    counted = Counter(b[:2] for b in boots)
+    assert dict(counted) == _4449_CENSUS, (
+        f"the committed bytes tally {dict(counted)}, not {_4449_CENSUS}: the census the comment "
+        "quotes and the bytes it quotes disagree about a fact the witness can still settle")
+    assert sum(counted.values()) == _4449_BOOTS, (
+        "the census does not add up to the extract's boot count, so one figure is quoted from a "
+        "different capture of the store")
+    assert [(b[0], b[1]) for b in boots if b[2] == "bfloat16"] == [("-1012", "15032385536")], (
+        "the bfloat16 boot is no longer the single 6-of-`-1012@15032385536` line the comment's "
+        "'(one bfloat16)' marks, so that parenthesis is a different file's fact")
+    assert "one bfloat16" in flat, "the block stopped marking the one non-fp8 boot of the six"
+    undated = [b for b in boots if b[0] == "-main"]
+    assert len(undated) == _4449_UNDATED, (
+        f"the extract now carries {len(undated)} undated-`-main` boot(s), so the pairing the "
+        "whole block prices is no longer unbooted and the price is a measurement, not a "
+        "derivation — re-read #4449 before trusting any figure here")
+    for (suffix, kv), n in _4449_CENSUS.items():
+        assert f"{n} {suffix}@{kv}" in flat, (
+            f"the block no longer states the {n} `{suffix}@{kv}` boots the extract counts, so "
+            "the census is being asserted from memory rather than from the witness")
+    assert f"{_4449_UNDATED} undated `-main` = {_4449_BOOTS}" in flat, (
+        "the block no longer states the zero and the total together, which is the only form "
+        "that shows the reader the zero is a count of lines that are there")
+
+
+def test_the_4449_provenance_says_what_the_rotation_can_no_longer_reach():
+    """#4652 clause 3: the block says plainly that the live store is an 11-slot byte rotation
+    that no longer necessarily reaches back before the 14.5 GiB era's start, and that an extract
+    of the lines that ARE present cannot itself prove an absence.
+
+    The two halves are one argument, and the reason it has to be IN the comment rather than in
+    this docstring: the block's headline sentence is "No retained log has ever booted that
+    pairing", which after the next shift is a claim about bytes no disk holds. Naming the window
+    and its reach is what keeps that sentence reading as a dated record instead of a standing
+    fact, and saying the extract cannot prove an absence is what keeps the record from being
+    mistaken for the census. #2267's rule — a clause may not order a store to prove it empty —
+    is why this half stays prose and is never promoted into a green assertion.
+
+    The slot count is derived from the conf that sets the rotation, and the era's start from git,
+    so both figures in the prose are re-read rather than admired.
+    """
+    flat = _4449_comment_flat()
+
+    assert f"{_4449_SLOTS}-slot" in flat and "byte rotation" in flat, (
+        f"the block no longer says the live store is an {_4449_SLOTS}-slot byte rotation, so the "
+        "reader cannot tell that the citation next to it has an expiry date")
+    conf = CONF_SH.read_text(encoding="utf-8")
+    assert re.search(r"^stdout_logfile_maxbytes=10MB\s*$", conf, re.M), (
+        "the conf no longer caps the log at 10MB, so neither the byte rotation nor its slot "
+        "cadence in the comment is the one being measured")
+    assert "stdout_logfile_backups" not in conf, (
+        f"the conf now sets `stdout_logfile_backups`, so the store is no longer "
+        f"{_4449_SLOTS} files (supervisord's default 10 backups plus the active one) and the "
+        "comment's slot figure has to move with the setting, not stay and be false")
+
+    assert _4449_ERA_COMMIT in flat and _4449_ERA_START in flat, (
+        f"the block no longer dates the 14.5 GiB era to {_4449_ERA_START} (`{_4449_ERA_COMMIT}`), "
+        "so 'no longer necessarily reaches back' has no bound to be measured against")
+    shown = subprocess.run(["git", "-C", str(ROOT), "show", "-s", "--format=%ci",
+                           _4449_ERA_COMMIT], capture_output=True, text=True)
+    assert shown.returncode == 0, (
+        f"`git show -s --format=%ci {_4449_ERA_COMMIT}` exited {shown.returncode} "
+        f"({shown.stderr.strip()}): the commit the era is dated by is not in this tree, so the "
+        "era's start in the comment is unverifiable prose")
+    assert shown.stdout.strip().startswith(_4449_ERA_START), (
+        f"`{_4449_ERA_COMMIT}` is dated {shown.stdout.strip()}, not {_4449_ERA_START}: the "
+        "comment's era bound and the commit that opened the era have parted")
+    assert "no longer necessarily reaches back" in flat, (
+        "the block no longer says the window may fall short of the era's start, which is the "
+        "sentence that stops its opening claim reading as a current measurement")
+    assert "cannot itself prove an absence" in flat, (
+        "the block no longer says an extract of present lines cannot prove an absence, and that "
+        "is the exact misreading the 11 lines invite — #2267's rule, in the reader's face")
+    for missing in (f"{_4449_SLOTS}-slot", "cannot itself prove an absence", _4449_ERA_COMMIT):
+        assert missing not in _PRE_4652_PROVENANCE, (
+            f"control: the replaced text already said {missing!r}, so demanding it here grades "
+            "nothing — the constant is no longer the pre-fix prose")
+
+
+def test_the_4449_arithmetic_and_both_prohibitions_survive_the_repoint():
+    """#4652 clause 4: re-pointing the citation is a provenance fix, not a re-price. The card
+    reading, the derived figure, the free-space and safe-headroom readings, the derived ceiling
+    and both of the block's prohibitions have to survive it unchanged.
+
+    The prohibitions are the part a re-word loses. The block must keep disclaiming that a boot
+    of the unpriced pairing died (it never observed one, and the store cannot tell it either way
+    now), and must keep the ban on the undated build at any byte value rather than at 14.5 GiB
+    only — a pairing that has never been booted has no measured ceiling, so the number beside it
+    is a derived limit and not a tolerance. Both phrases are graded against the text #4449
+    shipped, so they are pinned as preservations and a green node means they were carried across,
+    not that they were newly written.
+
+    The arithmetic is checked as arithmetic: the free space is the card's cap less the used
+    reading plus the KV step, and the derived ceiling is only defensible while that remainder
+    sits under the headroom the same conf prices as safe.
+    """
+    flat = _4449_comment_flat()
+    src = _LAUNCHER_TEST.read_text(encoding="utf-8")
+
+    assert f"{_4449_KV_USED:,}" in flat and f"{_4449_KV_CAP:,}" in flat, (
+        f"the block no longer quotes the {_4449_KV_USED:,} of {_4449_KV_CAP:,} MiB card reading, "
+        "so the price beside the undated build is a number nobody can re-derive at 2 a.m — the "
+        "exact failure `_unpriced_revert_instructions` refuses in the conf")
+    used_plus_step = _4449_KV_USED + _4449_KV_STEP
+    free = _4449_KV_CAP - used_plus_step
+    assert f"~{used_plus_step:,}" in flat, (
+        f"the block no longer reads 14.5 GiB as ~{used_plus_step:,} MiB used off "
+        f"{_4449_KV_USED:,} + {_4449_KV_STEP:,}, so the step between the launcher's 11.5 GiB and "
+        "the serving 14.5 GiB has been re-typed rather than recomputed")
+    assert "~2,800" in flat and free == 2_813, (
+        f"the free reading is {free} MiB by the block's own figures, so '~2,800' is no longer "
+        "that number rounded down and the price has drifted from its derivation")
+    assert f"~{_4449_KV_FREE_SAFE:,}" in flat, (
+        f"the block no longer prices ~{_4449_KV_FREE_SAFE:,} MiB as the safe headroom, which is "
+        "the half of the argument that makes 2,813 MiB too small rather than merely small")
+    assert free < _4449_KV_FREE_SAFE, (
+        f"the remainder is {free} MiB against a {_4449_KV_FREE_SAFE:,} MiB headroom, so 14.0 GiB "
+        "is no longer the largest whole-GiB value under the ceiling — the revert value itself "
+        "needs re-deriving, not this node re-greening")
+
+    m = re.search(r"^REVERT_KV_MAX = (\d+)", src, re.M)
+    assert m and int(m.group(1)) == 15032385536, (
+        f"`REVERT_KV_MAX` is {m.group(1) if m else 'gone'}, not 15032385536: the block above is "
+        "the prose that justifies that ceiling, so a re-price and a re-point are one change and "
+        "belong in one item, not in a citation fix")
+    r = re.search(r'^REVERT_KV_READING = \("([\d,]+)", "([\d,]+)"\)', src, re.M)
+    assert r and (r.group(1), r.group(2)) == (f"{_4449_KV_USED:,}", f"{_4449_KV_CAP:,}"), (
+        f"`REVERT_KV_READING` is {(r.group(1), r.group(2)) if r else 'gone'}, not "
+        f"('{_4449_KV_USED:,}', '{_4449_KV_CAP:,}'), which is what the block quotes and what "
+        "_unpriced_revert_instructions requires an undated-build price to carry")
+
+    assert "stops short of claiming a boot died" in flat, (
+        "the block is claiming a boot of the unpriced pairing died. It observed no such boot, "
+        "and after the next shift its store cannot tell the claim either way")
+    assert "stops short of claiming a boot died" in _PRE_4652_PROVENANCE, (
+        "control: the death-disclaiming phrase is not in the prose #4449 shipped, so the assert "
+        "above is a new demand rather than the preservation clause 4 asked for")
+    assert "no `-main` boot at any byte value" in flat, (
+        "the block no longer bans the undated build at ANY byte value. A never-booted pairing has "
+        "no measured tolerance, so pinning the ban to one figure would read as leaving the rest "
+        "of the range open")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # §10's newest bar-clearing day: 2026-11-26 (#4613, after #3341, #3693, #4051, #4100, #4256)
 # ─────────────────────────────────────────────────────────────────────────────
